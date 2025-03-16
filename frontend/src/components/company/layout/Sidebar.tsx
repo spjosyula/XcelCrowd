@@ -1,0 +1,1 @@
+// Empty company sidebar component

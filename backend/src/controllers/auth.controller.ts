@@ -238,7 +238,6 @@ export class AuthController {
     }
   );
 
-  // ... existing private methods remain unchanged ...
   
   /**
    * Generate JWT token

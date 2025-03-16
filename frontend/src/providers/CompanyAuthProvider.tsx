@@ -1,0 +1,1 @@
+// Empty company auth provider
