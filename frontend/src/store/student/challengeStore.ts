@@ -1,1 +1,0 @@
-// Empty student challenge store

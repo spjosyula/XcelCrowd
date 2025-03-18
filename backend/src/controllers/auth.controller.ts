@@ -192,7 +192,7 @@ export class AuthController {
         ApiResponse.success(
           { 
             user, 
-            csrfToken 
+            csrfToken, 
           }, 
           'Company login successful'
         )

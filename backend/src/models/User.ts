@@ -1,5 +1,6 @@
 import mongoose, { Schema, model, Model } from 'mongoose';
 import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 import { IUser, UserRole } from './interfaces';
 
 /**
@@ -24,13 +25,37 @@ const userSchema = new Schema<IUser>({
     type: String,
     enum: Object.values(UserRole),
     required: [true, 'User role is required']
-  }
+  },
+  firstName: {
+    type: String,
+    trim: true
+  },
+  lastName: {
+    type: String,
+    trim: true
+  },
+  companyName: {
+    type: String,
+    trim: true
+  },
+  isEmailVerified: {
+    type: Boolean,
+    default: false
+  },
+  emailVerificationToken: String,
+  emailVerificationTokenExpires: Date,
+  passwordResetToken: String,
+  passwordResetTokenExpires: Date
 }, { 
   timestamps: true,
   versionKey: false,
   toJSON: {
     transform: (_, ret) => {
       delete ret.password;
+      delete ret.emailVerificationToken;
+      delete ret.emailVerificationTokenExpires;
+      delete ret.passwordResetToken;
+      delete ret.passwordResetTokenExpires;
       return ret;
     }
   }
@@ -64,6 +89,66 @@ userSchema.methods.comparePassword = async function(candidatePassword: string): 
  */
 userSchema.methods.getId = function(): string {
   return this._id.toString();
+};
+
+/**
+ * Generate email verification token
+ */
+userSchema.methods.generateEmailVerificationToken = function(): string {
+  // Generate a 6-digit OTP
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  
+  // Hash the OTP and store it
+  const hash = crypto.createHash('sha256').update(otp).digest('hex');
+  
+  this.emailVerificationToken = hash;
+  this.emailVerificationTokenExpires = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+  
+  return otp;
+};
+
+/**
+ * Verify email verification token
+ */
+userSchema.methods.verifyEmailToken = function(otp: string): boolean {
+  // If token is expired, return false
+  if (!this.emailVerificationTokenExpires || this.emailVerificationTokenExpires < new Date()) {
+    return false;
+  }
+  
+  // Hash the provided OTP and compare with stored hash
+  const hash = crypto.createHash('sha256').update(otp).digest('hex');
+  return this.emailVerificationToken === hash;
+};
+
+/**
+ * Generate password reset token
+ */
+userSchema.methods.generatePasswordResetToken = function(): string {
+  // Generate a 6-digit OTP
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  
+  // Hash the OTP and store it
+  const hash = crypto.createHash('sha256').update(otp).digest('hex');
+  
+  this.passwordResetToken = hash;
+  this.passwordResetTokenExpires = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+  
+  return otp;
+};
+
+/**
+ * Verify password reset token
+ */
+userSchema.methods.verifyPasswordResetToken = function(otp: string): boolean {
+  // If token is expired, return false
+  if (!this.passwordResetTokenExpires || this.passwordResetTokenExpires < new Date()) {
+    return false;
+  }
+  
+  // Hash the provided OTP and compare with stored hash
+  const hash = crypto.createHash('sha256').update(otp).digest('hex');
+  return this.passwordResetToken === hash;
 };
 
 // Create and export the User model

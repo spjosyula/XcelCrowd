@@ -1,105 +1,128 @@
 import { Request, Response, NextFunction } from 'express';
-import helmet from 'helmet';
+import xssClean from 'xss-clean';
+import crypto from 'crypto';
+import { ApiError } from '../utils/ApiError';
+import { HTTP_STATUS } from '../constants';
 import { logger } from '../utils/logger';
 
 /**
- * More robust XSS sanitization middleware
- * Replaces the simple sanitizeInput in validation.middleware.ts
+ * Enhanced XSS protection middleware
  */
-export const xssProtection = (req: Request, _res: Response, next: NextFunction) => {
-  try {
+export const xssProtection = (req: Request, res: Response, next: NextFunction) => {
+  // Apply xss-clean middleware
+  xssClean()(req, res, (err: Error | null) => {
+    if (err) return next(err);
+    
+    // Additional custom XSS protection for specific fields
     if (req.body) {
-      sanitizeObject(req.body);
-    }
-    
-    if (req.query) {
-      sanitizeObject(req.query);
-    }
-    
-    if (req.params) {
-      sanitizeObject(req.params);
+      // Sanitize common fields that might contain HTML
+      const fieldsToSanitize = ['description', 'content', 'message', 'text', 'html', 'comment'];
+      
+      for (const field of fieldsToSanitize) {
+        if (req.body[field] && typeof req.body[field] === 'string') {
+          req.body[field] = sanitizeHtml(req.body[field]);
+        }
+      }
+      
+      // Recursively sanitize nested objects
+      req.body = sanitizeObject(req.body);
     }
     
     next();
-  } catch (error) {
-    logger.error('Error in XSS protection middleware:', error);
-    next(error);
-  }
+  });
 };
-
-/**
- * Sanitize an object recursively
- */
-function sanitizeObject(obj: Record<string, any>): void {
-  for (const key in obj) {
-    if (obj.hasOwnProperty(key)) {
-      if (typeof obj[key] === 'string') {
-        // Sanitize string values
-        obj[key] = sanitizeString(obj[key]);
-      } else if (typeof obj[key] === 'object' && obj[key] !== null) {
-        // Recursively sanitize nested objects and arrays
-        sanitizeObject(obj[key]);
-      }
-    }
-  }
-}
-
-/**
- * Sanitize a string to prevent XSS attacks
- */
-function sanitizeString(input: string): string {
-  return input
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/'/g, '&#39;')
-    .replace(/"/g, '&quot;')
-    .replace(/`/g, '&#96;')
-    .replace(/\(/g, '&#40;')
-    .replace(/\)/g, '&#41;');
-}
 
 /**
  * Configure Content Security Policy
  */
-export const configureCSP = helmet.contentSecurityPolicy({
-  directives: {
-    defaultSrc: ["'self'"],
-    scriptSrc: ["'self'"],
-    styleSrc: ["'self'", "'unsafe-inline'"],
-    imgSrc: ["'self'", "data:", "https://*.cloudinary.com"], // Adjust for your image providers
-    connectSrc: ["'self'", process.env.FRONTEND_URL || "http://localhost:3000"],
-    fontSrc: ["'self'", "https://fonts.gstatic.com"],
-    objectSrc: ["'none'"],
-    frameSrc: ["'none'"],
-    upgradeInsecureRequests: [],
-  },
-});
-
-/**
- * CSRF protection middleware -> UNCOMMENT ONCE IN PRODUCTION
- */
-export const enhancedCsrfProtection = (req: Request, res: Response, next: NextFunction): void => {
-    // // Skip for GET requests and some specific endpoints that don't need CSRF protection
-    // if (req.method === 'GET' || 
-    //     req.path === '/api/auth/login' || 
-    //     req.path === '/api/auth/register') {
-    //   next();
-    //   return;
-    // }
-    
-    // const csrfToken = req.headers['x-csrf-token'] as string;
-    
-    // if (!csrfToken) {
-    //   logger.warn(`CSRF token missing for ${req.method} ${req.path}`);
-    //   res.status(403).json({
-    //     success: false,
-    //     message: 'CSRF protection: Invalid or missing token',
-    //     timestamp: new Date().toISOString()
-    //   });
-    //   return;
-    // }
+export const configureCSP = (req: Request, res: Response, next: NextFunction) => {
+  // Generate nonce for inline scripts if needed
+  const nonce = crypto.randomBytes(16).toString('base64');
+  res.locals.cspNonce = nonce;
   
-  // In a real implementation, validate against a token stored in the user's session
-  // For now, just check if the token exists
+  // Set CSP header
+  res.setHeader('Content-Security-Policy', `
+    default-src 'self';
+    script-src 'self' 'nonce-${nonce}' https://cdn.jsdelivr.net https://unpkg.com;
+    style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com;
+    img-src 'self' data: https://res.cloudinary.com;
+    font-src 'self' https://fonts.gstatic.com;
+    connect-src 'self' https://api.cloudinary.com;
+    frame-src 'none';
+    object-src 'none';
+    base-uri 'self';
+    form-action 'self';
+    frame-ancestors 'none';
+    block-all-mixed-content;
+    upgrade-insecure-requests;
+  `.replace(/\s+/g, ' ').trim());
+  
   next();
 };
+
+/**
+ * Enhanced CSRF protection middleware - UNCOMMENT IN PRODUCTION
+ */
+export const enhancedCsrfProtection = (req: Request, res: Response, next: NextFunction) => {
+  // // Skip for GET, HEAD, OPTIONS requests
+  // if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+  //   return next();
+  // }
+  
+  // // Skip for specific endpoints that don't need CSRF protection
+  // const skipPaths = ['/api/auth/login', '/api/auth/register'];
+  // if (skipPaths.some(path => req.path.includes(path))) {
+  //   return next();
+  // }
+  
+  // const csrfToken = req.headers['x-csrf-token'] as string;
+  
+  // // In a real implementation, validate against a token stored in the user's session
+  // // For now, we're just checking if the token exists
+  // if (!csrfToken) {
+  //   logger.warn(`CSRF token missing for ${req.method} ${req.path}`);
+  //   return next(new ApiError(HTTP_STATUS.FORBIDDEN, 'CSRF token missing'));
+  // }
+  
+  // // Continue if token exists (implement actual validation in production)
+  next();
+};
+
+/**
+ * Helper function to sanitize HTML content
+ */
+function sanitizeHtml(html: string): string {
+  // Basic sanitization - in production, use a more robust library like DOMPurify
+  return html
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+    .replace(/javascript:/gi, 'removed:')
+    .replace(/on\w+=/gi, 'removed=');
+}
+
+/**
+ * Helper function to recursively sanitize objects
+ */
+function sanitizeObject(obj: any): any {
+  if (typeof obj !== 'object' || obj === null) {
+    return obj;
+  }
+  
+  if (Array.isArray(obj)) {
+    return obj.map(item => sanitizeObject(item));
+  }
+  
+  const sanitized: Record<string, any> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (typeof value === 'string') {
+      sanitized[key] = sanitizeHtml(value);
+    } else if (typeof value === 'object' && value !== null) {
+      sanitized[key] = sanitizeObject(value);
+    } else {
+      sanitized[key] = value;
+    }
+  }
+  
+  return sanitized;
+}
+
+

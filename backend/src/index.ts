@@ -17,7 +17,7 @@ import { xssProtection, configureCSP, enhancedCsrfProtection } from './middlewar
 validateEnv();
 
 // Create Express application
-const app = express();
+export const app = express();
 
 // Trust proxy for proper IP detection behind a reverse proxy
 app.set('trust proxy', 1);
