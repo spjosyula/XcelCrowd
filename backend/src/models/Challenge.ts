@@ -1,5 +1,5 @@
 import mongoose, { Schema, model, Model } from 'mongoose';
-import { IChallenge, ChallengeStatus, ChallengeDifficulty } from './interfaces';
+import { IChallenge, ChallengeStatus, ChallengeDifficulty, ChallengeVisibility } from './interfaces';
 
 /**
  * Challenge schema definition
@@ -79,7 +79,25 @@ const challengeSchema = new Schema<IChallenge>({
     type: Number,
     default: 0,
     min: [0, 'Approved solutions count cannot be negative']
-  }
+  },
+  visibility: {
+    type: String,
+    enum: Object.values(ChallengeVisibility),
+    default: ChallengeVisibility.PUBLIC,
+    required: [true, 'Challenge visibility setting is required']
+  },
+  allowedInstitutions: [{
+    type: String,
+    required: function(this: any) {
+      return this.visibility === ChallengeVisibility.PRIVATE;
+    }
+  }],
+  isCompanyVisible: {
+    type: Boolean,
+    default: function(this: any) {
+      return this.visibility !== ChallengeVisibility.ANONYMOUS;
+    }
+  },
 }, {
   timestamps: true,
   versionKey: false,

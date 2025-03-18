@@ -6,7 +6,7 @@ import { HTTP_STATUS } from '../constants';
 import { logger } from '../utils/logger';
 
 /**
- * Enhanced XSS protection middleware
+ * XSS protection middleware
  */
 export const xssProtection = (req: Request, res: Response, next: NextFunction) => {
   // Apply xss-clean middleware
@@ -61,7 +61,7 @@ export const configureCSP = (req: Request, res: Response, next: NextFunction) =>
 };
 
 /**
- * Enhanced CSRF protection middleware - UNCOMMENT IN PRODUCTION
+ * Enhanced CSRF protection middleware - UNCOMMENT IN PRODUCTION, COMMENTED FOR EASIER TESTING
  */
 export const enhancedCsrfProtection = (req: Request, res: Response, next: NextFunction) => {
   // // Skip for GET, HEAD, OPTIONS requests
