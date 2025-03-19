@@ -9,7 +9,8 @@ import { logger } from '../utils/logger';
 import crypto from 'crypto';
 import { UserRole } from '../models';
 
-interface AuthTokenPayload {
+
+interface AuthTokenPayload { //specifies structure of data used to generate JWT token
   userId: string;
   email: string;
   role: string;
