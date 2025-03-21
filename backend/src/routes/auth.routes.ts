@@ -9,7 +9,9 @@ const router = express.Router();
 const authController = new AuthController();
 
 /**
- * Common auth routes
+ * @route   POST /api/auth/logout
+ * @desc    Logout current user
+ * @access  Private
  */
 router.post(
   '/logout',
@@ -17,6 +19,11 @@ router.post(
   authController.logout
 );
 
+/**
+ * @route   GET /api/auth/me
+ * @desc    Get current user information
+ * @access  Private
+ */
 router.get(
   '/me',
   authenticate,
@@ -24,7 +31,9 @@ router.get(
 );
 
 /**
- * Student auth routes
+ * @route   POST /api/auth/student/register
+ * @desc    Register a new student account
+ * @access  Public
  */
 router.post(
   '/student/register',
@@ -32,6 +41,11 @@ router.post(
   authController.registerStudent
 );
 
+/**
+ * @route   POST /api/auth/student/login
+ * @desc    Authenticate student and get token
+ * @access  Public
+ */
 router.post(
   '/student/login',
   loginRateLimiter,
@@ -40,7 +54,9 @@ router.post(
 );
 
 /**
- * Company auth routes
+ * @route   POST /api/auth/company/register
+ * @desc    Register a new company account
+ * @access  Public
  */
 router.post(
   '/company/register',
@@ -48,6 +64,11 @@ router.post(
   authController.registerCompany
 );
 
+/**
+ * @route   POST /api/auth/company/login
+ * @desc    Authenticate company and get token
+ * @access  Public
+ */
 router.post(
   '/company/login',
   loginRateLimiter,

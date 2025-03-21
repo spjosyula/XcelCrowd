@@ -127,6 +127,8 @@ export interface IChallenge extends Document, ITimestamps {
   category: string[];  // Categories or domains the challenge belongs to
   maxParticipants?: number;  // Maximum allowed number of participants
   currentParticipants: number;  // Current count of participants
+  completedAt?: Date;  // Date when the challenge was completed
+  publishedAt?: Date;  // Date when the challenge was published
   tags: string[];  // Keywords or tags associated with the challenge
   maxApprovedSolutions?: number;  // Maximum number of solutions that can be approved
   approvedSolutionsCount: number;  // Current count of approved solutions
@@ -164,6 +166,7 @@ export interface ISolution extends Document, ITimestamps {
   reviewedBy?: Types.ObjectId | IArchitectProfile;  // Architect who reviewed this solution
   reviewedAt?: Date;  // When the solution was reviewed
   score?: number;  // Numerical assessment of the solution quality
+  tags: string[];  // Keywords or tags associated with the solution
   selectedAt?: Date;  // When the solution was selected as exemplary
   selectedBy?: Types.ObjectId | IArchitectProfile;  // Architect who selected this solution
 }

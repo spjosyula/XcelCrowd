@@ -11,12 +11,12 @@ const userController = new UserController();
 /**
  * @route   POST /api/users
  * @desc    Create a new user (Admin only)
- * @access  Private
+ * @access  Private - Admin only
  */
 router.post(
   '/',
   authenticate,
-  authorize([UserRole.ADMIN]), // Only admins can create users directly
+  authorize([UserRole.ADMIN]),
   validateRequest(userValidation.createUser),
   userController.createUser
 );
@@ -35,7 +35,7 @@ router.get(
 /**
  * @route   PUT /api/users/:id
  * @desc    Update user
- * @access  Private
+ * @access  Private - User or Admin only
  */
 router.put(
   '/:id',
@@ -46,13 +46,13 @@ router.put(
 
 /**
  * @route   DELETE /api/users/:id
- * @desc    Delete user (Admin only)
- * @access  Private
+ * @desc    Delete user
+ * @access  Private - Admin only
  */
 router.delete(
   '/:id',
   authenticate,
-  authorize([UserRole.ADMIN]), // Only admins can delete users
+  authorize([UserRole.ADMIN]),
   userController.deleteUser
 );
 

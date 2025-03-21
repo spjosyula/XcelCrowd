@@ -1,1 +1,0 @@
-// Empty student user types

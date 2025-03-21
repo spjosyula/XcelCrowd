@@ -5,15 +5,12 @@ import {
   getChallengeSolutions,
   getSolutionById,
   updateSolution,
-  claimSolution,
-  reviewSolution,
   selectSolution,
   getArchitectReviews
 } from '../controllers/solution.controller';
 import { 
   validateSubmitSolution, 
-  validateUpdateSolution, 
-  validateReviewSolution 
+  validateUpdateSolution
 } from '../validations/solution.validation';
 import { authorize, authenticate } from '../middlewares/auth.middleware';
 import { UserRole } from '../models/interfaces';
@@ -94,31 +91,6 @@ router.put(
 );
 
 /**
- * @route   PATCH /api/solutions/:id/claim
- * @desc    Claim a solution for review
- * @access  Private - Architect only
- */
-router.patch(
-  '/:id/claim',
-  authenticate,
-  authorize([UserRole.ARCHITECT]),
-  claimSolution
-);
-
-/**
- * @route   PATCH /api/solutions/:id/review
- * @desc    Review a solution (approve/reject with feedback)
- * @access  Private - Reviewing architect only
- */
-router.patch(
-  '/:id/review',
-  authenticate,
-  authorize([UserRole.ARCHITECT]),
-  validateReviewSolution,
-  reviewSolution
-);
-
-/**
  * @route   PATCH /api/solutions/:id/select
  * @desc    Select a solution as a winner (by company)
  * @access  Private - Company (challenge owner) only
@@ -130,4 +102,4 @@ router.patch(
   selectSolution
 );
 
-export default router; 
+export default router;

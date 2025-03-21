@@ -7,73 +7,103 @@ import { UserRole } from '../models/interfaces';
 const router = Router();
 const architectController = new ArchitectController();
 
-/**
- * Architect routes
- * Base path: /api/architect
- * All routes require authentication and architect role
- */
-
 // Middleware to ensure only architects can access these routes
 const architectOnly = authorize([UserRole.ARCHITECT]);
 
-// Profile routes
+/**
+ * @route   GET /api/architect/profile
+ * @desc    Get architect's profile information
+ * @access  Private - Architect only
+ */
 router.get(
   '/profile',
   authenticate,
   architectOnly,
   architectController.getProfile
-); // Gets architect's profile information
+);
 
+/**
+ * @route   PUT /api/architect/profile
+ * @desc    Update architect's profile data
+ * @access  Private - Architect only
+ */
 router.put(
   '/profile',
   authenticate,
   architectOnly,
   architectController.updateProfile
-); // Updates architect's profile data
+);
 
-// Dashboard route
+/**
+ * @route   GET /api/architect/dashboard
+ * @desc    Retrieve statistics for architect's dashboard
+ * @access  Private - Architect only
+ */
 router.get(
   '/dashboard',
   authenticate,
   architectOnly,
   architectController.getDashboardStats
-); // Retrieves statistics for architect's dashboard
+);
 
-// Solution routes
+/**
+ * @route   GET /api/architect/solutions
+ * @desc    Get list of solutions pending review
+ * @access  Private - Architect only
+ */
 router.get(
   '/solutions',
   authenticate,
   architectOnly,
   architectController.getPendingSolutions
-); // Gets list of solutions pending review
+);
 
+/**
+ * @route   GET /api/architect/solutions/:id
+ * @desc    Get details of a specific solution
+ * @access  Private - Architect only
+ */
 router.get(
   '/solutions/:id',
   authenticate,
   architectOnly,
   architectController.getSolution
-); // Gets details of a specific solution
+);
 
+/**
+ * @route   POST /api/architect/solutions/:id/claim
+ * @desc    Claim a solution for review (once claimed, no other architect can see it)
+ * @access  Private - Architect only
+ */
 router.post(
-  '/solutions/:id/claim', //Once the architect claims, no other architect can see it
+  '/solutions/:id/claim',
   authenticate,
   architectOnly,
   architectController.claimSolution
-); // Marks a solution as claimed by this architect 
+);
 
+/**
+ * @route   POST /api/architect/solutions/:id/review
+ * @desc    Submit architect's review of a solution
+ * @access  Private - Architect only
+ */
 router.post(
   '/solutions/:id/review',
   authenticate,
   architectOnly,
   architectController.reviewSolution
-); // Submits architect's review of a solution
+);
 
-router.post('/challenges/:challengeId/select-solutions', 
+/**
+ * @route   POST /api/architect/challenges/:challengeId/select-solutions
+ * @desc    Select winning solutions for a specific challenge
+ * @access  Private - Architect only
+ */
+router.post(
+  '/challenges/:challengeId/select-solutions', 
   authenticate, 
   architectOnly,
   architectController.selectSolutionsForCompany
-); // Selects winning solutions for a specific challenge
-
-//In future, add /reviews/statistics route to get architect's review history
+);
 
 export default router;

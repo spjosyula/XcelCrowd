@@ -1,7 +1,8 @@
 import { Types } from 'mongoose';
-import { Solution, Challenge } from '../models';
-import { ISolution, SolutionStatus, ChallengeStatus } from '../models/interfaces';
+import { Solution, Challenge, StudentProfile } from '../models';
+import { ISolution, SolutionStatus, ChallengeStatus, ChallengeVisibility } from '../models/interfaces';
 import { ApiError } from '../utils/ApiError';
+import { logger } from '../utils/logger';
 
 /**
  * Service for solution-related operations
@@ -19,55 +20,78 @@ export class SolutionService {
     challengeId: string,
     solutionData: Partial<ISolution>
   ): Promise<ISolution> {
-    // Check if the challenge exists and is published
-    const challenge = await Challenge.findById(challengeId);
-    
-    if (!challenge) {
-      throw ApiError.notFound('Challenge not found');
+    try {
+      // Check if the challenge exists and is published
+      const challenge = await Challenge.findById(challengeId);
+      
+      if (!challenge) {
+        throw ApiError.notFound('Challenge not found');
+      }
+      
+      if (challenge.status !== ChallengeStatus.ACTIVE) {
+        throw ApiError.badRequest('Cannot submit solution to a challenge that is not active');
+      }
+      
+      // Check if deadline has passed
+      if (challenge.isDeadlinePassed()) {
+        throw ApiError.badRequest('Challenge deadline has passed, no new submissions are allowed');
+      }
+
+      // Verify student institution access for private challenges
+      if (challenge.visibility === ChallengeVisibility.PRIVATE && challenge.allowedInstitutions?.length) {
+        const studentProfile = await StudentProfile.findById(studentId);
+        
+        if (!studentProfile) {
+          throw ApiError.badRequest('Student profile not found');
+        }
+        
+        const studentUniversity = studentProfile.university;
+        
+        if (!studentUniversity || !challenge.allowedInstitutions.includes(studentUniversity)) {
+          throw ApiError.forbidden('You do not have permission to submit a solution to this challenge');
+        }
+      }
+      
+      // Check if the student has already submitted a solution
+      const existingSolution = await Solution.findOne({
+        challenge: challengeId,
+        student: studentId
+      });
+      
+      if (existingSolution) {
+        throw ApiError.conflict('You have already submitted a solution to this challenge');
+      }
+      
+      // Check if the challenge has reached maximum participants
+      if (challenge.maxParticipants && challenge.currentParticipants >= challenge.maxParticipants) {
+        throw ApiError.badRequest('This challenge has reached its maximum number of participants');
+      }
+      
+      // Create the solution
+      const solution = new Solution({
+        ...solutionData,
+        challenge: challengeId,
+        student: studentId,
+        status: SolutionStatus.SUBMITTED
+      });
+      
+      await solution.save();
+      
+      // Increment the current participants count
+      challenge.currentParticipants += 1;
+      await challenge.save();
+      
+      logger.info(`Student ${studentId} submitted solution for challenge ${challengeId}`);
+      
+      return solution.populate([
+        { path: 'challenge' },
+        { path: 'student' }
+      ]);
+    } catch (error) {
+      logger.error(`Error submitting solution: ${error instanceof Error ? error.message : String(error)}`);
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(500, 'Failed to submit solution');
     }
-    
-    if (challenge.status !== ChallengeStatus.ACTIVE) {
-      throw ApiError.badRequest('Cannot submit solution to a challenge that is not published');
-    }
-    
-    // Check if deadline has passed
-    if (challenge.isDeadlinePassed()) {
-      throw ApiError.badRequest('Challenge deadline has passed, no new submissions are allowed');
-    }
-    
-    // Check if the student has already submitted a solution
-    const existingSolution = await Solution.findOne({
-      challenge: challengeId,
-      student: studentId
-    });
-    
-    if (existingSolution) {
-      throw ApiError.conflict('You have already submitted a solution to this challenge');
-    }
-    
-    // Check if the challenge has reached maximum participants
-    if (challenge.maxParticipants && challenge.currentParticipants >= challenge.maxParticipants) {
-      throw ApiError.badRequest('This challenge has reached its maximum number of participants');
-    }
-    
-    // Create the solution
-    const solution = new Solution({
-      ...solutionData,
-      challenge: challengeId,
-      student: studentId,
-      status: SolutionStatus.SUBMITTED
-    });
-    
-    await solution.save();
-    
-    // Increment the current participants count
-    challenge.currentParticipants += 1;
-    await challenge.save();
-    
-    return solution.populate([
-      { path: 'challenge' },
-      { path: 'student' }
-    ]);
   }
 
   /**
@@ -106,13 +130,19 @@ export class SolutionService {
     studentId: string,
     updateData: Partial<ISolution>
   ): Promise<ISolution> {
+    // Find the solution with student verification
     const solution = await Solution.findOne({
       _id: solutionId,
       student: studentId
-    });
+    }).populate('challenge');
     
     if (!solution) {
       throw ApiError.notFound('Solution not found or you do not have permission to update it');
+    }
+    
+    // Check if the challenge deadline has passed
+    if (solution.challenge && (solution.challenge as any).isDeadlinePassed()) {
+      throw ApiError.badRequest('Challenge deadline has passed, no updates are allowed');
     }
     
     // Only allow updates if the solution is in submitted or rejected status
@@ -120,19 +150,22 @@ export class SolutionService {
       throw ApiError.badRequest('Cannot update a solution that is under review, approved, or selected');
     }
     
-    // Update allowed fields
-    if (updateData.title) solution.title = updateData.title;
-    if (updateData.description) solution.description = updateData.description;
-    if (updateData.submissionUrl) solution.submissionUrl = updateData.submissionUrl;
+    // Update only allowed fields using object assignment
+    const allowedUpdates = {
+      title: updateData.title,
+      description: updateData.description,
+      submissionUrl: updateData.submissionUrl
+    };
     
-    // Reset status to submitted if it was rejected
-    if (solution.status === SolutionStatus.REJECTED) {
-      solution.status = SolutionStatus.SUBMITTED;
-      solution.feedback = undefined;
-      solution.reviewedBy = undefined;
-      solution.reviewedAt = undefined;
-      solution.score = undefined;
-    }
+    // Only assign defined values
+    (Object.keys(allowedUpdates) as Array<keyof typeof allowedUpdates>).forEach(key => {
+      if (allowedUpdates[key] !== undefined) {
+        solution[key] = allowedUpdates[key];
+      }
+    });
+    
+    // Track the update
+    solution.updatedAt = new Date();
     
     await solution.save();
     

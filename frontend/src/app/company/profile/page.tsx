@@ -1,1 +1,0 @@
-// Empty company profile page

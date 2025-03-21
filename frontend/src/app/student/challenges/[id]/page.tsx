@@ -1,1 +1,0 @@
-// Empty challenge detail page

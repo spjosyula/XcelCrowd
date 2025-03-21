@@ -1,1 +1,0 @@
-// Empty submission list page
