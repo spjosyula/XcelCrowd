@@ -1,28 +1,26 @@
 import { Request, Response, NextFunction } from 'express';
 import { ArchitectService } from '../services/architect.service';
-import { architectProfileSchema, reviewSolutionSchema, filterSolutionsSchema } from '../validations/architect.validation';
+import { 
+  architectProfileSchema, 
+  reviewSolutionSchema, 
+  filterSolutionsSchema 
+} from '../validations/architect.validation';
 import { ApiError } from '../utils/ApiError';
-import { SolutionStatus, IArchitectProfile } from '../models/interfaces';
-import { Types } from 'mongoose';
-
-// Define the user property in the Request interface
-declare global {
-  namespace Express {
-    interface User {
-      userId: string;
-      email: string;
-      role: string;
-    }
-  }
-}
+import { SolutionStatus, UserRole } from '../models/interfaces';
+import { BaseController } from './BaseController';
+import { AuthRequest } from '../types/request.types';
+import { catchAsync } from '../utils/catchAsync';
+import { HTTP_STATUS } from '../constants';
 
 /**
  * Controller for architect-related operations
+ * Extends BaseController for standardized response handling
  */
-export class ArchitectController {
+export class ArchitectController extends BaseController {
   private architectService: ArchitectService;
 
   constructor() {
+    super();
     this.architectService = new ArchitectService();
   }
 
@@ -30,54 +28,50 @@ export class ArchitectController {
    * Get architect profile
    * @route GET /architect/profile
    */
-  getProfile = async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const userId = req.user?.userId;
-      if (!userId) {
-        throw ApiError.unauthorized('User not authenticated');
-      }
-
-      const profile = await this.architectService.getProfileByUserId(userId);
+  public getProfile = catchAsync(
+    async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      const profileId = this.getUserProfileId(req, UserRole.ARCHITECT);
+      const profile = await this.architectService.getProfileByUserId(req.user!.userId);
       
-      res.status(200).json({
-        success: true,
-        data: profile
-      });
-    } catch (error) {
-      next(error);
+      this.logAction('get-profile', req.user!.userId, { profileId });
+      this.sendSuccess(res, profile, 'Architect profile retrieved successfully');
     }
-  };
+  );
 
   /**
    * Create or update architect profile
    * @route PUT /architect/profile
    */
-  updateProfile = async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const userId = req.user?.userId;
-      if (!userId) {
-        throw ApiError.unauthorized('User not authenticated');
-      }
-
+  public updateProfile = catchAsync(
+    async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      this.verifyAuthorization(req, [UserRole.ARCHITECT]);
+      
+      // Validate request data
       const validatedData = architectProfileSchema.parse(req.body);
       
-      const updatedProfile = await this.architectService.createOrUpdateProfile(userId, validatedData);
+      const updatedProfile = await this.architectService.createOrUpdateProfile(
+        req.user!.userId, 
+        validatedData
+      );
       
-      res.status(200).json({
-        success: true,
-        data: updatedProfile
-      });
-    } catch (error) {
-      next(error);
+      this.logAction('update-profile', req.user!.userId);
+      this.sendSuccess(
+        res, 
+        updatedProfile, 
+        'Architect profile updated successfully'
+      );
     }
-  };
+  );
 
   /**
    * Get pending solutions for review
    * @route GET /architect/solutions
    */
-  getPendingSolutions = async (req: Request, res: Response, next: NextFunction) => {
-    try {
+  public getPendingSolutions = catchAsync(
+    async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      this.verifyAuthorization(req, [UserRole.ARCHITECT]);
+      
+      // Validate and parse query parameters
       const filters = filterSolutionsSchema.parse({
         status: req.query.status as SolutionStatus | undefined,
         challengeId: req.query.challengeId as string | undefined,
@@ -88,58 +82,56 @@ export class ArchitectController {
       
       const result = await this.architectService.getPendingSolutions(filters);
       
-      res.status(200).json({
-        success: true,
-        data: result.solutions,
-        pagination: {
+      this.sendPaginatedSuccess(
+        res,
+        result.solutions,
+        'Pending solutions retrieved successfully',
+        {
           total: result.total,
           page: result.page,
-          limit: result.limit,
-          pages: Math.ceil(result.total / result.limit)
+          limit: result.limit
         }
-      });
-    } catch (error) {
-      next(error);
+      );
     }
-  };
+  );
 
   /**
    * Get a specific solution by ID
    * @route GET /architect/solutions/:id
    */
-  getSolution = async (req: Request, res: Response, next: NextFunction) => {
-    try {
+  public getSolution = catchAsync(
+    async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      this.verifyAuthorization(req, [UserRole.ARCHITECT]);
+      
       const solutionId = req.params.id;
+      this.validateObjectId(solutionId, 'solution');
       
       const solution = await this.architectService.getSolutionById(solutionId);
       
-      res.status(200).json({
-        success: true,
-        data: solution
-      });
-    } catch (error) {
-      next(error);
+      this.sendSuccess(res, solution, 'Solution retrieved successfully');
     }
-  };
+  );
 
   /**
    * Review a solution
    * @route POST /architect/solutions/:id/review
    */
-  reviewSolution = async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const userId = req.user?.userId;
-      if (!userId) {
-        throw ApiError.unauthorized('User not authenticated');
-      }
-
+  public reviewSolution = catchAsync(
+    async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      this.verifyAuthorization(req, [UserRole.ARCHITECT]);
+      
       const solutionId = req.params.id;
+      this.validateObjectId(solutionId, 'solution');
+      
+      // Validate review data
       const reviewData = reviewSolutionSchema.parse(req.body);
       
-      // Get architect profile ID
-      const architectProfile = await this.architectService.getProfileByUserId(userId);
-      // Get the ID as a string safely
-      const architectId = (architectProfile as any)._id.toString();
+      // Get architect profile
+      const architectProfile = await this.architectService.getProfileByUserId(req.user!.userId);
+      if (!architectProfile || !architectProfile._id) {
+        throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Architect profile not found');
+      }
+      const architectId = architectProfile._id.toString();
       
       const updatedSolution = await this.architectService.reviewSolution(
         solutionId,
@@ -147,110 +139,122 @@ export class ArchitectController {
         reviewData
       );
       
-      res.status(200).json({
-        success: true,
-        data: updatedSolution
+      this.logAction('review-solution', req.user!.userId, { 
+        solutionId, 
+        status: reviewData.status 
       });
-    } catch (error) {
-      next(error);
+      
+      this.sendSuccess(
+        res, 
+        updatedSolution, 
+        'Solution reviewed successfully'
+      );
     }
-  };
+  );
 
   /**
    * Claim a solution for review
    * @route POST /architect/solutions/:id/claim
    */
-  claimSolution = async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const userId = req.user?.userId;
-      if (!userId) {
-        throw ApiError.unauthorized('User not authenticated');
-      }
-
-      const solutionId = req.params.id;
+  public claimSolution = catchAsync(
+    async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      this.verifyAuthorization(req, [UserRole.ARCHITECT]);
       
-      // Get architect profile ID
-      const architectProfile = await this.architectService.getProfileByUserId(userId);
-      // Get the ID as a string safely
-      const architectId = (architectProfile as any)._id.toString();
+      const solutionId = req.params.id;
+      this.validateObjectId(solutionId, 'solution');
+      
+      // Get architect profile
+      const architectProfile = await this.architectService.getProfileByUserId(req.user!.userId);
+      if (!architectProfile || !architectProfile._id) {
+        throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Architect profile not found');
+      }
+      const architectId = architectProfile._id.toString();
       
       const claimedSolution = await this.architectService.claimSolutionForReview(
         solutionId,
         architectId
       );
       
-      res.status(200).json({
-        success: true,
-        data: claimedSolution
-      });
-    } catch (error) {
-      next(error);
+      this.logAction('claim-solution', req.user!.userId, { solutionId });
+      
+      this.sendSuccess(
+        res, 
+        claimedSolution, 
+        'Solution successfully claimed for review'
+      );
     }
-  };
+  );
 
-  /**
+    /**
    * Get architect dashboard statistics
    * @route GET /architect/dashboard
    */
-  getDashboardStats = async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const userId = req.user?.userId;
-      if (!userId) {
-        throw ApiError.unauthorized('User not authenticated');
+    public getDashboardStats = catchAsync(
+      async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+        this.verifyAuthorization(req, [UserRole.ARCHITECT]);
+        
+        // Get architect profile
+        const architectProfile = await this.architectService.getProfileByUserId(req.user!.userId);
+        if (!architectProfile || !architectProfile._id) {
+          throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Architect profile not found');
+        }
+        const architectId = architectProfile._id.toString();
+        
+        const stats = await this.architectService.getDashboardStats(architectId);
+        
+        this.sendSuccess(res, stats, 'Dashboard statistics retrieved successfully');
       }
+    );
 
-      // Get architect profile ID
-      const architectProfile = await this.architectService.getProfileByUserId(userId);
-      // Get the ID as a string safely
-      const architectId = (architectProfile as any)._id.toString();
-      
-      const stats = await this.architectService.getDashboardStats(architectId);
-      
-      res.status(200).json({
-        success: true,
-        data: stats
-      });
-    } catch (error) {
-      next(error);
-    }
-  };
-
-    /**
+  /**
    * Select approved solutions to forward to the company
    * @route POST /architect/challenges/:challengeId/select-solutions
    */
-    selectSolutionsForCompany = async (req: Request, res: Response, next: NextFunction) => {
-      try {
-        const userId = req.user?.userId;
-        if (!userId) {
-          throw ApiError.unauthorized('User not authenticated');
-        }
-  
-        const challengeId = req.params.challengeId;
-        const { solutionIds } = req.body;
-  
-        if (!Array.isArray(solutionIds) || solutionIds.length === 0) {
-          throw ApiError.badRequest('At least one solution ID must be provided');
-        }
-  
-        // Get architect profile ID
-        const architectProfile = await this.architectService.getProfileByUserId(userId);
-        const architectId = (architectProfile as any)._id.toString();
-        
-        // Call service method to select solutions
-        const selectedSolutions = await this.architectService.selectSolutionsForCompany(
-          challengeId,
-          solutionIds,
-          architectId
+  public selectSolutionsForCompany = catchAsync(
+    async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      this.verifyAuthorization(req, [UserRole.ARCHITECT]);
+      
+      const challengeId = req.params.challengeId;
+      this.validateObjectId(challengeId, 'challenge');
+      
+      const { solutionIds } = req.body;
+      
+      if (!Array.isArray(solutionIds) || solutionIds.length === 0) {
+        throw new ApiError(
+          HTTP_STATUS.BAD_REQUEST, 
+          'At least one solution ID must be provided'
         );
-        
-        res.status(200).json({
-          success: true,
-          data: selectedSolutions,
-          message: 'Solutions have been successfully selected for the company'
-        });
-      } catch (error) {
-        next(error);
       }
-    };
-} 
+      
+      // Validate each solution ID
+      solutionIds.forEach(id => this.validateObjectId(id, 'solution'));
+      
+      // Get architect profile
+      const architectProfile = await this.architectService.getProfileByUserId(req.user!.userId);
+      if (!architectProfile || !architectProfile._id) {
+        throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Architect profile not found');
+      }
+      const architectId = architectProfile._id.toString();
+      
+      const selectedSolutions = await this.architectService.selectSolutionsForCompany(
+        challengeId,
+        solutionIds,
+        architectId
+      );
+      
+      this.logAction('select-solutions', req.user!.userId, { 
+        challengeId, 
+        solutionCount: solutionIds.length 
+      });
+      
+      this.sendSuccess(
+        res, 
+        selectedSolutions, 
+        'Solutions have been successfully selected for the company'
+      );
+    }
+  );
+}
+
+// Export singleton instance for consistency across routes
+export const architectController = new ArchitectController();

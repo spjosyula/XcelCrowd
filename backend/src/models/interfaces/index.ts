@@ -19,16 +19,13 @@ export enum UserRole {
 }
 
 /**
- * Base User interface
+ * Base User interface - core authentication fields only
  */
 export interface IUser {
   _id: Types.ObjectId;  // MongoDB unique identifier for the user
   email: string;  // User's email address, used for login and communications
   password: string;  // Hashed password for user authentication
-  role: UserRole;  // User's role in the system (student, company, architect, admin)
-  firstName?: string;  // User's first name (required for students and architects)
-  lastName?: string;  // User's last name (required for students and architects)
-  companyName?: string;  // Company name (required for company users)
+  role: UserRole;  // User's role in the system
   isEmailVerified: boolean;  // Indicates if the user's email has been verified
   emailVerificationToken?: string;  // Token sent to user for email verification
   emailVerificationTokenExpires?: Date;  // Expiration timestamp for the email verification token
@@ -38,12 +35,44 @@ export interface IUser {
 }
 
 /**
+ * Student user interface
+ */
+export interface IStudent extends IUser {
+  role: UserRole.STUDENT;
+}
+
+/**
+ * Company user interface
+ */
+export interface ICompany extends IUser {
+  role: UserRole.COMPANY;
+}
+
+/**
+ * Architect user interface
+ */
+export interface IArchitect extends IUser {
+  role: UserRole.ARCHITECT;
+  firstName: string;
+  lastName: string;
+}
+
+/**
+ * Admin user interface
+ */
+export interface IAdmin extends IUser {
+  role: UserRole.ADMIN;
+  firstName?: string;
+  lastName?: string;
+}
+
+/**
  * Student profile interface
  */
 export interface IStudentProfile extends Document, ITimestamps {
   user: Types.ObjectId | IUser;  // Reference to the user account this profile belongs to
-  firstName?: string;  // Student's first name
-  lastName?: string;  // Student's last name
+  firstName: string;  // Student's first name
+  lastName: string;  // Student's last name
   university?: string;  // Educational institution the student belongs to
   resumeUrl?: string;  // Link to the student's uploaded resume
   bio?: string;  // Student's personal description or introduction
@@ -59,10 +88,10 @@ export interface IStudentProfile extends Document, ITimestamps {
  */
 export interface ICompanyProfile extends Document, ITimestamps {
   user: Types.ObjectId | IUser;  // Reference to the user account this company profile belongs to
-  companyName?: string;  // Official name of the company
+  companyName: string;  // Official name of the company
   website?: string;  // Company's official website URL
   contactNumber?: string;  // Phone number or other contact information
-  industry?: string;  // Industry sector the company operates in
+  industry: string;  // Industry sector the company operates in
   description?: string;  // Company description, mission statement, or about information
   address?: string;  // Physical address or location of the company
 }

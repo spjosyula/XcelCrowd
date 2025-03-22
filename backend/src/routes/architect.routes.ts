@@ -1,11 +1,10 @@
 import { Router } from 'express';
-import { ArchitectController } from '../controllers/architect.controller';
+import { architectController } from '../controllers/architect.controller';
 import { authenticate } from '../middlewares/auth.middleware';
 import { authorize } from '../middlewares/auth.middleware';
 import { UserRole } from '../models/interfaces';
 
 const router = Router();
-const architectController = new ArchitectController();
 
 // Middleware to ensure only architects can access these routes
 const architectOnly = authorize([UserRole.ARCHITECT]);

@@ -1,12 +1,11 @@
 import express from 'express';
-import { ProfileController } from '../controllers/profile.controller';
+import { profileController } from '../controllers/profile.controller';
 import { authenticate, authorize } from '../middlewares/auth.middleware';
 import { validateRequest } from '../middlewares/validation.middleware';
 import { profileValidation } from '../validations/profile.validation';
 import { UserRole } from '../models';
 
 const router = express.Router();
-const profileController = new ProfileController();
 
 /**
  * @route   POST /api/profiles/student/:userId

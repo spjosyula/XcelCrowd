@@ -1,12 +1,23 @@
 import express from 'express';
-import { UserController } from '../controllers/user.controller';
+import { userController } from '../controllers/user.controller';
 import { authenticate, authorize } from '../middlewares/auth.middleware';
 import { validateRequest } from '../middlewares/validation.middleware';
 import { UserRole } from '../models';
 import { userValidation } from '../validations/user.validation';
 
 const router = express.Router();
-const userController = new UserController();
+
+/**
+ * @route   GET /api/users
+ * @desc    Get all users (with filtering and pagination)
+ * @access  Private - Admin only
+ */
+router.get(
+  '/',
+  authenticate,
+  authorize([UserRole.ADMIN]),
+  userController.getAllUsers
+);
 
 /**
  * @route   POST /api/users
@@ -24,7 +35,7 @@ router.post(
 /**
  * @route   GET /api/users/:id
  * @desc    Get user by ID
- * @access  Private
+ * @access  Private - Self or Admin only
  */
 router.get(
   '/:id',
@@ -35,7 +46,7 @@ router.get(
 /**
  * @route   PUT /api/users/:id
  * @desc    Update user
- * @access  Private - User or Admin only
+ * @access  Private - Self or Admin only
  */
 router.put(
   '/:id',

@@ -1,18 +1,11 @@
 import express from 'express';
-import {
-  submitSolution,
-  getStudentSolutions,
-  getChallengeSolutions,
-  getSolutionById,
-  updateSolution,
-  selectSolution,
-  getArchitectReviews
-} from '../controllers/solution.controller';
+import { solutionController } from '../controllers/solution.controller';
 import { 
   validateSubmitSolution, 
-  validateUpdateSolution
+  validateUpdateSolution,
+  validateReviewSolution
 } from '../validations/solution.validation';
-import { authorize, authenticate } from '../middlewares/auth.middleware';
+import { authorize, authenticate, authorizeInstitutionForChallenge } from '../middlewares/auth.middleware';
 import { UserRole } from '../models/interfaces';
 
 const router = express.Router();
@@ -26,8 +19,15 @@ router.post(
   '/',
   authenticate,
   authorize([UserRole.STUDENT]),
+  (req, res, next) => {
+    if (req.body && req.body.challenge) {
+      req.params.challengeId = req.body.challenge;
+      return authorizeInstitutionForChallenge('challengeId')(req, res, next);
+    }
+    next();
+  },
   validateSubmitSolution,
-  submitSolution
+  solutionController.submitSolution
 );
 
 /**
@@ -39,7 +39,7 @@ router.get(
   '/student',
   authenticate,
   authorize([UserRole.STUDENT]),
-  getStudentSolutions
+  solutionController.getStudentSolutions
 );
 
 /**
@@ -51,7 +51,7 @@ router.get(
   '/architect',
   authenticate,
   authorize([UserRole.ARCHITECT]),
-  getArchitectReviews
+  solutionController.getArchitectReviews
 );
 
 /**
@@ -63,7 +63,7 @@ router.get(
   '/challenge/:challengeId',
   authenticate,
   authorize([UserRole.COMPANY, UserRole.ARCHITECT, UserRole.ADMIN]),
-  getChallengeSolutions
+  solutionController.getChallengeSolutions
 );
 
 /**
@@ -74,7 +74,7 @@ router.get(
 router.get(
   '/:id',
   authenticate,
-  getSolutionById
+  solutionController.getSolutionById
 );
 
 /**
@@ -87,7 +87,32 @@ router.put(
   authenticate,
   authorize([UserRole.STUDENT]),
   validateUpdateSolution,
-  updateSolution
+  solutionController.updateSolution
+);
+
+/**
+ * @route   PATCH /api/solutions/:id/claim
+ * @desc    Claim a solution for review
+ * @access  Private - Architect only
+ */
+router.patch(
+  '/:id/claim',
+  authenticate,
+  authorize([UserRole.ARCHITECT]),
+  solutionController.claimSolution
+);
+
+/**
+ * @route   PATCH /api/solutions/:id/review
+ * @desc    Review a solution (approve/reject with feedback)
+ * @access  Private - Reviewing architect only
+ */
+router.patch(
+  '/:id/review',
+  authenticate,
+  authorize([UserRole.ARCHITECT]),
+  validateReviewSolution,
+  solutionController.reviewSolution
 );
 
 /**
@@ -99,7 +124,7 @@ router.patch(
   '/:id/select',
   authenticate,
   authorize([UserRole.COMPANY]),
-  selectSolution
+  solutionController.selectSolution
 );
 
 export default router;

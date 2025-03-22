@@ -1,15 +1,6 @@
 import express from 'express';
-import {
-  createChallenge,
-  getAllChallenges,
-  getChallengeById,
-  updateChallenge,
-  deleteChallenge,
-  closeChallenge,
-  completeChallenge,
-  getCompanyChallenges
-} from '../controllers/challenge.controller';
-import { authenticate, authorize } from '../middlewares/auth.middleware';
+import { challengeController } from '../controllers/challenge.controller';
+import { authenticate, authorize, authorizeInstitutionForChallenge } from '../middlewares/auth.middleware';
 import { validateCreateChallenge, validateUpdateChallenge } from '../validations/challenge.validation'
 import { UserRole } from '../models/interfaces';
 
@@ -25,17 +16,18 @@ router.post(
   authenticate,
   authorize([UserRole.COMPANY]),
   validateCreateChallenge,
-  createChallenge
+  challengeController.createChallenge
 );
 
 /**
  * @route   GET /api/challenges
  * @desc    Get all challenges with filters
- * @access  Public
+ * @access  Private - Authentication required (student-only platform)
  */
 router.get(
   '/',
-  getAllChallenges
+  authenticate, // Ensure user is authenticated (redundant with studentOnlyPlatform but explicit)
+  challengeController.getAllChallenges
 );
 
 /**
@@ -47,17 +39,19 @@ router.get(
   '/company',
   authenticate,
   authorize([UserRole.COMPANY]),
-  getCompanyChallenges
+  challengeController.getCompanyChallenges
 );
 
 /**
  * @route   GET /api/challenges/:id
  * @desc    Get a challenge by ID
- * @access  Public (with visibility restrictions)
+ * @access  Private - Authentication required + institution check for private challenges
  */
 router.get(
   '/:id',
-  getChallengeById
+  authenticate,
+  authorizeInstitutionForChallenge(),
+  challengeController.getChallengeById
 );
 
 /**
@@ -70,7 +64,7 @@ router.put(
   authenticate,
   authorize([UserRole.COMPANY]),
   validateUpdateChallenge,
-  updateChallenge
+  challengeController.updateChallenge
 );
 
 /**
@@ -82,7 +76,7 @@ router.delete(
   '/:id',
   authenticate,
   authorize([UserRole.COMPANY, UserRole.ADMIN]),
-  deleteChallenge
+  challengeController.deleteChallenge
 );
 
 /**
@@ -94,7 +88,7 @@ router.patch(
   '/:id/close',
   authenticate,
   authorize([UserRole.COMPANY]),
-  closeChallenge
+  challengeController.closeChallenge
 );
 
 /**
@@ -106,7 +100,7 @@ router.patch(
   '/:id/complete',
   authenticate,
   authorize([UserRole.COMPANY]),
-  completeChallenge
+  challengeController.completeChallenge
 );
 
 export default router;

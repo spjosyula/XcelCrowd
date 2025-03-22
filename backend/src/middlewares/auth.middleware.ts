@@ -5,8 +5,7 @@ import { ApiError } from '../utils/ApiError';
 import { logger } from '../utils/logger';
 import { UserRole } from '../models';
 import rateLimit from 'express-rate-limit';
-import helmet from 'helmet';
-import { expressjwt as jwtMiddleware } from 'express-jwt';
+import { Types } from 'mongoose';
 
 // Define interface for decoded JWT token
 interface DecodedToken {
@@ -141,6 +140,117 @@ export const authorize = (roles: UserRole[]) => {
     }
     
     next();
+  };
+};
+
+/**
+ * Student-only platform middleware
+ * 
+ * This middleware ensures that the entire platform is only accessible to authenticated users.
+ * It's designed to be applied globally to restrict public access to all platform resources.
+ * 
+ * @returns Express middleware function that handles the authorization
+ */
+export const studentOnlyPlatform = () => {
+  return (req: Request, res: Response, next: NextFunction) => {
+    // Skip for authentication routes, static assets, and other public paths
+    const publicPaths = [
+      '/api/auth/login',
+      '/api/auth/register',
+      '/api/auth/forgot-password',
+      '/api/auth/reset-password',
+      '/api/health'
+    ];
+    
+    // Check if the current path is in the public paths list or starts with /static/
+    const isPublicPath = publicPaths.includes(req.path) || 
+                        req.path.startsWith('/static/') ||
+                        req.path.startsWith('/api/auth/');
+    
+    if (isPublicPath) {
+      return next();
+    }
+    
+    // For all other paths, require authentication
+    if (!req.user) {
+      logger.warn(`Unauthenticated access attempt to restricted resource: ${req.path}`);
+      return next(new ApiError(
+        HTTP_STATUS.UNAUTHORIZED, 
+        'Authentication required. This platform is only accessible to registered students and companies.'
+      ));
+    }
+    
+    // User is authenticated, proceed
+    next();
+  };
+};
+
+/**
+ * Institution-based authorization middleware for private challenges
+ * 
+ * This middleware checks if a student from a particular institution 
+ * is allowed to access a private challenge based on the challenge's allowedInstitutions.
+ * 
+ * @param challengeParam - The parameter name in the request that contains the challenge ID (default: 'id')
+ * @returns Express middleware function that handles the authorization
+ */
+export const authorizeInstitutionForChallenge = (challengeParam: string = 'id') => {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      // Skip for non-student users (companies, architects, admins)
+      if (req.user?.role !== UserRole.STUDENT) {
+        return next();
+      }
+      
+      const challengeId = req.params[challengeParam];
+      
+      if (!challengeId || !Types.ObjectId.isValid(challengeId)) {
+        return next(new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid challenge ID'));
+      }
+      
+      // Import models here to avoid circular dependencies
+      const { default: Challenge } = await import('../models/Challenge');
+      const { default: StudentProfile } = await import('../models/StudentProfile');
+      
+      // Retrieve the challenge
+      const challenge = await Challenge.findById(challengeId);
+      
+      if (!challenge) {
+        return next(new ApiError(HTTP_STATUS.NOT_FOUND, 'Challenge not found'));
+      }
+      
+      // If challenge is not private, no institution check needed
+      if (challenge.visibility !== 'private') {
+        return next();
+      }
+      
+      // For private challenges, verify student's institution access
+      if (!req.user?.userId) {
+        return next(new ApiError(HTTP_STATUS.UNAUTHORIZED, 'Authentication required'));
+      }
+      
+      // Get student profile to check university
+      const studentProfile = await StudentProfile.findOne({ user: req.user.userId });
+      if (!studentProfile) {
+        return next(new ApiError(HTTP_STATUS.FORBIDDEN, 'Student profile not found'));
+      }
+      
+      const studentUniversity = studentProfile.university;
+      
+      // Verify institution access
+      if (!studentUniversity || !challenge.allowedInstitutions?.includes(studentUniversity)) {
+        logger.warn(`Institution access denied: User ${req.user.email} from ${studentUniversity || 'unknown'} institution attempted to access challenge restricted to ${challenge.allowedInstitutions?.join(', ')}`);
+        return next(new ApiError(
+          HTTP_STATUS.FORBIDDEN,
+          'You do not have permission to access this challenge'
+        ));
+      }
+      
+      // Institution access granted
+      next();
+    } catch (error) {
+      next(error);
+    }
   };
 };
 

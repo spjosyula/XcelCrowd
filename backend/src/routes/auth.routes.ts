@@ -1,12 +1,10 @@
 import express from 'express';
-import { AuthController } from '../controllers/auth.controller';
+import { authController } from '../controllers/auth.controller';
 import { authenticate, loginRateLimiter } from '../middlewares/auth.middleware';
 import { validateRequest } from '../middlewares/validation.middleware';
 import { authValidation } from '../validations/auth.validation';
-import { UserRole } from '../models';
 
 const router = express.Router();
-const authController = new AuthController();
 
 /**
  * @route   POST /api/auth/logout

@@ -26,18 +26,18 @@ const userSchema = new Schema<IUser>({
     enum: Object.values(UserRole),
     required: [true, 'User role is required']
   },
-  firstName: {
-    type: String,
-    trim: true
-  },
-  lastName: {
-    type: String,
-    trim: true
-  },
-  companyName: {
-    type: String,
-    trim: true
-  },
+  // firstName: {
+  //   type: String,
+  //   trim: true
+  // },
+  // lastName: {
+  //   type: String,
+  //   trim: true
+  // },
+  // companyName: {
+  //   type: String,
+  //   trim: true
+  // },
   isEmailVerified: {
     type: Boolean,
     default: false

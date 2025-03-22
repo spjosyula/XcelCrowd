@@ -12,6 +12,7 @@ import { errorHandler, notFoundHandler } from './middlewares/errorhandler.middle
 import { logger, logRequest } from './utils/logger';
 import { validateEnv, config } from './utils/config';
 import { xssProtection, configureCSP, enhancedCsrfProtection } from './middlewares/security.middleware';
+import { studentOnlyPlatform } from './middlewares/auth.middleware';
 
 // Validate environment variables before starting
 validateEnv();
@@ -63,12 +64,15 @@ app.use(hpp());
 app.use(morgan('dev'));
 app.use(logRequest);
 
+// Student-only platform middleware (restricts all access to authenticated users)
+app.use(studentOnlyPlatform());
+
 // Main routes
 app.use('/api', routes);
 
 // Base route
 app.get('/', (req: Request, res: Response) => {
-  res.json({ message: 'Welcome to XcelCrowd API' });
+  res.json({ message: 'Welcome to XcelCrowd API - Student-only platform' });
 });
 
 // Error handling

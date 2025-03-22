@@ -3,6 +3,8 @@ import { StudentProfile, CompanyProfile, IStudentProfile, ICompanyProfile, UserR
 import { ApiError } from '../utils/ApiError';
 import { HTTP_STATUS } from '../constants';
 import { UserService } from './user.service';
+import mongoose from 'mongoose';
+import { logger } from '../utils/logger';
 
 export interface CreateStudentProfileDTO {
     userId: string;
@@ -41,10 +43,15 @@ export class ProfileService {
     }
 
     /**
-     * Create student profile
-     */
+ * Create student profile with transaction support
+ */
     public async createStudentProfile(profileData: CreateStudentProfileDTO): Promise<IStudentProfile> {
+        // Start a MongoDB session for transaction support
+        const session = await mongoose.startSession();
+
         try {
+            session.startTransaction();
+
             // Validate user exists and has correct role
             const user = await this.userService.getUserById(profileData.userId);
             if (user.role !== UserRole.STUDENT) {
@@ -52,13 +59,13 @@ export class ProfileService {
             }
 
             // Check if profile already exists
-            const existingProfile = await StudentProfile.findOne({ user: profileData.userId });
+            const existingProfile = await StudentProfile.findOne({ user: profileData.userId }).session(session);
             if (existingProfile) {
                 throw new ApiError(HTTP_STATUS.CONFLICT, 'Student profile already exists');
             }
 
-            // Create profile
-            const profile = await StudentProfile.create({
+            // Create profile with session for transaction
+            const profile = await StudentProfile.create([{
                 user: profileData.userId,
                 firstName: profileData.firstName,
                 lastName: profileData.lastName,
@@ -70,12 +77,27 @@ export class ProfileService {
                 interests: profileData.interests || [],
                 followers: [],
                 following: []
-            });
+            }], { session });
 
-            return profile;
+            // Commit the transaction
+            await session.commitTransaction();
+
+            // Note: MongoDB's create returns an array when passed options with session
+            return profile[0];
         } catch (error) {
+            // Abort transaction on error
+            await session.abortTransaction();
+
+            logger.error(
+                `Error creating student profile: ${error instanceof Error ? error.message : String(error)}`,
+                { userId: profileData.userId, error }
+            );
+
             if (error instanceof ApiError) throw error;
             throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to create student profile');
+        } finally {
+            // Always end the session
+            session.endSession();
         }
     }
 
