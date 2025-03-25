@@ -1,8 +1,9 @@
 import express from 'express';
 import { challengeController } from '../controllers/challenge.controller';
-import { authenticate, authorize, authorizeInstitutionForChallenge } from '../middlewares/auth.middleware';
-import { validateCreateChallenge, validateUpdateChallenge } from '../validations/challenge.validation'
-import { UserRole } from '../models/interfaces';
+import { authenticate, authorizePattern } from '../middlewares/auth.middleware';
+import { validateRequest } from '../middlewares/validation.middleware';
+import { createChallengeSchemaWithRefinements, updateChallengeSchema } from '../validations/challenge.validation';
+import { AuthPattern } from '../types/authorization.types';
 
 const router = express.Router();
 
@@ -14,19 +15,20 @@ const router = express.Router();
 router.post(
   '/',
   authenticate,
-  authorize([UserRole.COMPANY]),
-  validateCreateChallenge,
+  authorizePattern(AuthPattern.COMPANY_ONLY),
+  validateRequest(createChallengeSchemaWithRefinements),
   challengeController.createChallenge
 );
 
 /**
  * @route   GET /api/challenges
  * @desc    Get all challenges with filters
- * @access  Private - Authentication required (student-only platform)
+ * @access  Private - Authentication required
  */
 router.get(
   '/',
-  authenticate, // Ensure user is authenticated (redundant with studentOnlyPlatform but explicit)
+  authenticate,
+  authorizePattern(AuthPattern.AUTHENTICATED),
   challengeController.getAllChallenges
 );
 
@@ -38,32 +40,32 @@ router.get(
 router.get(
   '/company',
   authenticate,
-  authorize([UserRole.COMPANY]),
+  authorizePattern(AuthPattern.COMPANY_ONLY),
   challengeController.getCompanyChallenges
 );
 
 /**
  * @route   GET /api/challenges/:id
  * @desc    Get a challenge by ID
- * @access  Private - Authentication required + institution check for private challenges
+ * @access  Private - Authentication required with dynamic permission checks
  */
 router.get(
   '/:id',
   authenticate,
-  authorizeInstitutionForChallenge(),
+  authorizePattern(AuthPattern.AUTHENTICATED),
   challengeController.getChallengeById
 );
 
 /**
  * @route   PUT /api/challenges/:id
  * @desc    Update a challenge
- * @access  Private - Challenge owner (Company) only
+ * @access  Private - Challenge owner (Company) or Admin only
  */
 router.put(
   '/:id',
   authenticate,
-  authorize([UserRole.COMPANY]),
-  validateUpdateChallenge,
+  authorizePattern(AuthPattern.RESOURCE_OWNER),
+  validateRequest(updateChallengeSchema),
   challengeController.updateChallenge
 );
 
@@ -75,32 +77,48 @@ router.put(
 router.delete(
   '/:id',
   authenticate,
-  authorize([UserRole.COMPANY, UserRole.ADMIN]),
+  authorizePattern(AuthPattern.RESOURCE_OWNER),
   challengeController.deleteChallenge
 );
 
 /**
  * @route   PATCH /api/challenges/:id/close
  * @desc    Close a challenge for submissions
- * @access  Private - Challenge owner (Company) only
+ * @access  Private - Challenge owner (Company) or Admin only
  */
 router.patch(
   '/:id/close',
   authenticate,
-  authorize([UserRole.COMPANY]),
+  authorizePattern(AuthPattern.RESOURCE_OWNER),
   challengeController.closeChallenge
 );
 
 /**
  * @route   PATCH /api/challenges/:id/complete
  * @desc    Complete a challenge (finalize after review process)
- * @access  Private - Challenge owner (Company) only
+ * @access  Private - Challenge owner (Company) or Admin only
  */
 router.patch(
   '/:id/complete',
   authenticate,
-  authorize([UserRole.COMPANY]),
+  authorizePattern(AuthPattern.RESOURCE_OWNER),
   challengeController.completeChallenge
 );
+
+// Add statistics route
+router.get(
+  '/:id/statistics',
+  authenticate,
+  authorizePattern(AuthPattern.RESOURCE_OWNER),
+  challengeController.getChallengeStatistics
+);
+
+// // Add solutions route -> to be implemented in future
+// router.get(
+//   '/:id/solutions',
+//   authenticate,
+//   authorizePattern(AuthPattern.RESOURCE_OWNER),
+//   challengeController.getChallengeSolutions
+// );
 
 export default router;

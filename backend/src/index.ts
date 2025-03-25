@@ -12,7 +12,7 @@ import { errorHandler, notFoundHandler } from './middlewares/errorhandler.middle
 import { logger, logRequest } from './utils/logger';
 import { validateEnv, config } from './utils/config';
 import { xssProtection, configureCSP, enhancedCsrfProtection } from './middlewares/security.middleware';
-import { studentOnlyPlatform } from './middlewares/auth.middleware';
+import { authenticatedUsersOnly } from './middlewares/auth.middleware';
 
 // Validate environment variables before starting
 validateEnv();
@@ -64,8 +64,8 @@ app.use(hpp());
 app.use(morgan('dev'));
 app.use(logRequest);
 
-// Student-only platform middleware (restricts all access to authenticated users)
-app.use(studentOnlyPlatform());
+//Platform middleware (restricts all access to authenticated users)
+app.use(authenticatedUsersOnly());
 
 // Main routes
 app.use('/api', routes);
@@ -82,19 +82,47 @@ app.use(errorHandler);
 // Start server
 const PORT = config.port;
 
+// Database connection with retry
+const connectDatabase = async (retryAttempt = 0) => {
+  const maxRetries = 5;
+  try {
+    await connectDB();
+    logger.info(`Database connected successfully`);
+    return true;
+  } catch (error: unknown) {
+    // Properly type the error for TypeScript
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorName = error instanceof Error ? error.name : 'Unknown Error';
+
+    logger.error(`MongoDB connection error: ${errorName}`, { error: errorMessage });
+    
+    if (retryAttempt < maxRetries) {
+      const delay = Math.min(1000 * (2 ** retryAttempt), 30000); // Exponential backoff with 30s max
+      logger.info(`Will retry connection in ${delay/1000} seconds (attempt ${retryAttempt + 1})`);
+      
+      setTimeout(() => {
+        connectDatabase(retryAttempt + 1);
+      }, delay);
+    } else {
+      logger.error(`Failed to connect to database after ${maxRetries} attempts.`);
+      // Don't crash the server - just log the failure
+    }
+    return false;
+  }
+};
+
 // Handle server start with better error handling
 const startServer = async () => {
   try {
-    const server = app.listen(PORT, async () => {
-      try {
-        await connectDB();
-        logger.info(`Server running in ${config.env} mode on port ${PORT}`);
-      } catch (error) {
-        logger.error('Failed to connect to database:', error);
-        server.close(() => {
-          process.exit(1);
-        });
-      }
+    const server = app.listen(PORT, () => {
+      logger.info(`Server running in ${config.env} mode on port ${PORT}`);
+      
+      // Connect to database after server starts (don't block server startup)
+      connectDatabase().catch((error: unknown) => {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        logger.error('Database connection failed initially, retry mechanism activated:', { error: errorMessage });
+        // Don't crash the server - let the retry mechanism handle it
+      });
     });
 
     // Improved error handling for the server
@@ -103,7 +131,7 @@ const startServer = async () => {
         logger.error(`Port ${PORT} is already in use. Please use another port or stop the service using this port.`);
         process.exit(1);
       } else {
-        logger.error('Server error:', error);
+        logger.error('Server error:', { error: error.message });
         process.exit(1);
       }
     });
@@ -114,18 +142,25 @@ const startServer = async () => {
     });
 
     // Handle unhandled promise rejections
-    process.on('unhandledRejection', (err: Error) => {
-      logger.error('UNHANDLED REJECTION! 💥 Shutting down...', err);
-      // Close server & exit process
-      server.close(() => {
-        process.exit(1);
-      });
-    });
-
-    // Handle uncaught exceptions
-    process.on('uncaughtException', (err: Error) => {
-      logger.error('UNCAUGHT EXCEPTION! 💥 Shutting down...', err);
-      process.exit(1);
+    process.on('unhandledRejection', (err: unknown) => {
+      // Safely check error properties
+      const error = err as Error;
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const errorName = error instanceof Error ? error.name : 'Unknown Error';
+      
+      // Check if it's a MongoDB connection error
+      if (errorName === 'MongooseServerSelectionError' || 
+          errorName === 'MongoServerSelectionError' ||
+          (errorMessage && errorMessage.includes('Server selection timed out'))) {
+        logger.error('MongoDB connection issue detected in unhandledRejection handler:', { error: errorMessage });
+        // Don't shut down - let the retry mechanism work
+      } else {
+        // For other unhandled rejections, maintain existing behavior
+        logger.error('UNHANDLED REJECTION! 💥 Shutting down...', { error: errorMessage });
+        server.close(() => {
+          process.exit(1);
+        });
+      }
     });
 
     // Graceful shutdown for SIGTERM
@@ -136,8 +171,9 @@ const startServer = async () => {
       });
     });
 
-  } catch (error) {
-    logger.error('Failed to start server:', error);
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    logger.error('Failed to start server:', { error: errorMessage });
     process.exit(1);
   }
 };

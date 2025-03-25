@@ -6,6 +6,7 @@ import { logger } from '../utils/logger';
 import { UserRole } from '../models';
 import rateLimit from 'express-rate-limit';
 import { Types } from 'mongoose';
+import { AuthPattern, authPatternRoles } from '../types/authorization.types';
 
 // Define interface for decoded JWT token
 interface DecodedToken {
@@ -151,7 +152,7 @@ export const authorize = (roles: UserRole[]) => {
  * 
  * @returns Express middleware function that handles the authorization
  */
-export const studentOnlyPlatform = () => {
+export const authenticatedUsersOnly = () => {
   return (req: Request, res: Response, next: NextFunction) => {
     // Skip for authentication routes, static assets, and other public paths
     const publicPaths = [
@@ -181,6 +182,68 @@ export const studentOnlyPlatform = () => {
     }
     
     // User is authenticated, proceed
+    next();
+  };
+};
+
+/**
+ * Authorization middleware based on predefined patterns
+ * Uses the AuthPattern enum to apply consistent access control across the application
+ * 
+ * @param pattern - The authorization pattern to apply
+ * @returns Express middleware function that handles the authorization
+ */
+export const authorizePattern = (pattern: AuthPattern) => {
+  return (req: Request, res: Response, next: NextFunction) => {
+    // If pattern is PUBLIC, allow access without authentication
+    if (pattern === AuthPattern.PUBLIC) {
+      return next();
+    }
+    
+    // Check if user is authenticated
+    if (!req.user) {
+      return next(new ApiError(HTTP_STATUS.UNAUTHORIZED, 'Authentication required'));
+    }
+    
+    // Get the roles allowed for this pattern
+    const allowedRoles = authPatternRoles[pattern];
+    
+    // If no roles defined (shouldn't happen with correct enum usage)
+    if (!allowedRoles) {
+      logger.error(`Invalid authorization pattern: ${pattern}`);
+      return next(new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Authorization configuration error'));
+    }
+    
+    // For self-only patterns, perform additional checks
+    if (pattern === AuthPattern.SELF_ONLY) {
+      const userId = req.params.userId || req.body.userId;
+      if (userId && userId !== req.user.userId) {
+        return next(new ApiError(HTTP_STATUS.FORBIDDEN, 'You can only access your own resources'));
+      }
+      return next();
+    }
+    
+    // For self-or-admin patterns
+    if (pattern === AuthPattern.SELF_OR_ADMIN) {
+      const userId = req.params.userId || req.body.userId;
+      if (req.user.role === UserRole.ADMIN || (userId && userId === req.user.userId)) {
+        return next();
+      }
+      return next(new ApiError(HTTP_STATUS.FORBIDDEN, 'You do not have permission to perform this action'));
+    }
+    
+    // Standard role-based authorization
+    if (!allowedRoles.includes(req.user.role as UserRole)) {
+      logger.warn(`Unauthorized access attempt: User ${req.user.email} (${req.user.role}) attempted to access resource restricted to ${allowedRoles.join(', ')}`);
+      return next(
+        new ApiError(
+          HTTP_STATUS.FORBIDDEN,
+          'You do not have permission to perform this action'
+        )
+      );
+    }
+    
+    // If we get here, the user is authorized
     next();
   };
 };

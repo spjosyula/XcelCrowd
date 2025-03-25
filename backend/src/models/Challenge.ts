@@ -154,6 +154,7 @@ challengeSchema.index({ status: 1, deadline: 1 });
 challengeSchema.index({ company: 1 });
 challengeSchema.index({ category: 1 });
 challengeSchema.index({ tags: 1 });
+challengeSchema.index({ status: 1, company: 1 }); // For company-specific status queries
 
 /**
  * Create and export the Challenge model

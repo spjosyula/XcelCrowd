@@ -174,7 +174,9 @@ export interface IChallenge extends Document, ITimestamps {
  * Solution status enum
  */
 export enum SolutionStatus {
+  DRAFT = 'draft',  // Solution is being created but not yet submitted
   SUBMITTED = 'submitted',  // Initial state when solution is first submitted
+  CLAIMED = 'claimed',  // Solution has been claimed for review by an architect
   UNDER_REVIEW = 'under_review',  // Solution is being reviewed by architects
   APPROVED = 'approved',  // Solution has been approved by reviewers
   REJECTED = 'rejected',  // Solution has been rejected by reviewers

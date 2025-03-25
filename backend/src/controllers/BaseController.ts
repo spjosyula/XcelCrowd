@@ -1,118 +1,179 @@
 import { Response } from 'express';
-import { HTTP_STATUS } from '../constants';
-import { ApiResponse } from '../utils/ApiResponse';
-import { logger } from '../utils/logger';
 import { AuthRequest } from '../types/request.types';
 import { ApiError } from '../utils/ApiError';
+import { HTTP_STATUS } from '../constants';
 import { UserRole } from '../models/interfaces';
+import { AuthorizationService, OwnershipCheck, RelationshipCheck } from '../utils/authorization';
+import { Types } from 'mongoose';
+import { logger } from '../utils/logger';
+import { PaginationResult } from '../utils/paginationUtils';
 
 /**
- * Base controller with shared response handling methods and utilities
- * All controllers should extend this class for consistency
+ * Base controller with standardized responses and authorization methods
  */
-export abstract class BaseController {
+export class BaseController {
   /**
-   * Send success response with standardized format
+   * Verify that the user is authorized based on role
    */
-  protected sendSuccess<T>(
-    res: Response, 
-    data: T, 
-    message: string, 
-    statusCode: number = HTTP_STATUS.OK,
-    meta?: Record<string, any>
-  ): void {
-    res.status(statusCode).json(
-      ApiResponse.success(data, message, meta)
-    );
+  protected verifyAuthorization(req: AuthRequest, allowedRoles?: UserRole[]): void {
+    AuthorizationService.verifyRole(req, allowedRoles || []);
   }
-  
+
   /**
-   * Send paginated response with standardized format
+   * Get the profile ID for a user with a specific role
+   */
+  protected getUserProfileId(req: AuthRequest, expectedRole: UserRole): string {
+    return AuthorizationService.getUserProfileId(req, expectedRole);
+  }
+
+  /**
+   * Verify that the authenticated user owns a resource
+   */
+  protected verifyResourceOwnership(
+    req: AuthRequest,
+    resource: any,
+    ownerIdField: string,
+    ownerRole: UserRole,
+    message?: string
+  ): void {
+    const ownershipCheck: OwnershipCheck = {
+      resource,
+      resourceOwnerIdField: ownerIdField,
+      ownerRole,
+      message
+    };
+
+    AuthorizationService.verifyOwnership(req, ownershipCheck);
+  }
+
+  /**
+   * Verify a custom relationship between user and resource
+   */
+  protected async verifyRelationship(
+    req: AuthRequest,
+    resource: any,
+    check: (req: AuthRequest, resource: any) => boolean | Promise<boolean>,
+    message: string
+  ): Promise<void> {
+    const relationshipCheck: RelationshipCheck = {
+      check,
+      message
+    };
+
+    await AuthorizationService.verifyRelationship(req, resource, relationshipCheck);
+  }
+
+  /**
+   * Comprehensive authorization check
+   */
+  protected async authorize(
+    req: AuthRequest,
+    options: {
+      allowedRoles?: UserRole[];
+      resource?: any;
+      ownerIdField?: string;
+      ownerRole?: UserRole;
+      relationshipCheck?: (req: AuthRequest, resource: any) => boolean | Promise<boolean>;
+      failureMessage?: string;
+    }
+  ): Promise<void> {
+    const {
+      allowedRoles,
+      resource,
+      ownerIdField,
+      ownerRole,
+      relationshipCheck,
+      failureMessage
+    } = options;
+
+    // Prepare checks
+    const authOptions: {
+      allowedRoles?: UserRole[];
+      ownershipCheck?: OwnershipCheck;
+      relationshipCheck?: RelationshipCheck;
+    } = {};
+
+    if (allowedRoles) {
+      authOptions.allowedRoles = allowedRoles;
+    }
+
+    if (resource && ownerIdField && ownerRole) {
+      authOptions.ownershipCheck = {
+        resource,
+        resourceOwnerIdField: ownerIdField,
+        ownerRole,
+        message: failureMessage
+      };
+    }
+
+    if (resource && relationshipCheck) {
+      authOptions.relationshipCheck = {
+        check: relationshipCheck,
+        message: failureMessage || 'You do not have permission to access this resource'
+      };
+    }
+
+    await AuthorizationService.authorize(req, authOptions);
+  }
+
+  /**
+   * Validate that a string is a valid MongoDB ObjectId
+   */
+  protected validateObjectId(id: string, resourceName: string): void {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new ApiError(
+        HTTP_STATUS.BAD_REQUEST,
+        `Invalid ${resourceName} ID format`,
+        true,
+        'INVALID_ID_FORMAT'
+      );
+    }
+  }
+
+  /**
+   * Log an action for audit purposes
+   */
+  protected logAction(action: string, userId: string, metadata?: Record<string, any>): void {
+    logger.info(`Action ${action} performed by user ${userId}`, { action, userId, ...metadata });
+  }
+
+  /**
+   * Send a success response
+   */
+  protected sendSuccess(
+    res: Response,
+    data: any,
+    message: string = 'Operation successful',
+    statusCode: number = HTTP_STATUS.OK
+  ): void {
+    res.status(statusCode).json({
+      success: true,
+      message,
+      data
+    });
+  }
+
+  /**
+   * Send a paginated success response
    */
   protected sendPaginatedSuccess<T>(
     res: Response,
-    data: T[],
-    message: string,
-    {
-      total,
-      page,
-      limit
-    }: {
-      total: number;
-      page: number;
-      limit: number;
-    },
+    result: PaginationResult<T>,
+    message: string = 'Operation successful',
     statusCode: number = HTTP_STATUS.OK
   ): void {
-    this.sendSuccess(
-      res,
-      data,
+    res.status(statusCode).json({
+      success: true,
       message,
-      statusCode,
-      {
-        total,
-        page,
-        limit,
-        totalPages: Math.ceil(total / limit)
+      data: result.data,
+      meta: {
+        total: result.total,
+        page: result.page,
+        limit: result.limit,
+        totalPages: result.totalPages,
+        hasNextPage: result.hasNextPage,
+        hasPrevPage: result.hasPrevPage
       }
-    );
-  }
-
-  /**
-   * Verify user is authenticated and optionally has required role
-   * Throws ApiError if not authorized
-   */
-  protected verifyAuthorization(req: AuthRequest, allowedRoles?: UserRole[]): void {
-    if (!req.user) {
-      throw new ApiError(HTTP_STATUS.UNAUTHORIZED, 'Authentication required');
-    }
-
-    if (allowedRoles && !allowedRoles.includes(req.user.role as UserRole)) {
-      throw new ApiError(
-        HTTP_STATUS.FORBIDDEN, 
-        'You do not have permission to perform this action'
-      );
-    }
-  }
-
-  /**
-   * Get user profile ID with verification
-   * Throws ApiError if profile not found
-   */
-  protected getUserProfileId(req: AuthRequest, role?: UserRole): string {
-    this.verifyAuthorization(req, role ? [role] : undefined);
-    
-    const profileId = req.user?.profile?.toString();
-    
-    if (!profileId) {
-      throw new ApiError(
-        HTTP_STATUS.UNAUTHORIZED, 
-        `${req.user?.role || 'User'} profile not found`
-      );
-    }
-    
-    return profileId;
-  }
-
-  /**
-   * Validate MongoDB ObjectId
-   * Throws ApiError if invalid
-   */
-  protected validateObjectId(id: string, entityName: string = 'entity'): void {
-    if (!/^[0-9a-fA-F]{24}$/.test(id)) {
-      throw new ApiError(HTTP_STATUS.BAD_REQUEST, `Invalid ${entityName} ID format`);
-    }
-  }
-
-  /**
-   * Log controller actions with standardized format
-   */
-  protected logAction(action: string, userId?: string, details?: Record<string, any>): void {
-    logger.info({
-      action,
-      userId: userId || 'anonymous',
-      timestamp: new Date().toISOString(),
-      ...details
     });
   }
 }

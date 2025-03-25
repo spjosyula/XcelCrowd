@@ -1,6 +1,6 @@
 import { Response, NextFunction } from 'express';
 import { 
-  ProfileService, 
+  profileService,
   CreateStudentProfileDTO, 
   UpdateStudentProfileDTO,
   CreateCompanyProfileDTO,
@@ -10,19 +10,16 @@ import { HTTP_STATUS } from '../constants';
 import { catchAsync } from '../utils/catchAsync';
 import { BaseController } from './BaseController';
 import { AuthRequest } from '../types/request.types';
-import { ApiError } from '../utils/ApiError';
 import { UserRole } from '../models/interfaces';
 
 /**
  * Profile controller for handling profile-related HTTP requests
  * Extends BaseController for standardized response handling
+ * All business logic is delegated to the ProfileService
  */
 export class ProfileController extends BaseController {
-  private profileService: ProfileService;
-
   constructor() {
     super();
-    this.profileService = new ProfileService();
   }
 
   /**
@@ -32,22 +29,29 @@ export class ProfileController extends BaseController {
    */
   public createStudentProfile = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      // Verify user has student role
       this.verifyAuthorization(req, [UserRole.STUDENT]);
       const { userId } = req.params;
       
-      // Ensure users can only create their own profile
-      this.validateSelfOperation(req, userId);
+      // Authorization: ensure users can only create their own profile
+      await profileService.authorizeSelfOperation(
+        req.user!.userId, 
+        userId, 
+        'create-student-profile'
+      );
       
-      // Validate userId format
+      // Validate userId format (already done in service, but keeping for clarity)
       this.validateObjectId(userId, 'user');
       
+      // Prepare data and delegate to service
       const profileData: CreateStudentProfileDTO = {
         userId,
         ...req.body
       };
       
-      const profile = await this.profileService.createStudentProfile(profileData);
+      const profile = await profileService.createStudentProfile(profileData);
       
+      // Log action and send response
       this.logAction('student-profile-create', req.user!.userId);
       
       this.sendSuccess(
@@ -72,27 +76,18 @@ export class ProfileController extends BaseController {
       // Validate userId format
       this.validateObjectId(userId, 'user');
       
-      // Allow the user to access their own profile, or company/admin/architect roles to access any profile
-      const isSelfAccess = req.user!.userId === userId;
-      const hasAccessRole = [UserRole.COMPANY, UserRole.ADMIN, UserRole.ARCHITECT]
-                             .includes(req.user!.role as UserRole);
-                             
-      if (!isSelfAccess && !hasAccessRole) {
-        throw new ApiError(
-          HTTP_STATUS.FORBIDDEN,
-          'You do not have permission to view this profile'
-        );
-      }
+      // Authorization: check if user can access this profile
+      await profileService.authorizeProfileReadAccess(
+        req.user!.userId,
+        req.user!.role as UserRole,
+        userId,
+        'student'
+      );
       
-      const profile = await this.profileService.getStudentProfileByUserId(userId);
+      // Get profile via service
+      const profile = await profileService.getStudentProfileByUserId(userId);
       
-      if (!profile) {
-        throw new ApiError(
-          HTTP_STATUS.NOT_FOUND,
-          'Student profile not found'
-        );
-      }
-      
+      // Log action and send response
       this.logAction('student-profile-view', req.user!.userId, { targetUserId: userId });
       
       this.sendSuccess(
@@ -110,26 +105,22 @@ export class ProfileController extends BaseController {
    */
   public updateStudentProfile = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      // Verify user has student role
       this.verifyAuthorization(req, [UserRole.STUDENT]);
       const { userId } = req.params;
       
-      // Ensure users can only update their own profile
-      this.validateSelfOperation(req, userId);
+      // Authorization: ensure users can only update their own profile
+      await profileService.authorizeSelfOperation(
+        req.user!.userId, 
+        userId, 
+        'update-student-profile'
+      );
       
-      // Validate userId format
-      this.validateObjectId(userId, 'user');
-      
+      // Update profile via service
       const updateData: UpdateStudentProfileDTO = req.body;
+      const profile = await profileService.updateStudentProfile(userId, updateData);
       
-      const profile = await this.profileService.updateStudentProfile(userId, updateData);
-      
-      if (!profile) {
-        throw new ApiError(
-          HTTP_STATUS.NOT_FOUND,
-          'Student profile not found'
-        );
-      }
-      
+      // Log action and send response
       this.logAction('student-profile-update', req.user!.userId);
       
       this.sendSuccess(
@@ -147,22 +138,26 @@ export class ProfileController extends BaseController {
    */
   public createCompanyProfile = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      // Verify user has company role
       this.verifyAuthorization(req, [UserRole.COMPANY]);
       const { userId } = req.params;
       
-      // Ensure users can only create their own profile
-      this.validateSelfOperation(req, userId);
+      // Authorization: ensure users can only create their own profile
+      await profileService.authorizeSelfOperation(
+        req.user!.userId, 
+        userId, 
+        'create-company-profile'
+      );
       
-      // Validate userId format
-      this.validateObjectId(userId, 'user');
-      
+      // Prepare data and delegate to service
       const profileData: CreateCompanyProfileDTO = {
         userId,
         ...req.body
       };
       
-      const profile = await this.profileService.createCompanyProfile(profileData);
+      const profile = await profileService.createCompanyProfile(profileData);
       
+      // Log action and send response
       this.logAction('company-profile-create', req.user!.userId);
       
       this.sendSuccess(
@@ -187,27 +182,18 @@ export class ProfileController extends BaseController {
       // Validate userId format
       this.validateObjectId(userId, 'user');
       
-      // Allow the user to access their own profile, or admin/architect roles to access any profile
-      const isSelfAccess = req.user!.userId === userId;
-      const hasAccessRole = [UserRole.ADMIN, UserRole.ARCHITECT]
-                             .includes(req.user!.role as UserRole);
-                             
-      if (!isSelfAccess && !hasAccessRole) {
-        throw new ApiError(
-          HTTP_STATUS.FORBIDDEN,
-          'You do not have permission to view this profile'
-        );
-      }
+      // Authorization: check if user can access this profile
+      await profileService.authorizeProfileReadAccess(
+        req.user!.userId,
+        req.user!.role as UserRole,
+        userId,
+        'company'
+      );
       
-      const profile = await this.profileService.getCompanyProfileByUserId(userId);
+      // Get profile via service
+      const profile = await profileService.getCompanyProfileByUserId(userId);
       
-      if (!profile) {
-        throw new ApiError(
-          HTTP_STATUS.NOT_FOUND,
-          'Company profile not found'
-        );
-      }
-      
+      // Log action and send response
       this.logAction('company-profile-view', req.user!.userId, { targetUserId: userId });
       
       this.sendSuccess(
@@ -225,26 +211,22 @@ export class ProfileController extends BaseController {
    */
   public updateCompanyProfile = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      // Verify user has company role
       this.verifyAuthorization(req, [UserRole.COMPANY]);
       const { userId } = req.params;
       
-      // Ensure users can only update their own profile
-      this.validateSelfOperation(req, userId);
+      // Authorization: ensure users can only update their own profile
+      await profileService.authorizeSelfOperation(
+        req.user!.userId, 
+        userId, 
+        'update-company-profile'
+      );
       
-      // Validate userId format
-      this.validateObjectId(userId, 'user');
-      
+      // Update profile via service
       const updateData: UpdateCompanyProfileDTO = req.body;
+      const profile = await profileService.updateCompanyProfile(userId, updateData);
       
-      const profile = await this.profileService.updateCompanyProfile(userId, updateData);
-      
-      if (!profile) {
-        throw new ApiError(
-          HTTP_STATUS.NOT_FOUND,
-          'Company profile not found'
-        );
-      }
-      
+      // Log action and send response
       this.logAction('company-profile-update', req.user!.userId);
       
       this.sendSuccess(
@@ -254,19 +236,6 @@ export class ProfileController extends BaseController {
       );
     }
   );
-
-  /**
-   * Verify that the authenticated user is operating on their own data
-   * @private
-   */
-  private validateSelfOperation(req: AuthRequest, targetUserId: string): void {
-    if (req.user!.userId !== targetUserId) {
-      throw new ApiError(
-        HTTP_STATUS.FORBIDDEN,
-        'You can only manage your own profile'
-      );
-    }
-  }
 }
 
 // Export singleton instance for use in routes

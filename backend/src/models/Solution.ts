@@ -67,7 +67,7 @@ const solutionSchema = new Schema<ISolution>({
   },
   selectedBy: {
     type: Schema.Types.ObjectId,
-    ref: 'ArchitectProfile'
+    ref: 'CompanyProfile'
   }
 }, {
   timestamps: true,
@@ -99,6 +99,11 @@ solutionSchema.index({ challenge: 1, student: 1 }, { unique: true });
 solutionSchema.index({ status: 1 });
 solutionSchema.index({ reviewedBy: 1 });
 solutionSchema.index({ selectedBy: 1 });
+solutionSchema.index({ reviewedBy: 1, status: 1 });
+solutionSchema.index({ reviewedAt: -1 });
+solutionSchema.index({ student: 1 });
+solutionSchema.index({ challenge: 1 });
+solutionSchema.index({ challenge: 1, status: 1 });
 
 /**
  * Create and export the Solution model

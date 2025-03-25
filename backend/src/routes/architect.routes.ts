@@ -1,13 +1,15 @@
 import { Router } from 'express';
 import { architectController } from '../controllers/architect.controller';
-import { authenticate } from '../middlewares/auth.middleware';
-import { authorize } from '../middlewares/auth.middleware';
-import { UserRole } from '../models/interfaces';
+import { authenticate, authorizePattern } from '../middlewares/auth.middleware';
+import { validateRequest } from '../middlewares/validation.middleware';
+import { AuthPattern } from '../types/authorization.types';
+import { 
+  architectProfileSchema, 
+  reviewSolutionSchema,
+  selectSolutionsSchema 
+} from '../validations/architect.validation';
 
 const router = Router();
-
-// Middleware to ensure only architects can access these routes
-const architectOnly = authorize([UserRole.ARCHITECT]);
 
 /**
  * @route   GET /api/architect/profile
@@ -17,7 +19,7 @@ const architectOnly = authorize([UserRole.ARCHITECT]);
 router.get(
   '/profile',
   authenticate,
-  architectOnly,
+  authorizePattern(AuthPattern.ARCHITECT_ONLY),
   architectController.getProfile
 );
 
@@ -29,20 +31,9 @@ router.get(
 router.put(
   '/profile',
   authenticate,
-  architectOnly,
+  authorizePattern(AuthPattern.ARCHITECT_ONLY),
+  validateRequest(architectProfileSchema),
   architectController.updateProfile
-);
-
-/**
- * @route   GET /api/architect/dashboard
- * @desc    Retrieve statistics for architect's dashboard
- * @access  Private - Architect only
- */
-router.get(
-  '/dashboard',
-  authenticate,
-  architectOnly,
-  architectController.getDashboardStats
 );
 
 /**
@@ -53,7 +44,7 @@ router.get(
 router.get(
   '/solutions',
   authenticate,
-  architectOnly,
+  authorizePattern(AuthPattern.ARCHITECT_ONLY),
   architectController.getPendingSolutions
 );
 
@@ -65,7 +56,7 @@ router.get(
 router.get(
   '/solutions/:id',
   authenticate,
-  architectOnly,
+  authorizePattern(AuthPattern.ARCHITECT_ONLY),
   architectController.getSolution
 );
 
@@ -77,7 +68,7 @@ router.get(
 router.post(
   '/solutions/:id/claim',
   authenticate,
-  architectOnly,
+  authorizePattern(AuthPattern.ARCHITECT_ONLY),
   architectController.claimSolution
 );
 
@@ -89,7 +80,8 @@ router.post(
 router.post(
   '/solutions/:id/review',
   authenticate,
-  architectOnly,
+  authorizePattern(AuthPattern.ARCHITECT_ONLY),
+  validateRequest(reviewSolutionSchema),
   architectController.reviewSolution
 );
 
@@ -101,7 +93,8 @@ router.post(
 router.post(
   '/challenges/:challengeId/select-solutions', 
   authenticate, 
-  architectOnly,
+  authorizePattern(AuthPattern.ARCHITECT_ONLY),
+  validateRequest(selectSolutionsSchema),
   architectController.selectSolutionsForCompany
 );
 

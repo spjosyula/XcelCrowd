@@ -3,6 +3,7 @@ import { User, IUser, UserRole, StudentProfile, Solution, CompanyProfile, Archit
 import { ApiError } from '../utils/ApiError';
 import { HTTP_STATUS } from '../constants';
 import { logger } from '../utils/logger';
+import { executePaginatedQuery, PaginationOptions, PaginationResult } from '../utils/paginationUtils';
 
 /**
  * Extended interface for user documents from MongoDB
@@ -12,6 +13,7 @@ export interface UserDocument extends Omit<Document, '_id'>, IUser {
   _id: Types.ObjectId;  // Explicitly define _id as ObjectId
   comparePassword(password: string): Promise<boolean>;
 }
+
 export interface CreateUserDTO {
   email: string;
   password: string;
@@ -84,46 +86,27 @@ export class UserService {
       throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to retrieve user');
     }
   }
-    /**
+
+  /**
    * Get users with pagination and filtering
    * @param filters - MongoDB filter object
    * @param options - Pagination and sorting options
    */
   public async getUsers(
     filters: Record<string, any> = {},
-    options: { 
-      page: number; 
-      limit: number; 
-      sortBy?: string; 
-      sortOrder?: 'asc' | 'desc' 
-    }
-  ): Promise<{ users: IUser[]; total: number; page: number; limit: number }> {
+    options: PaginationOptions
+  ): Promise<PaginationResult<IUser>> {
     try {
-      const { page = 1, limit = 10, sortBy = 'createdAt', sortOrder = 'desc' } = options;
-      
-      // Calculate skip value for pagination
-      const skip = (page - 1) * limit;
-      
-      // Create sort object
-      const sort: Record<string, 1 | -1> = {};
-      sort[sortBy] = sortOrder === 'asc' ? 1 : -1;
-      
-      // Execute queries in parallel for better performance
-      const [users, total] = await Promise.all([
-        User.find(filters)
-          .sort(sort)
-          .skip(skip)
-          .limit(limit)
-          .lean(),
-        User.countDocuments(filters)
-      ]);
-      
-      return {
-        users,
-        total,
-        page,
-        limit
-      };
+      return await executePaginatedQuery<IUser>(
+        User,
+        filters,
+        {
+          page: options.page || 1,
+          limit: options.limit || 10,
+          sortBy: options.sortBy || 'createdAt',
+          sortOrder: options.sortOrder || 'desc'
+        }
+      );
     } catch (error) {
       logger.error(
         `Error retrieving users: ${error instanceof Error ? error.message : String(error)}`,
@@ -161,8 +144,8 @@ export class UserService {
   }
 
   /**
- * Delete user and all associated data (cascade delete)
- */
+   * Delete user and all associated data (cascade delete)
+   */
   public async deleteUser(userId: string): Promise<void> {
     const session = await mongoose.startSession();
 
@@ -219,3 +202,6 @@ export class UserService {
     }
   }
 }
+
+// Create and export singleton instance
+export const userService = new UserService();
