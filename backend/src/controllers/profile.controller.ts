@@ -4,10 +4,11 @@ import {
   CreateStudentProfileDTO, 
   UpdateStudentProfileDTO,
   CreateCompanyProfileDTO,
-  UpdateCompanyProfileDTO
+  UpdateCompanyProfileDTO,
+  ProfileService
 } from '../services/profile.service';
 import { HTTP_STATUS } from '../constants';
-import { catchAsync } from '../utils/catchAsync';
+import { catchAsync } from '../utils/catch.async';
 import { BaseController } from './BaseController';
 import { AuthRequest } from '../types/request.types';
 import { UserRole } from '../models/interfaces';
@@ -18,8 +19,10 @@ import { UserRole } from '../models/interfaces';
  * All business logic is delegated to the ProfileService
  */
 export class ProfileController extends BaseController {
+  private readonly profileService: ProfileService;
   constructor() {
     super();
+    this.profileService = profileService;
   }
 
   /**
@@ -34,7 +37,7 @@ export class ProfileController extends BaseController {
       const { userId } = req.params;
       
       // Authorization: ensure users can only create their own profile
-      await profileService.authorizeSelfOperation(
+      await this.profileService.authorizeSelfOperation(
         req.user!.userId, 
         userId, 
         'create-student-profile'
@@ -49,7 +52,7 @@ export class ProfileController extends BaseController {
         ...req.body
       };
       
-      const profile = await profileService.createStudentProfile(profileData);
+      const profile = await this.profileService.createStudentProfile(profileData);
       
       // Log action and send response
       this.logAction('student-profile-create', req.user!.userId);
@@ -85,7 +88,7 @@ export class ProfileController extends BaseController {
       );
       
       // Get profile via service
-      const profile = await profileService.getStudentProfileByUserId(userId);
+      const profile = await this.profileService.getStudentProfileByUserId(userId);
       
       // Log action and send response
       this.logAction('student-profile-view', req.user!.userId, { targetUserId: userId });
@@ -110,7 +113,7 @@ export class ProfileController extends BaseController {
       const { userId } = req.params;
       
       // Authorization: ensure users can only update their own profile
-      await profileService.authorizeSelfOperation(
+      await this.profileService.authorizeSelfOperation(
         req.user!.userId, 
         userId, 
         'update-student-profile'
@@ -118,7 +121,7 @@ export class ProfileController extends BaseController {
       
       // Update profile via service
       const updateData: UpdateStudentProfileDTO = req.body;
-      const profile = await profileService.updateStudentProfile(userId, updateData);
+      const profile = await this.profileService.updateStudentProfile(userId, updateData);
       
       // Log action and send response
       this.logAction('student-profile-update', req.user!.userId);
@@ -143,7 +146,7 @@ export class ProfileController extends BaseController {
       const { userId } = req.params;
       
       // Authorization: ensure users can only create their own profile
-      await profileService.authorizeSelfOperation(
+      await this.profileService.authorizeSelfOperation(
         req.user!.userId, 
         userId, 
         'create-company-profile'
@@ -155,7 +158,7 @@ export class ProfileController extends BaseController {
         ...req.body
       };
       
-      const profile = await profileService.createCompanyProfile(profileData);
+      const profile = await this.profileService.createCompanyProfile(profileData);
       
       // Log action and send response
       this.logAction('company-profile-create', req.user!.userId);
@@ -183,7 +186,7 @@ export class ProfileController extends BaseController {
       this.validateObjectId(userId, 'user');
       
       // Authorization: check if user can access this profile
-      await profileService.authorizeProfileReadAccess(
+      await this.profileService.authorizeProfileReadAccess(
         req.user!.userId,
         req.user!.role as UserRole,
         userId,
@@ -191,7 +194,7 @@ export class ProfileController extends BaseController {
       );
       
       // Get profile via service
-      const profile = await profileService.getCompanyProfileByUserId(userId);
+      const profile = await this.profileService.getCompanyProfileByUserId(userId);
       
       // Log action and send response
       this.logAction('company-profile-view', req.user!.userId, { targetUserId: userId });
@@ -216,7 +219,7 @@ export class ProfileController extends BaseController {
       const { userId } = req.params;
       
       // Authorization: ensure users can only update their own profile
-      await profileService.authorizeSelfOperation(
+      await this.profileService.authorizeSelfOperation(
         req.user!.userId, 
         userId, 
         'update-company-profile'
@@ -224,7 +227,7 @@ export class ProfileController extends BaseController {
       
       // Update profile via service
       const updateData: UpdateCompanyProfileDTO = req.body;
-      const profile = await profileService.updateCompanyProfile(userId, updateData);
+      const profile = await this.profileService.updateCompanyProfile(userId, updateData);
       
       // Log action and send response
       this.logAction('company-profile-update', req.user!.userId);

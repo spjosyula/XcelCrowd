@@ -1,9 +1,12 @@
 import { Response, NextFunction } from 'express';
-import { solutionService } from '../services/solution.service'; // Import the singleton
+import { SolutionService, solutionService } from '../services/solution.service'; 
 import { HTTP_STATUS, SolutionStatus, UserRole } from '../models/interfaces';
 import { BaseController } from './BaseController';
 import { AuthRequest } from '../types/request.types';
-import { catchAsync } from '../utils/catchAsync';
+import { catchAsync } from '../utils/catch.async';
+import { validateObjectId } from '../utils/mongoUtils';
+import { logger } from '../utils/logger';
+import { ProfileService, profileService } from '../services/profile.service';
 
 /**
  * Controller for solution-related operations
@@ -11,8 +14,13 @@ import { catchAsync } from '../utils/catchAsync';
  * All business logic is delegated to the SolutionService
  */
 export class SolutionController extends BaseController {
+  private readonly solutionService: SolutionService;
+  private readonly profileService: ProfileService;
+
   constructor() {
     super();
+    this.solutionService = solutionService;
+    this.profileService = profileService;
   }
 
   /**
@@ -22,31 +30,47 @@ export class SolutionController extends BaseController {
    */
   public submitSolution = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
-      // Verify user has student role
-      this.verifyAuthorization(req, [UserRole.STUDENT]);
+      // Get the student profile ID
+      const studentId = await this.profileService.getStudentProfileId(req.user!.userId);
       
-      const { challenge: challengeId, title, description, submissionUrl, tags } = req.body;
+      // Extract and normalize challenge ID (support both field names)
+      const { challenge, challengeId, title, description, submissionUrl, tags } = req.body;
+      let effectiveChallengeId: string;
       
-      // Get student profile ID
-      const studentId = await solutionService.getStudentProfileId(req.user!.userId);
+      try {
+        // Prioritize challengeId if both are present, otherwise try challenge
+        effectiveChallengeId = validateObjectId(
+          challengeId || challenge, 
+          'challenge',
+          {
+            additionalContext: 'Please provide a valid challengeId in your request'
+          }
+        );
+      } catch (error) {
+        // Log the error with detailed context
+        logger.warn(
+          `Challenge ID validation failed during solution submission: ${error instanceof Error ? error.message : String(error)}`,
+          { 
+            userId: req.user?.userId,
+            providedChallengeId: challengeId || challenge,
+            requestBody: JSON.stringify(req.body) 
+          }
+        );
+        throw error;
+      }
       
-      // Delegate to service with all business logic
-      const solution = await solutionService.submitSolution(
+      // Submit solution via service with validated IDs
+      const solution = await this.solutionService.submitSolution(
         studentId,
-        challengeId,
+        effectiveChallengeId,
         { title, description, submissionUrl, tags }
       );
-
-      // Log action and send response
-      this.logAction('submit-solution', req.user!.userId, { 
-        challengeId, 
-        solutionId: solution._id?.toString() 
-      });
-
+      
+      // Return success response
       this.sendSuccess(
-        res, 
-        solution, 
-        'Solution submitted successfully', 
+        res,
+        solution,
+        'Solution submitted successfully',
         HTTP_STATUS.CREATED
       );
     }
@@ -63,13 +87,13 @@ export class SolutionController extends BaseController {
       this.verifyAuthorization(req, [UserRole.STUDENT]);
       
       // Get student profile ID
-      const studentId = await solutionService.getStudentProfileId(req.user!.userId);
+      const studentId = await this.profileService.getStudentProfileId(req.user!.userId);
       
       // Extract and parse query parameters
       const { status, page, limit, sortBy, sortOrder } = req.query;
       
       // Delegate to service for filtering and data retrieval
-      const result = await solutionService.getStudentSolutions(
+      const result = await this.solutionService.getStudentSolutions(
         studentId,
         {
           status: status as SolutionStatus,
@@ -115,7 +139,7 @@ export class SolutionController extends BaseController {
       const { challengeId } = req.params;
       
       // Delegate to service which handles all authorization and business logic
-      const result = await solutionService.getChallengeSolutions(
+      const result = await this.solutionService.getChallengeSolutions(
         challengeId,
         req.user!.userId,
         req.user!.role as UserRole
@@ -156,7 +180,7 @@ export class SolutionController extends BaseController {
       const { id } = req.params;
       
       // Delegate to service which handles all authorization logic
-      const solution = await solutionService.getSolutionById(
+      const solution = await this.solutionService.getSolutionById(
         id, 
         req.user!.userId, 
         req.user!.role as UserRole
@@ -180,13 +204,13 @@ export class SolutionController extends BaseController {
       this.verifyAuthorization(req, [UserRole.STUDENT]);
       
       // Get student profile ID
-      const studentId = await solutionService.getStudentProfileId(req.user!.userId);
+      const studentId = await profileService.getStudentProfileId(req.user!.userId);
       
       const { id } = req.params;
       const { title, description, submissionUrl } = req.body;
       
       // Delegate to service which handles all validation and business logic
-      const updatedSolution = await solutionService.updateSolution(
+      const updatedSolution = await this.solutionService.updateSolution(
         id,
         studentId,
         { title, description, submissionUrl }
@@ -210,12 +234,12 @@ export class SolutionController extends BaseController {
       this.verifyAuthorization(req, [UserRole.ARCHITECT]);
       
       // Get architect profile ID
-      const architectId = await solutionService.getArchitectProfileId(req.user!.userId);
+      const architectId = await this.profileService.getArchitectProfileId(req.user!.userId);
       
       const { id } = req.params;
       
       // Delegate to service which handles all validation and business logic
-      const updatedSolution = await solutionService.claimSolutionForReview(id, architectId);
+      const updatedSolution = await this.solutionService.claimSolutionForReview(id, architectId);
       
       // Log action and send response
       this.logAction('claim-solution', req.user!.userId, { 
@@ -238,13 +262,13 @@ export class SolutionController extends BaseController {
       this.verifyAuthorization(req, [UserRole.ARCHITECT]);
       
       // Get architect profile ID
-      const architectId = await solutionService.getArchitectProfileId(req.user!.userId);
+      const architectId = await this.profileService.getArchitectProfileId(req.user!.userId);
       
       const { id } = req.params;
       const { status, feedback, score } = req.body;
       
       // Delegate validation and business logic to service layer
-      const updatedSolution = await solutionService.reviewSolution(
+      const updatedSolution = await this.solutionService.reviewSolution(
         id, 
         architectId, 
         { status, feedback, score }
@@ -276,12 +300,12 @@ export class SolutionController extends BaseController {
       this.verifyAuthorization(req, [UserRole.COMPANY]);
       
       // Get company profile ID
-      const companyId = await solutionService.getCompanyProfileId(req.user!.userId);
+      const companyId = await this.profileService.getCompanyProfileId(req.user!.userId);
       
       const { id } = req.params;
       
       // Delegate to service which handles all validation and business logic
-      const updatedSolution = await solutionService.selectSolutionAsWinner(id, companyId);
+      const updatedSolution = await this.solutionService.selectSolutionAsWinner(id, companyId);
       
       // Log action and send response
       this.logAction('select-solution', req.user!.userId, { 
@@ -304,13 +328,13 @@ export class SolutionController extends BaseController {
       this.verifyAuthorization(req, [UserRole.ARCHITECT]);
       
       // Get architect profile ID
-      const architectId = await solutionService.getArchitectProfileId(req.user!.userId);
+      const architectId = await this.profileService.getArchitectProfileId(req.user!.userId);
       
       // Extract query parameters
       const { status, page, limit, sortBy, sortOrder } = req.query;
       
       // Delegate to service which handles all business logic
-      const result = await solutionService.getArchitectReviews(
+      const result = await this.solutionService.getArchitectReviews(
         architectId,
         {
           status: status as SolutionStatus,
@@ -323,12 +347,20 @@ export class SolutionController extends BaseController {
       
       // Log action and send response
       this.logAction('get-architect-reviews', req.user!.userId, {
-        count: result.data.length // Changed from result.solutions.length
+        count: result.data.length 
       });
   
       this.sendPaginatedSuccess(
         res, 
-        result, 
+        {
+          data: result.data, 
+          total: result.total,
+          page: result.page,
+          limit: result.limit,
+          totalPages: Math.ceil(result.total / result.limit),
+          hasNextPage: result.page * result.limit < result.total,
+          hasPrevPage: result.page > 1
+        },
         'Architect reviews retrieved successfully'
       );
     }

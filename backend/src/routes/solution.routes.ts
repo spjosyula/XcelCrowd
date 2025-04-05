@@ -1,24 +1,27 @@
-import express from 'express';
+import { Router } from 'express';
 import { solutionController } from '../controllers/solution.controller';
+import { validateRequest } from '../middlewares/validation.middleware';
+import { authenticate, authorizePattern, authorizeInstitutionForChallenge } from '../middlewares/auth.middleware';
+import { AuthPattern } from '../types/authorization.types';
 import { 
-  validateSubmitSolution, 
-  validateUpdateSolution,
-  validateReviewSolution
+  submitSolutionSchema, 
+  updateSolutionSchema,
+  reviewSolutionSchema 
 } from '../validations/solution.validation';
-import { authorize, authenticate, authorizeInstitutionForChallenge } from '../middlewares/auth.middleware';
-import { UserRole } from '../models/interfaces';
 
-const router = express.Router();
+const router = Router();
 
 /**
  * @route   POST /api/solutions
  * @desc    Submit a solution to a challenge
  * @access  Private - Student only
+ * @swagger
+ * /solutions:
  */
 router.post(
   '/',
   authenticate,
-  authorize([UserRole.STUDENT]),
+  authorizePattern(AuthPattern.STUDENT_ONLY),
   (req, res, next) => {
     if (req.body && req.body.challenge) {
       req.params.challengeId = req.body.challenge;
@@ -26,7 +29,7 @@ router.post(
     }
     next();
   },
-  validateSubmitSolution,
+  validateRequest(submitSolutionSchema),
   solutionController.submitSolution
 );
 
@@ -34,11 +37,13 @@ router.post(
  * @route   GET /api/solutions/student
  * @desc    Get all solutions submitted by current student
  * @access  Private - Student only
+ * @swagger
+ * /solutions/student:
  */
 router.get(
   '/student',
   authenticate,
-  authorize([UserRole.STUDENT]),
+  authorizePattern(AuthPattern.STUDENT_ONLY),
   solutionController.getStudentSolutions
 );
 
@@ -46,11 +51,13 @@ router.get(
  * @route   GET /api/solutions/architect
  * @desc    Get solutions reviewed by current architect
  * @access  Private - Architect only
+ * @swagger
+ * /solutions/architect:
  */
 router.get(
   '/architect',
   authenticate,
-  authorize([UserRole.ARCHITECT]),
+  authorizePattern(AuthPattern.ARCHITECT_ONLY),
   solutionController.getArchitectReviews
 );
 
@@ -58,11 +65,13 @@ router.get(
  * @route   GET /api/solutions/challenge/:challengeId
  * @desc    Get all solutions for a specific challenge
  * @access  Private - Company (owner) or Architect or Admin
+ * @swagger
+ * /solutions/challenge/{challengeId}:
  */
 router.get(
   '/challenge/:challengeId',
   authenticate,
-  authorize([UserRole.COMPANY, UserRole.ARCHITECT, UserRole.ADMIN]),
+  authorizePattern(AuthPattern.ARCHITECT_OR_ADMIN_OR_COMPANY),
   solutionController.getChallengeSolutions
 );
 
@@ -70,6 +79,8 @@ router.get(
  * @route   GET /api/solutions/:id
  * @desc    Get solution by ID
  * @access  Private - Solution owner (Student) or Challenge owner (Company) or Architect or Admin
+ * @swagger
+ * /solutions/{id}:
  */
 router.get(
   '/:id',
@@ -81,12 +92,14 @@ router.get(
  * @route   PUT /api/solutions/:id
  * @desc    Update a solution (before deadline)
  * @access  Private - Solution owner (Student) only
+ * @swagger
+ * /solutions/{id}:
  */
 router.put(
   '/:id',
   authenticate,
-  authorize([UserRole.STUDENT]),
-  validateUpdateSolution,
+  authorizePattern(AuthPattern.STUDENT_ONLY),
+  validateRequest(updateSolutionSchema),
   solutionController.updateSolution
 );
 
@@ -94,11 +107,13 @@ router.put(
  * @route   PATCH /api/solutions/:id/claim
  * @desc    Claim a solution for review
  * @access  Private - Architect only
+ * @swagger
+ * /solutions/{id}/claim:
  */
 router.patch(
   '/:id/claim',
   authenticate,
-  authorize([UserRole.ARCHITECT]),
+  authorizePattern(AuthPattern.ARCHITECT_ONLY),
   solutionController.claimSolution
 );
 
@@ -106,12 +121,14 @@ router.patch(
  * @route   PATCH /api/solutions/:id/review
  * @desc    Review a solution (approve/reject with feedback)
  * @access  Private - Reviewing architect only
+ * @swagger
+ * /solutions/{id}/review:
  */
 router.patch(
   '/:id/review',
   authenticate,
-  authorize([UserRole.ARCHITECT]),
-  validateReviewSolution,
+  authorizePattern(AuthPattern.ARCHITECT_ONLY),
+  validateRequest(reviewSolutionSchema),
   solutionController.reviewSolution
 );
 
@@ -119,11 +136,13 @@ router.patch(
  * @route   PATCH /api/solutions/:id/select
  * @desc    Select a solution as a winner (by company)
  * @access  Private - Company (challenge owner) only
+ * @swagger
+ * /solutions/{id}/select:
  */
 router.patch(
   '/:id/select',
   authenticate,
-  authorize([UserRole.COMPANY]),
+  authorizePattern(AuthPattern.COMPANY_ONLY),
   solutionController.selectSolution
 );
 

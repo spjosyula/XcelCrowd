@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { HTTP_STATUS } from '../constants';
-import { ApiError } from './ApiError';
+import { ApiError } from './api.error';
 import { logger } from './logger';
 
 /**

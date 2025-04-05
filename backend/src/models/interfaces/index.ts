@@ -1,4 +1,4 @@
-import { Document, Types } from 'mongoose';
+import mongoose, { Document, Types } from 'mongoose';
 
 /**
  * Base interface for timestamp fields
@@ -150,7 +150,8 @@ export interface IChallenge extends Document, ITimestamps {
   requirements: string[];  // List of specific requirements for solutions
   resources?: string[];  // Optional resources provided to help with the challenge (need to allow file uploads)
   rewards?: string;  // Incentives or rewards offered for successful solutions
-  deadline?: Date;  // Due date for submitting solutions
+  deadline: Date;  // Due date for submitting solutions
+  reviewDeadline?: Date;  // Deadline for architects to complete reviews and select solutions
   status: ChallengeStatus;  // Current status of the challenge
   difficulty: ChallengeDifficulty;  // Difficulty level of the challenge
   category: string[];  // Categories or domains the challenge belongs to
@@ -159,6 +160,8 @@ export interface IChallenge extends Document, ITimestamps {
   completedAt?: Date;  // Date when the challenge was completed
   publishedAt?: Date;  // Date when the challenge was published
   tags: string[];  // Keywords or tags associated with the challenge
+  claimedBy?: mongoose.Types.ObjectId; // Architect who has claimed the challenge for review
+  claimedAt?: Date; // Date when the challenge was claimed
   maxApprovedSolutions?: number;  // Maximum number of solutions that can be approved
   approvedSolutionsCount: number;  // Current count of approved solutions
   visibility: ChallengeVisibility;  // Controls who can see the challenge
@@ -168,6 +171,7 @@ export interface IChallenge extends Document, ITimestamps {
   // Methods
   isDeadlinePassed(): boolean;  // Checks if the challenge deadline has passed
   isApprovalLimitReached(): boolean;  // Checks if the maximum number of approvals has been reached
+  isReviewDeadlinePassed(): boolean;  // Checks if the review deadline has passed
 }
 
 /**

@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { ZodSchema, ZodError } from 'zod';
-import { ApiError } from '../utils/ApiError';
+import { ApiError } from '../utils/api.error';
 import { HTTP_STATUS } from '../constants';
 import { logger } from '../utils/logger';
 

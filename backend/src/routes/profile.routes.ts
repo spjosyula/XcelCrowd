@@ -1,16 +1,18 @@
-import express from 'express';
+import { Router } from 'express';
 import { profileController } from '../controllers/profile.controller';
 import { authenticate, authorizePattern } from '../middlewares/auth.middleware';
 import { validateRequest } from '../middlewares/validation.middleware';
 import { profileValidation } from '../validations/profile.validation';
 import { AuthPattern } from '../types/authorization.types';
 
-const router = express.Router();
+const router = Router();
 
 /**
  * @route   POST /api/profiles/student/:userId
  * @desc    Create student profile
  * @access  Private - Student only (self)
+ * @swagger
+ * /profiles/student/{userId}:
  */
 router.post(
   '/student/:userId',
@@ -24,6 +26,8 @@ router.post(
  * @route   GET /api/profiles/student/:userId
  * @desc    Get student profile
  * @access  Private - Self or Company, Architect, Admin
+ * @swagger
+ * /profiles/student/{userId}:
  */
 router.get(
   '/student/:userId',
@@ -36,6 +40,8 @@ router.get(
  * @route   PUT /api/profiles/student/:userId
  * @desc    Update student profile
  * @access  Private - Student only (self)
+ * @swagger
+ * /profiles/student/{userId}:
  */
 router.put(
   '/student/:userId',
@@ -49,6 +55,8 @@ router.put(
  * @route   POST /api/profiles/company/:userId
  * @desc    Create company profile
  * @access  Private - Company only (self)
+ * @swagger
+ * /profiles/company/{userId}:
  */
 router.post(
   '/company/:userId',
@@ -62,6 +70,8 @@ router.post(
  * @route   GET /api/profiles/company/:userId
  * @desc    Get company profile
  * @access  Private - Self or Architect, Admin
+ * @swagger
+ * /profiles/company/{userId}:
  */
 router.get(
   '/company/:userId',
@@ -74,6 +84,8 @@ router.get(
  * @route   PUT /api/profiles/company/:userId
  * @desc    Update company profile
  * @access  Private - Company only (self)
+ * @swagger
+ * /profiles/company/{userId}:
  */
 router.put(
   '/company/:userId',
@@ -82,29 +94,5 @@ router.put(
   validateRequest(profileValidation.updateCompanyProfile),
   profileController.updateCompanyProfile
 );
-
-// /**
-//  * @route   DELETE /api/profiles/student/:userId
-//  * @desc    Delete student profile
-//  * @access  Private - Self or Admin
-//  */
-// router.delete(
-//   '/student/:userId',
-//   authenticate,
-//   authorizePattern(AuthPattern.SELF_OR_ADMIN),
-//   profileController.deleteStudentProfile
-// );
-
-// /**
-//  * @route   DELETE /api/profiles/company/:userId
-//  * @desc    Delete company profile
-//  * @access  Private - Self or Admin
-//  */
-// router.delete(
-//   '/company/:userId',
-//   authenticate,
-//   authorizePattern(AuthPattern.SELF_OR_ADMIN),
-//   profileController.deleteCompanyProfile
-// );
 
 export default router;

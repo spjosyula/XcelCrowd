@@ -10,34 +10,14 @@ import {
   HTTP_STATUS,
   UserRole
 } from '../models/interfaces';
-import { ApiError } from '../utils/ApiError';
+import { ApiError } from '../utils/api.error';
 import { logger } from '../utils/logger';
+import { BaseService } from './BaseService';
 
 /**
  * Service for challenge-related operations
  */
-export class ChallengeService {
-
-  /**
-   * Execute a function within a MongoDB transaction
-   * @param operation - The async function to execute within the transaction
-   * @returns The result of the operation
-   */
-  private async withTransaction<T>(operation: (session: mongoose.ClientSession) => Promise<T>): Promise<T> {
-    const session = await mongoose.startSession();
-    session.startTransaction();
-
-    try {
-      const result = await operation(session);
-      await session.commitTransaction();
-      return result;
-    } catch (error) {
-      await session.abortTransaction();
-      throw error;
-    } finally {
-      session.endSession();
-    }
-  }
+export class ChallengeService extends BaseService {
 
   /**
    * Create a new challenge
@@ -182,50 +162,93 @@ export class ChallengeService {
     try {
       logger.info('Starting automatic challenge status update job');
 
-      // Find published challenges with passed deadlines
-      const expiredChallenges = await Challenge.find({
-        status: ChallengeStatus.ACTIVE,
-        deadline: { $lt: new Date() }
-      });
+      return await this.withTransaction(async (session) => {
+        const results = {
+          updated: 0,
+          errors: 0,
+          details: [] as Array<{ id: string; status: string }>
+        };
 
-      logger.info(`Found ${expiredChallenges.length} expired challenges to update`);
+        // Find active challenges with passed deadlines
+        const expiredSubmissionChallenges = await Challenge.find({
+          status: ChallengeStatus.ACTIVE,
+          deadline: { $lt: new Date() }
+        });
 
-      const results = {
-        updated: 0,
-        errors: 0,
-        details: [] as Array<{ id: string; status: string }>
-      };
+        logger.info(`Found ${expiredSubmissionChallenges.length} expired submission challenges to update`);
 
-      // Update status to indicate review phase
-      for (const challenge of expiredChallenges) {
-        try {
-          challenge.status = ChallengeStatus.CLOSED;
-          await challenge.save();
+        // Update submission deadline expired challenges
+        for (const challenge of expiredSubmissionChallenges) {
+          try {
+            challenge.status = ChallengeStatus.CLOSED;
+            await challenge.save({ session });
 
-          results.updated++;
-          results.details.push({
-            id: challenge._id instanceof Types.ObjectId ? challenge._id.toString() : String(challenge._id),
-            status: 'success'
-          });
+            results.updated++;
+            results.details.push({
+              id: challenge._id instanceof Types.ObjectId ? challenge._id.toString() : String(challenge._id),
+              status: 'success'
+            });
 
-          logger.info(`Challenge ${challenge._id} automatically closed due to passed deadline`);
-          // Could trigger notifications here
-        } catch (err) {
-          results.errors++;
-          results.details.push({
-            id: challenge._id instanceof Types.ObjectId ? challenge._id.toString() : String(challenge._id),
-            status: 'error'
-          });
+            logger.info(`Challenge ${challenge._id} automatically closed due to passed submission deadline`);
+          } catch (err) {
+            results.errors++;
+            results.details.push({
+              id: challenge._id instanceof Types.ObjectId ? challenge._id.toString() : String(challenge._id),
+              status: 'error'
+            });
 
-          logger.error(`Failed to update status for challenge ${challenge._id}:`, err);
+            logger.error(`Failed to update status for challenge ${challenge._id}:`, err);
+            throw err; // Rethrow to trigger transaction rollback
+          }
         }
-      }
 
-      logger.info(`Challenge status update job completed: ${results.updated} updated, ${results.errors} errors`);
-      return results;
+        // Find closed challenges with passed review deadlines
+        const expiredReviewChallenges = await Challenge.find({
+          status: ChallengeStatus.CLOSED,
+          reviewDeadline: { $lt: new Date() },
+          claimedBy: { $exists: true, $ne: null }
+        });
+
+        logger.info(`Found ${expiredReviewChallenges.length} expired review deadline challenges to update`);
+
+        // Auto-complete challenges with expired review deadlines
+        for (const challenge of expiredReviewChallenges) {
+          try {
+            challenge.status = ChallengeStatus.COMPLETED;
+            challenge.completedAt = new Date();
+            await challenge.save({ session });
+
+            results.updated++;
+            results.details.push({
+              id: challenge._id instanceof Types.ObjectId ? challenge._id.toString() : String(challenge._id),
+              status: 'success-review'
+            });
+
+            logger.info(`Challenge ${challenge._id} automatically completed due to passed review deadline`);
+          } catch (err) {
+            results.errors++;
+            results.details.push({
+              id: challenge._id instanceof Types.ObjectId ? challenge._id.toString() : String(challenge._id),
+              status: 'error-review'
+            });
+
+            logger.error(`Failed to auto-complete challenge ${challenge._id}:`, err);
+            throw err; // Rethrow to trigger transaction rollback
+          }
+        }
+
+        logger.info(`Challenge status update job completed: ${results.updated} updated, ${results.errors} errors`);
+        return results;
+      });
     } catch (error) {
       logger.error('Failed to update challenge statuses:', error);
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to update challenge statuses');
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(
+        HTTP_STATUS.INTERNAL_SERVER_ERROR,
+        'Failed to update challenge statuses',
+        true,
+        'CHALLENGE_STATUS_UPDATE_ERROR'
+      );
     }
   }
 
@@ -242,33 +265,40 @@ export class ChallengeService {
         throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid ID format');
       }
 
-      // Find challenge with company verification (security check)
-      const challenge = await Challenge.findOne({
-        _id: challengeId,
-        company: companyId
+      return await this.withTransaction(async (session) => {
+        // Find challenge with company verification (security check)
+        const challenge = await Challenge.findOne({
+          _id: challengeId,
+          company: companyId
+        }).session(session);
+
+        if (!challenge) {
+          throw ApiError.notFound('Challenge not found or you do not have permission to publish it');
+        }
+
+        if (challenge.status !== ChallengeStatus.DRAFT) {
+          throw ApiError.badRequest('Only draft challenges can be published');
+        }
+
+        // Validate required fields before publishing
+        this.validateChallengeForPublication(challenge);
+
+        challenge.status = ChallengeStatus.ACTIVE;
+        challenge.publishedAt = new Date();
+        await challenge.save({ session });
+
+        logger.info(`Challenge ${challengeId} published by company ${companyId}`);
+        return challenge;
       });
-
-      if (!challenge) {
-        throw ApiError.notFound('Challenge not found or you do not have permission to publish it');
-      }
-
-      if (challenge.status !== ChallengeStatus.DRAFT) {
-        throw ApiError.badRequest('Only draft challenges can be published');
-      }
-
-      // Validate required fields before publishing
-      this.validateChallengeForPublication(challenge);
-
-      challenge.status = ChallengeStatus.ACTIVE;
-      challenge.publishedAt = new Date();
-      await challenge.save();
-
-      logger.info(`Challenge ${challengeId} published by company ${companyId}`);
-      return challenge;
     } catch (error) {
       logger.error(`Error publishing challenge ${challengeId}:`, error);
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to publish challenge');
+      throw new ApiError(
+        HTTP_STATUS.INTERNAL_SERVER_ERROR,
+        'Failed to publish challenge',
+        true,
+        'CHALLENGE_PUBLISH_ERROR'
+      );
     }
   }
 
@@ -414,31 +444,38 @@ export class ChallengeService {
       if (!Types.ObjectId.isValid(challengeId) || !Types.ObjectId.isValid(companyId)) {
         throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid ID format');
       }
-
-      // Find challenge with company verification (security check)
-      const challenge = await Challenge.findOne({
-        _id: challengeId,
-        company: companyId
+  
+      return await this.withTransaction(async (session) => {
+        // Find challenge with company verification (security check)
+        const challenge = await Challenge.findOne({
+          _id: challengeId,
+          company: companyId
+        }).session(session);
+  
+        if (!challenge) {
+          throw ApiError.notFound('Challenge not found or you do not have permission to close it');
+        }
+  
+        if (challenge.status !== ChallengeStatus.ACTIVE) {
+          throw ApiError.badRequest('Only active challenges can be closed manually');
+        }
+  
+        challenge.status = ChallengeStatus.CLOSED;
+        challenge.completedAt = new Date();
+        await challenge.save({ session });
+  
+        logger.info(`Challenge ${challengeId} manually closed by company ${companyId}`);
+        return challenge;
       });
-
-      if (!challenge) {
-        throw ApiError.notFound('Challenge not found or you do not have permission to close it');
-      }
-
-      if (challenge.status !== ChallengeStatus.ACTIVE) {
-        throw ApiError.badRequest('Only active challenges can be closed manually');
-      }
-
-      challenge.status = ChallengeStatus.CLOSED;
-      challenge.completedAt = new Date();
-      await challenge.save();
-
-      logger.info(`Challenge ${challengeId} manually closed by company ${companyId}`);
-      return challenge;
     } catch (error) {
       logger.error(`Error closing challenge ${challengeId}:`, error);
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to close challenge');
+      throw new ApiError(
+        HTTP_STATUS.INTERNAL_SERVER_ERROR, 
+        'Failed to close challenge',
+        true,
+        'CHALLENGE_CLOSE_ERROR'
+      );
     }
   }
 
@@ -530,7 +567,7 @@ export class ChallengeService {
       if (!Types.ObjectId.isValid(challengeId) || (companyId !== 'admin' && !Types.ObjectId.isValid(companyId))) {
         throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid ID format');
       }
-      
+
       // Check challenge ownership
       const challenge = await Challenge.findOne({
         _id: challengeId,
@@ -607,52 +644,47 @@ export class ChallengeService {
       if (!Types.ObjectId.isValid(challengeId) || !Types.ObjectId.isValid(companyId)) {
         throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid ID format');
       }
-
-      const challenge = await Challenge.findOne({
-        _id: challengeId,
-        company: companyId
+  
+      return await this.withTransaction(async (session) => {
+        const challenge = await Challenge.findOne({
+          _id: challengeId,
+          company: companyId
+        }).session(session);
+  
+        if (!challenge) {
+          throw ApiError.notFound('Challenge not found or you do not have permission to complete it');
+        }
+  
+        if (challenge.status !== ChallengeStatus.CLOSED) {
+          throw ApiError.badRequest('Only closed challenges can be marked as completed');
+        }
+  
+        // Check if all solutions have been reviewed
+        const pendingSolutions = await Solution.countDocuments({
+          challenge: challengeId,
+          status: SolutionStatus.SUBMITTED
+        }).session(session);
+  
+        if (pendingSolutions > 0) {
+          throw ApiError.badRequest(`There are still ${pendingSolutions} solutions pending review`);
+        }
+  
+        challenge.status = ChallengeStatus.COMPLETED;
+        challenge.completedAt = new Date();
+        await challenge.save({ session });
+  
+        logger.info(`Challenge ${challengeId} marked as completed by company ${companyId}`);
+        return challenge;
       });
-
-      if (!challenge) {
-        throw ApiError.notFound('Challenge not found or you do not have permission to complete it');
-      }
-
-      if (challenge.status !== ChallengeStatus.CLOSED) {
-        throw ApiError.badRequest('Only closed challenges can be marked as completed');
-      }
-
-      // Check if all solutions have been reviewed
-      const pendingSolutions = await Solution.countDocuments({
-        challenge: challengeId,
-        status: SolutionStatus.SUBMITTED
-      });
-
-      if (pendingSolutions > 0) {
-        throw ApiError.badRequest(`There are still ${pendingSolutions} solutions pending review`);
-      }
-
-      // Use atomic update operation
-      const updatedChallenge = await Challenge.findByIdAndUpdate(
-        challengeId,
-        {
-          $set: {
-            status: ChallengeStatus.COMPLETED,
-            completedAt: new Date()
-          }
-        },
-        { new: true }
-      );
-
-      if (!updatedChallenge) {
-        throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Challenge not found after update');
-      }
-
-      logger.info(`Challenge ${challengeId} marked as completed by company ${companyId}`);
-      return updatedChallenge;
     } catch (error) {
       logger.error(`Error completing challenge ${challengeId}: ${error instanceof Error ? error.message : String(error)}`, { challengeId, companyId });
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to complete challenge');
+      throw new ApiError(
+        HTTP_STATUS.INTERNAL_SERVER_ERROR, 
+        'Failed to complete challenge',
+        true,
+        'CHALLENGE_COMPLETION_ERROR'
+      );
     }
   }
 
@@ -780,6 +812,21 @@ export class ChallengeService {
     } else if (challenge.deadline <= new Date()) {
       errors.push('Challenge deadline must be in the future');
     }
+    if (!challenge.deadline) {
+      errors.push('Challenge deadline is required');
+    } else if (challenge.deadline <= new Date()) {
+      errors.push('Challenge deadline must be in the future');
+    }
+
+    // Validate review deadline if provided
+    if (challenge.reviewDeadline) {
+      if (challenge.reviewDeadline <= challenge.deadline) {
+        errors.push('Review deadline must be after submission deadline');
+      }
+      if (challenge.reviewDeadline <= new Date()) {
+        errors.push('Review deadline must be in the future');
+      }
+    }
 
     // If private, must have allowed institutions
     if (challenge.visibility === ChallengeVisibility.PRIVATE &&
@@ -853,6 +900,24 @@ export class ChallengeService {
     }
   }
 
+  private async getCompanyProfileForUser(userId: string): Promise<any> {
+    try {
+      // Import models here to avoid circular dependencies
+      const { default: User } = await import('../models/User');
+      const { default: CompanyProfile } = await import('../models/CompanyProfile');
+
+      const user = await User.findById(userId);
+      if (!user || user.role !== UserRole.COMPANY) {
+        return null;
+      }
+
+      return await CompanyProfile.findOne({ user: userId });
+    } catch (error) {
+      logger.error(`Error getting company profile for user ${userId}:`, error);
+      return null;
+    }
+  }
+
   /**
    * Get challenges with user-specific visibility
    */
@@ -879,9 +944,7 @@ export class ChallengeService {
       // Build query filters
       const queryFilters: Record<string, any> = {};
 
-      if (filters.status) queryFilters.status = filters.status;
       if (filters.difficulty) queryFilters.difficulty = filters.difficulty;
-
       if (filters.category) {
         queryFilters.category = {
           $in: Array.isArray(filters.category) ? filters.category : [filters.category]
@@ -898,8 +961,68 @@ export class ChallengeService {
         ];
       }
 
-      // Only show active challenges by default
-      if (!filters.status) {
+      // Handle draft challenge visibility
+      if (filters.status === 'draft') {
+        // Only company users can see their own draft challenges
+        if (userRole === UserRole.COMPANY && userId) {
+          // Get the company profile ID for the current user
+          const companyProfile = await this.getCompanyProfileForUser(userId);
+          if (companyProfile) {
+            queryFilters.status = ChallengeStatus.DRAFT;
+            queryFilters.company = companyProfile._id;
+          } else {
+            // If company profile not found, return empty result
+            return {
+              challenges: [],
+              total: 0,
+              page: filters.page || 1,
+              limit: filters.limit || 10,
+              totalPages: 0
+            };
+          }
+        } else if (userRole === UserRole.ADMIN) {
+          // Admins can see all draft challenges
+          queryFilters.status = ChallengeStatus.DRAFT;
+        } else {
+          // Non-company/admin users can't see draft challenges
+          return {
+            challenges: [],
+            total: 0,
+            page: filters.page || 1,
+            limit: filters.limit || 10,
+            totalPages: 0
+          };
+        }
+      } else if (filters.status === 'all') {
+        // For 'all' status requests:
+        if (userRole === UserRole.COMPANY && userId) {
+          // Companies can see all their own challenges plus active/closed/completed public challenges
+          const companyProfile = await this.getCompanyProfileForUser(userId);
+          if (companyProfile) {
+            queryFilters.$or = [
+              // Their own challenges of any status
+              { company: companyProfile._id },
+              // Active, closed, or completed public challenges
+              {
+                status: { $in: [ChallengeStatus.ACTIVE, ChallengeStatus.CLOSED, ChallengeStatus.COMPLETED] },
+                visibility: 'public'
+              }
+            ];
+          } else {
+            // Only public non-draft challenges if company profile not found
+            queryFilters.status = { $ne: ChallengeStatus.DRAFT };
+          }
+        } else if (userRole === UserRole.ADMIN) {
+          // Admins can see all challenges
+        } else {
+          // Regular users only see non-draft challenges
+          queryFilters.status = { $ne: ChallengeStatus.DRAFT };
+        }
+      } else if (filters.status) {
+        // For specific non-draft status
+        queryFilters.status = filters.status;
+      } else {
+        // Apply default filter if status not specified
         queryFilters.status = ChallengeStatus.ACTIVE;
       }
 

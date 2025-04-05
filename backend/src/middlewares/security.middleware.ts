@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import xssClean from 'xss-clean';
 import crypto from 'crypto';
-import { ApiError } from '../utils/ApiError';
+import { ApiError } from '../utils/api.error';
 import { HTTP_STATUS } from '../constants';
 import { logger } from '../utils/logger';
 
@@ -41,21 +41,21 @@ export const configureCSP = (req: Request, res: Response, next: NextFunction) =>
   res.locals.cspNonce = nonce;
   
   // Set CSP header
-  res.setHeader('Content-Security-Policy', `
-    default-src 'self';
-    script-src 'self' 'nonce-${nonce}' https://cdn.jsdelivr.net https://unpkg.com;
-    style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com;
-    img-src 'self' data: https://res.cloudinary.com;
-    font-src 'self' https://fonts.gstatic.com;
-    connect-src 'self' https://api.cloudinary.com;
-    frame-src 'none';
-    object-src 'none';
-    base-uri 'self';
-    form-action 'self';
-    frame-ancestors 'none';
-    block-all-mixed-content;
-    upgrade-insecure-requests;
-  `.replace(/\s+/g, ' ').trim());
+  // res.setHeader('Content-Security-Policy', `
+  //   default-src 'self';
+  //   script-src 'self' 'nonce-${nonce}' https://cdn.jsdelivr.net https://unpkg.com;
+  //   style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com;
+  //   img-src 'self' data: https://res.cloudinary.com;
+  //   font-src 'self' https://fonts.gstatic.com;
+  //   connect-src 'self' https://api.cloudinary.com;
+  //   frame-src 'none';
+  //   object-src 'none';
+  //   base-uri 'self';
+  //   form-action 'self';
+  //   frame-ancestors 'none';
+  //   block-all-mixed-content;
+  //   upgrade-insecure-requests;
+  // `.replace(/\s+/g, ' ').trim());
   
   next();
 };

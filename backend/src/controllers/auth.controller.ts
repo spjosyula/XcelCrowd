@@ -1,15 +1,17 @@
 import { Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-import { UserService, UserDocument } from '../services/user.service';
+import { UserService, UserDocument, userService } from '../services/user.service';
 import { HTTP_STATUS } from '../constants';
-import { ApiError } from '../utils/ApiError';
-import { catchAsync } from '../utils/catchAsync';
+import { ApiError } from '../utils/api.error';
+import { catchAsync } from '../utils/catch.async';
 import { logger } from '../utils/logger';
 import crypto from 'crypto';
 import { UserRole } from '../models';
 import { BaseController } from './BaseController';
 import { AuthRequest } from '../types/request.types';
-import { ProfileService } from '../services/profile.service';
+import { profileService, ProfileService } from '../services/profile.service';
+import { architectService, ArchitectService } from '../services/architect.service';
+import { token } from 'morgan';
 
 /**
  * Interface for JWT token payload
@@ -18,6 +20,7 @@ interface AuthTokenPayload {
   userId: string;
   email: string;
   role: string;
+  profile?: string;
 }
 
 /**
@@ -25,13 +28,101 @@ interface AuthTokenPayload {
  * Extends BaseController for standardized response handling
  */
 export class AuthController extends BaseController {
-  private userService: UserService;
-  private profileService: ProfileService;
+  private readonly userService: UserService;
+  private readonly profileService: ProfileService;
+  private readonly architectService: ArchitectService;
 
   constructor() {
     super();
-    this.userService = new UserService();
-    this.profileService = new ProfileService();
+    this.userService = userService
+    this.profileService = profileService
+    this.architectService = architectService
+  }
+
+  /**
+ * Common login logic for all user types
+ */
+  private async processLogin(
+    email: string,
+    password: string,
+    expectedRole: UserRole,
+    actionName: string
+  ): Promise<{
+    user: Partial<UserDocument>;
+    profile?: any;
+    token: string;
+    csrfToken: string;
+  }> {
+    // Get user with password
+    const user = await this.userService.getUserByEmail(email);
+
+    // Check role match
+    if (user.role !== expectedRole) {
+      logger.warn(`Role mismatch in ${actionName}: ${email}, actual role: ${user.role}`);
+      throw ApiError.unauthorized(`Invalid credentials for ${actionName}`);
+    }
+
+    // Verify password
+    const isPasswordValid = await user.comparePassword(password);
+    if (!isPasswordValid) {
+      logger.warn(`Failed login attempt for ${actionName}: ${email}`);
+      throw ApiError.unauthorized('Invalid credentials');
+    }
+
+    // Get profile if needed
+    let profile = null;
+    if (expectedRole !== UserRole.ADMIN) {
+      try {
+        if (expectedRole === UserRole.STUDENT) {
+          profile = await this.profileService.getStudentProfileByUserId(user._id!.toString());
+        } else if (expectedRole === UserRole.COMPANY) {
+          profile = await this.profileService.getCompanyProfileByUserId(user._id!.toString());
+        } else if (expectedRole === UserRole.ARCHITECT) {
+          profile = await this.architectService.getProfileByUserId(user._id!.toString());
+        }
+      } catch (error) {
+        // Profile not found is not fatal
+        logger.warn(`Profile not found for ${actionName}: ${email}`);
+      }
+    }
+
+    // Create token payload
+    const tokenPayload: AuthTokenPayload = {
+      userId: user._id!.toString(),
+      email: user.email,
+      role: user.role
+    };
+
+    // Add profile ID to token if profile exists
+    if (profile && profile._id) {
+      tokenPayload.profile = profile._id.toString();
+    }
+
+    // Generate token
+    const token = this.generateToken(tokenPayload);
+
+    // Generate CSRF token
+    const csrfToken = crypto.randomBytes(64).toString('hex');
+
+    // Sanitize user data
+    const sanitizedUser = {
+      _id: user._id,
+      email: user.email,
+      role: user.role,
+    };
+
+    // Log action
+    this.logAction(`${expectedRole.toLowerCase()}-login`, user._id!.toString(), {
+      email: user.email,
+      profileId: profile?._id?.toString()
+    });
+
+    return {
+      user: sanitizedUser,
+      profile,
+      token,
+      csrfToken
+    };
   }
 
   /**
@@ -152,97 +243,106 @@ export class AuthController extends BaseController {
   );
 
   /**
-   * Student login
-   * @route POST /api/auth/student/login
-   * @access Public
-   */
+ * Student login
+ * @route POST /api/auth/student/login
+ * @access Public
+ */
   public loginStudent = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
       const { email, password } = req.body;
 
-      // Get user with password
-      const user = await this.userService.getUserByEmail(email);
-
-      // Check if user is a student
-      if (user.role !== UserRole.STUDENT) {
-        logger.warn(`Role mismatch in student login: ${email}, actual role: ${user.role}`);
-        throw new ApiError(HTTP_STATUS.UNAUTHORIZED, 'Invalid credentials for student login');
-      }
-
-      // Verify password
-      const isPasswordValid = await user.comparePassword(password);
-      if (!isPasswordValid) {
-        logger.warn(`Failed login attempt for student email: ${email}`);
-        throw new ApiError(HTTP_STATUS.UNAUTHORIZED, 'Invalid credentials');
-      }
-
-      // Generate token
-      const token = this.generateToken({
-        userId: user._id!.toString(),
-        email: user.email,
-        role: user.role
-      });
+      const result = await this.processLogin(email, password, UserRole.STUDENT, 'student-login');
 
       // Set HTTP-only cookie with token
-      this.setTokenCookie(res, token);
-
-      // Generate CSRF token
-      const csrfToken = crypto.randomBytes(64).toString('hex');
-
-      this.logAction('student-login', user._id!.toString(), { email: user.email });
+      this.setTokenCookie(res, result.token);
 
       this.sendSuccess(
         res,
-        { user, csrfToken },
+        {
+          user: result.user,
+          profile: result.profile,
+          csrfToken: result.csrfToken,
+          token: result.token
+        },
         'Student login successful'
       );
     }
   );
 
   /**
-   * Company login
-   * @route POST /api/auth/company/login
-   * @access Public
-   */
+ * Company login
+ * @route POST /api/auth/company/login
+ * @access Public
+ */
   public loginCompany = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
       const { email, password } = req.body;
 
-      // Get user with password
-      const user = await this.userService.getUserByEmail(email);
-
-      // Check if user is a company
-      if (user.role !== UserRole.COMPANY) {
-        logger.warn(`Role mismatch in company login: ${email}, actual role: ${user.role}`);
-        throw new ApiError(HTTP_STATUS.UNAUTHORIZED, 'Invalid credentials for company login');
-      }
-
-      // Verify password
-      const isPasswordValid = await user.comparePassword(password);
-      if (!isPasswordValid) {
-        logger.warn(`Failed login attempt for company email: ${email}`);
-        throw new ApiError(HTTP_STATUS.UNAUTHORIZED, 'Invalid credentials');
-      }
-
-      // Generate token
-      const token = this.generateToken({
-        userId: user._id!.toString(),
-        email: user.email,
-        role: user.role
-      });
+      const result = await this.processLogin(email, password, UserRole.COMPANY, 'company-login');
 
       // Set HTTP-only cookie with token
-      this.setTokenCookie(res, token);
-
-      // Generate CSRF token
-      const csrfToken = crypto.randomBytes(64).toString('hex');
-
-      this.logAction('company-login', user._id!.toString(), { email: user.email });
+      this.setTokenCookie(res, result.token);
 
       this.sendSuccess(
         res,
-        { user, csrfToken },
+        {
+          user: result.user,
+          profile: result.profile,
+          csrfToken: result.csrfToken,
+          token: result.token
+        },
         'Company login successful'
+      );
+    }
+  );
+
+  /**
+  * Architect login
+  * @route POST /api/auth/architect/login
+  * @access Public
+  */
+  public loginArchitect = catchAsync(
+    async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      const { email, password } = req.body;
+
+      const result = await this.processLogin(email, password, UserRole.ARCHITECT, 'architect-login');
+
+      // Set HTTP-only cookie with token
+      this.setTokenCookie(res, result.token);
+
+      this.sendSuccess(
+        res,
+        {
+          user: result.user,
+          profile: result.profile,
+          csrfToken: result.csrfToken
+        },
+        'Architect login successful'
+      );
+    }
+  );
+
+  /**
+  * Admin login
+  * @route POST /api/auth/admin/login
+  * @access Public
+  */
+  public loginAdmin = catchAsync(
+    async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      const { email, password } = req.body;
+
+      const result = await this.processLogin(email, password, UserRole.ADMIN, 'admin-login');
+
+      // Set HTTP-only cookie with token
+      this.setTokenCookie(res, result.token);
+
+      this.sendSuccess(
+        res,
+        {
+          user: result.user,
+          csrfToken: result.csrfToken
+        },
+        'Admin login successful'
       );
     }
   );

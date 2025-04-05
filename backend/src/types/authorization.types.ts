@@ -22,6 +22,7 @@ export enum AuthPattern {
   SELF_OR_ADMIN = 'self_or_admin',  // Self or admin
   COMPANY_OR_ADMIN = 'company_or_admin',
   ARCHITECT_OR_ADMIN = 'architect_or_admin',
+  ARCHITECT_OR_ADMIN_OR_COMPANY = "ARCHITECT_OR_ADMIN_OR_COMPANY",
 }
 
 /**
@@ -39,4 +40,5 @@ export const authPatternRoles: Record<AuthPattern, UserRole[] | null> = {
   [AuthPattern.SELF_OR_ADMIN]: [UserRole.ADMIN], // Self check handled separately
   [AuthPattern.COMPANY_OR_ADMIN]: [UserRole.COMPANY, UserRole.ADMIN],
   [AuthPattern.ARCHITECT_OR_ADMIN]: [UserRole.ARCHITECT, UserRole.ADMIN],
+  [AuthPattern.ARCHITECT_OR_ADMIN_OR_COMPANY]: [UserRole.ARCHITECT, UserRole.ADMIN, UserRole.COMPANY],
 }

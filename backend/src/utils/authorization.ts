@@ -1,4 +1,4 @@
-import { ApiError } from './ApiError';
+import { ApiError } from './api.error';
 import { HTTP_STATUS } from '../constants';
 import { UserRole } from '../models/interfaces';
 import { AuthRequest } from '../types/request.types';
@@ -70,9 +70,10 @@ export class AuthorizationService {
   }
 
   /**
-   * Get the profile ID for a user with a specific role
-   */
-  public static getUserProfileId(req: AuthRequest, role: UserRole): string {
+ * Get the profile ID for a user with a specific role
+ * Dynamic approach that obtains profile ID from token or database as needed
+ */
+  public static async getUserProfileId(req: AuthRequest, role: UserRole): Promise<string> {
     this.verifyAuthentication(req);
 
     if (req.user!.role !== role) {
@@ -84,22 +85,45 @@ export class AuthorizationService {
       );
     }
 
-    if (!req.user!.profile) {
-      throw new ApiError(
-        HTTP_STATUS.FORBIDDEN,
-        'Profile not found',
-        true,
-        'PROFILE_NOT_FOUND'
-      );
+    // First check if profile ID is in token
+    if (req.user!.profile) {
+      return req.user!.profile.toString();
     }
 
-    return req.user!.profile.toString();
+    // If not in token, fetch from database based on role
+    try {
+      let profileId: string | null = null;
+
+      if (role === UserRole.COMPANY) {
+        const { default: CompanyProfile } = await import('../models/CompanyProfile');
+        const profile = await CompanyProfile.findOne({ user: req.user!.userId });
+        profileId = profile?._id?.toString() || null;
+      }
+      else if (role === UserRole.STUDENT) {
+        const { default: StudentProfile } = await import('../models/StudentProfile');
+        const profile = await StudentProfile.findOne({ user: req.user!.userId });
+        profileId = profile?._id?.toString() || null;
+      }
+
+      if (!profileId) {
+        throw new ApiError(HTTP_STATUS.FORBIDDEN, 'Profile not found', true, 'PROFILE_NOT_FOUND');
+      }
+
+      // Cache the profile ID in the request for future use
+      req.user!.profile = profileId;
+
+      return profileId;
+    } catch (error) {
+      logger.error(`Error retrieving profile: ${error instanceof Error ? error.message : String(error)}`);
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(HTTP_STATUS.FORBIDDEN, 'Profile not found', true, 'PROFILE_NOT_FOUND');
+    }
   }
 
   /**
    * Verify that a user owns a resource
    */
-  public static verifyOwnership(req: AuthRequest, ownershipCheck: OwnershipCheck): void {
+  public static async verifyOwnership(req: AuthRequest, ownershipCheck: OwnershipCheck): Promise<void> {
     this.verifyAuthentication(req);
 
     const { resource, resourceOwnerIdField, ownerRole, message } = ownershipCheck;
@@ -129,7 +153,7 @@ export class AuthorizationService {
     }
 
     // Get the profile ID for the user
-    const profileId = this.getUserProfileId(req, ownerRole);
+    const profileId = await this.getUserProfileId(req, ownerRole);
 
     // Get the owner ID from the resource
     let resourceOwnerId: string;
@@ -187,7 +211,7 @@ export class AuthorizationService {
 
     // Execute the check function
     const isAuthorized = await relationshipCheck.check(req, resource);
-    
+
     if (!isAuthorized) {
       logger.warn(`Relationship check failed: User ${req.user!.userId} failed custom relationship check`);
       throw new ApiError(

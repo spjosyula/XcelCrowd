@@ -1,21 +1,27 @@
-import { Types, Document, ClientSession } from 'mongoose';
-import { ArchitectProfile, Solution, Challenge } from '../models';
+import mongoose, { Types, Document, ClientSession, FilterQuery } from 'mongoose';
+import { ArchitectProfile, Solution, Challenge, User } from '../models';
 import {
   IArchitectProfile,
   ISolution,
   SolutionStatus,
   ChallengeStatus,
   HTTP_STATUS,
-  UserRole
+  UserRole,
+  IUser,
+  IChallenge
 } from '../models/interfaces';
-import { ApiError } from '../utils/ApiError';
+import { ApiError } from '../utils/api.error';
 import { logger } from '../utils/logger';
+import { CreateUserDTO } from './user.service';
+import { profileService } from './profile.service';
+import { solutionService } from './solution.service';
+import { BaseService } from './BaseService';
 
 /**
  * Service for architect-related operations
  * Contains all business logic for architect operations
  */
-export class ArchitectService {
+export class ArchitectService extends BaseService {
   /**
    * Authorize an architect and return their profile ID
    * Business logic for architect authorization
@@ -48,6 +54,85 @@ export class ArchitectService {
       logger.error(`Authorization failed for architect ${userId} to ${action}:`, error);
       if (error instanceof ApiError) throw error;
       throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to authorize architect');
+    }
+  }
+
+  /**
+ * Create a new architect user with profile (admin only)
+ * @param adminUserId - The ID of the admin creating the architect
+ * @param architectData - User and profile data for the new architect
+ * @returns Created user and profile information
+ */
+  async createArchitectUser(
+    adminUserId: string,
+    architectData: {
+      email: string;
+      password: string;
+      firstName: string;
+      lastName: string;
+      specialization?: string;
+      yearsOfExperience?: number;
+      bio?: string;
+      skills?: string[];
+      certifications?: string[];
+    }
+  ): Promise<{ user: IUser; profile: IArchitectProfile }> {
+    try {
+      return await this.withTransaction(async (session) => {
+        // Check if user with email already exists
+        const existingUser = await User.findOne({ email: architectData.email }).session(session);
+        if (existingUser) {
+          throw new ApiError(HTTP_STATUS.CONFLICT, 'Email already in use');
+        }
+  
+        // Create user document with architect role
+        const userData: CreateUserDTO = {
+          email: architectData.email,
+          password: architectData.password,
+          role: UserRole.ARCHITECT
+        };
+  
+        // Create user in database
+        const users = await User.create([userData], { session });
+        const user = users[0];
+  
+        // Extract profile fields from architect data
+        const { email, password, ...profileFields } = architectData;
+  
+        // Create architect profile
+        const createdProfiles = await ArchitectProfile.create([
+          {
+            user: user._id,
+            ...profileFields
+          }
+        ], { session });
+        const architectProfile = createdProfiles[0];
+  
+        logger.info(`Architect user created by admin ${adminUserId}`, {
+          adminId: adminUserId,
+          architectId: user._id.toString(),
+          architectEmail: user.email
+        });
+  
+        return {
+          user,
+          profile: architectProfile
+        };
+      });
+    } catch (error) {
+      logger.error(`Error creating architect user: ${error instanceof Error ? error.message : String(error)}`, {
+        adminId: adminUserId,
+        email: architectData.email,
+        error
+      });
+  
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(
+        HTTP_STATUS.INTERNAL_SERVER_ERROR, 
+        'Failed to create architect user',
+        true,
+        'ARCHITECT_USER_CREATION_ERROR'
+      );
     }
   }
 
@@ -285,7 +370,7 @@ export class ArchitectService {
               // Populate student data
               {
                 $lookup: {
-                  from: 'studentprofiles', 
+                  from: 'studentprofiles',
                   localField: 'student',
                   foreignField: '_id',
                   as: 'student'
@@ -366,6 +451,397 @@ export class ArchitectService {
   }
 
   /**
+ * Claim an entire challenge for review
+ * This assigns all solutions in this challenge to the architect
+ * 
+ * @param challengeId - The ID of the challenge to claim
+ * @param architectId - The ID of the architect claiming the challenge
+ * @returns The updated challenge with claimed status
+ * @throws ApiError if challenge is not found, not in CLOSED status, or already claimed
+ */
+  async claimChallengeForReview(
+    challengeId: string,
+    architectId: string
+  ): Promise<IChallenge> {
+    // Validate input parameters
+    if (!challengeId || !architectId) {
+      throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Challenge ID and architect ID are required');
+    }
+  
+    try {
+      return await this.withTransaction(async (session) => {
+        // Validate IDs with type checking
+        if (!Types.ObjectId.isValid(challengeId)) {
+          throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid challenge ID format');
+        }
+  
+        if (!Types.ObjectId.isValid(architectId)) {
+          throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid architect ID format');
+        }
+  
+        // Find the challenge using session
+        const challenge = await Challenge.findById(challengeId)
+          .session(session)
+          .lean({ virtuals: true })
+          .exec();
+  
+        // Comprehensive null checking
+        if (!challenge) {
+          throw new ApiError(
+            HTTP_STATUS.NOT_FOUND,
+            `Challenge with ID ${challengeId} not found`
+          );
+        }
+        
+        // Check if review deadline has passed
+        if (challenge.reviewDeadline && new Date() > challenge.reviewDeadline) {
+          logger.warn(`Attempt to claim challenge with expired review deadline`, {
+            challengeId,
+            architectId,
+            reviewDeadline: challenge.reviewDeadline
+          });
+      
+          throw new ApiError(
+            HTTP_STATUS.BAD_REQUEST,
+            `Cannot claim this challenge as the review deadline has passed: ${challenge.reviewDeadline.toISOString().split('T')[0]}`
+          );
+        }
+  
+        // Check if challenge is in CLOSED status
+        if (challenge.status !== ChallengeStatus.CLOSED) {
+          logger.warn(`Attempt to claim challenge in invalid status: ${challenge.status}`, {
+            challengeId,
+            architectId,
+            currentStatus: challenge.status
+          });
+  
+          throw new ApiError(
+            HTTP_STATUS.BAD_REQUEST,
+            `Only challenges with status 'closed' can be claimed for review. Current status: ${challenge.status}`
+          );
+        }
+  
+        // Check if challenge is already claimed by another architect
+        if (challenge.claimedBy && challenge.claimedBy.toString() !== architectId) {
+          const claimingArchitect = await ArchitectProfile.findById(challenge.claimedBy)
+            .session(session)
+            .lean()
+            .exec();
+  
+          logger.warn(`Conflict: Challenge already claimed by another architect`, {
+            challengeId,
+            attemptingArchitectId: architectId,
+            currentClaimantId: challenge.claimedBy.toString(),
+            claimantName: `${claimingArchitect?.firstName || 'Unknown'} ${claimingArchitect?.lastName || 'Architect'}`
+          });
+  
+          throw new ApiError(
+            HTTP_STATUS.CONFLICT,
+            `This challenge has already been claimed by another architect: ${claimingArchitect?.firstName || 'Unknown'} ${claimingArchitect?.lastName || 'Architect'}`
+          );
+        }
+  
+        // If already claimed by this architect, just return the challenge
+        if (challenge.claimedBy && challenge.claimedBy.toString() === architectId) {
+          logger.info(`Challenge ${challengeId} already claimed by architect ${architectId}, returning existing claim`);
+  
+          // Return fresh data with population
+          const populatedChallenge = await Challenge.findById(challengeId)
+            .populate('claimedBy', 'firstName lastName specialization')
+            .lean({ virtuals: true })
+            .exec();
+  
+          if (!populatedChallenge) {
+            throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Challenge not found after claiming');
+          }
+  
+          return populatedChallenge as IChallenge;
+        }
+  
+        // Verify architect exists
+        const architect = await ArchitectProfile.findById(architectId)
+          .session(session)
+          .lean()
+          .exec();
+  
+        if (!architect) {
+          throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Architect profile not found');
+        }
+  
+        // Update challenge document to mark as claimed
+        const updatedChallenge = await Challenge.findByIdAndUpdate(
+          challengeId,
+          {
+            claimedBy: new Types.ObjectId(architectId),
+            claimedAt: new Date(),
+            updatedAt: new Date()
+          },
+          {
+            new: true,
+            runValidators: true,
+            session
+          }
+        );
+  
+        if (!updatedChallenge) {
+          throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to update challenge');
+        }
+  
+        // Get all SUBMITTED solutions for this challenge - use countDocuments first for optimization
+        const submittedSolutionsCount = await Solution.countDocuments({
+          challenge: challengeId,
+          status: SolutionStatus.SUBMITTED
+        }).session(session);
+  
+        // Only proceed with update if there are solutions to update
+        if (submittedSolutionsCount > 0) {
+          // Batch update all solutions with optimized query
+          const updateResult = await Solution.updateMany(
+            {
+              challenge: challengeId,
+              status: SolutionStatus.SUBMITTED
+            },
+            {
+              $set: {
+                status: SolutionStatus.UNDER_REVIEW,
+                reviewedBy: new Types.ObjectId(architectId),
+                updatedAt: new Date()
+              }
+            },
+            { session }
+          );
+  
+          logger.info(`Updated ${updateResult.modifiedCount} solutions to UNDER_REVIEW status for challenge ${challengeId}`);
+  
+          // Verify update succeeded
+          if (updateResult.modifiedCount !== submittedSolutionsCount) {
+            logger.warn(`Not all solutions were updated (${updateResult.modifiedCount}/${submittedSolutionsCount})`, {
+              challengeId,
+              architectId
+            });
+          }
+        } else {
+          logger.info(`No submitted solutions found for challenge ${challengeId}`);
+        }
+  
+        // Log success with detailed information
+        logger.info(`Challenge ${challengeId} successfully claimed by architect ${architectId}`, {
+          challengeId,
+          architectId,
+          title: updatedChallenge.title,
+          submittedSolutionsCount,
+          timestamp: new Date().toISOString()
+        });
+  
+        // Return the populated challenge with efficient projection
+        const populatedChallenge = await Challenge.findById(challengeId)
+          .populate({
+            path: 'claimedBy',
+            select: 'firstName lastName specialization',
+          })
+          .populate({
+            path: 'company',
+            select: 'companyName'
+          })
+          .lean({ virtuals: true })
+          .exec();
+  
+        if (!populatedChallenge) {
+          logger.error(`Challenge not found after successful claim operation`, {
+            challengeId,
+            architectId
+          });
+          throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Challenge not found after claiming');
+        }
+  
+        return populatedChallenge as IChallenge;
+      });
+    } catch (error) {
+      // Comprehensive error logging with context
+      logger.error(
+        `Error claiming challenge: ${error instanceof Error ? error.message : String(error)}`,
+        {
+          challengeId,
+          architectId,
+          errorStack: error instanceof Error ? error.stack : undefined,
+          errorName: error instanceof Error ? error.name : 'Unknown',
+          timestamp: new Date().toISOString()
+        }
+      );
+  
+      // Error propagation with proper classification
+      if (error instanceof ApiError) {
+        throw error;
+      }
+  
+      if (error instanceof mongoose.Error) {
+        throw new ApiError(
+          HTTP_STATUS.INTERNAL_SERVER_ERROR,
+          `Database error: ${error.message}`,
+          true,
+          'DATABASE_ERROR'
+        );
+      }
+  
+      throw new ApiError(
+        HTTP_STATUS.INTERNAL_SERVER_ERROR,
+        'Failed to claim challenge for review',
+        true,
+        'CLAIM_CHALLENGE_ERROR'
+      );
+    }
+  }
+
+  /**
+ * Get all challenges claimed by an architect
+ * @param architectId - Architect profile ID
+ * @param options - Pagination and filtering options
+ * @returns List of claimed challenges with their solutions stats
+ */
+  async getClaimedChallenges(
+    architectId: string,
+    options: {
+      status?: ChallengeStatus;
+      page?: number;
+      limit?: number;
+    } = {}
+  ): Promise<{
+    challenges: Array<IChallenge & { solutionStats?: Record<string, number> }>;
+    total: number;
+    page: number;
+    limit: number;
+  }> {
+    try {
+      // Validate architect ID
+      if (!Types.ObjectId.isValid(architectId)) {
+        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid architect ID format');
+      }
+
+      // Parse options with default values
+      const {
+        status,
+        page = 1,
+        limit = 10
+      } = options;
+
+      // Build query with proper type safety
+      const query: FilterQuery<IChallenge> = {
+        claimedBy: new Types.ObjectId(architectId)
+      };
+
+      // Add status filter if specified and valid
+      if (status && Object.values(ChallengeStatus).includes(status)) {
+        query.status = status;
+      }
+
+      // Calculate pagination parameters
+      const skip = (Number(page) - 1) * Number(limit);
+
+      // Execute query with pagination using Promise.all for efficiency
+      const [challenges, total] = await Promise.all([
+        Challenge.find(query)
+          .populate({
+            path: 'company',
+            select: 'companyName logo industry location'
+          })
+          .populate({
+            path: 'claimedBy',
+            select: 'firstName lastName specialization'
+          })
+          .sort({ claimedAt: -1 })
+          .skip(skip)
+          .limit(Number(limit))
+          .lean({ virtuals: true }),
+        Challenge.countDocuments(query)
+      ]);
+
+      // Get solution stats for each challenge using aggregation pipeline
+      const challengeIds = challenges.map(c => c._id);
+
+      // Only run aggregation if we have challenges
+      let solutionStats: Record<string, Record<string, number>> = {};
+      if (challengeIds.length > 0) {
+        const solutionAggregation = await Solution.aggregate([
+          {
+            $match: {
+              challenge: { $in: challengeIds },
+            }
+          },
+          {
+            $group: {
+              _id: {
+                challenge: "$challenge",
+                status: "$status"
+              },
+              count: { $sum: 1 }
+            }
+          }
+        ]);
+
+        // Transform aggregation results to a more usable format
+        // challengeId -> { status: count, status2: count }
+        solutionStats = solutionAggregation.reduce((acc, curr) => {
+          const challengeId = curr._id.challenge.toString();
+          const status = curr._id.status;
+
+          if (!acc[challengeId]) {
+            acc[challengeId] = {};
+          }
+
+          acc[challengeId][status] = curr.count;
+          return acc;
+        }, {} as Record<string, Record<string, number>>);
+      }
+
+      // Enhance challenges with solution statistics
+      const enhancedChallenges = challenges.map(challenge => {
+        const challengeId = challenge._id.toString();
+        return {
+          ...challenge,
+          solutionStats: solutionStats[challengeId] || {},
+          // Add total solutions count
+          totalSolutions: Object.values(solutionStats[challengeId] || {})
+            .reduce((sum, count) => sum + count, 0)
+        };
+      });
+
+      logger.debug(`Retrieved ${enhancedChallenges.length} claimed challenges for architect ${architectId}`, {
+        architectId,
+        totalChallenges: total,
+        currentPage: page
+      });
+
+      return {
+        challenges: enhancedChallenges,
+        total,
+        page: Number(page),
+        limit: Number(limit)
+      };
+    } catch (error) {
+      logger.error(
+        `Error getting claimed challenges: ${error instanceof Error ? error.message : String(error)}`,
+        {
+          architectId,
+          options: JSON.stringify(options),
+          error: error instanceof Error ? {
+            name: error.name,
+            message: error.message,
+            stack: error.stack
+          } : String(error)
+        }
+      );
+
+      if (error instanceof ApiError) throw error;
+
+      throw new ApiError(
+        HTTP_STATUS.INTERNAL_SERVER_ERROR,
+        'Failed to retrieve claimed challenges',
+        true,
+        'CLAIMED_CHALLENGES_RETRIEVAL_ERROR'
+      );
+    }
+  }
+  /**
    * Validate if an architect can review a solution
    * @param solutionId - The ID of the solution
    * @param architectId - The ID of the architect reviewing
@@ -405,6 +881,78 @@ export class ArchitectService {
       throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to validate solution for review');
     }
   }
+  async claimChallengeById(userId: string, challengeId: string): Promise<IChallenge> {
+    // Validate challenge ID
+    if (!Types.ObjectId.isValid(challengeId)) {
+      throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid challenge ID format');
+    }
+
+    // Get architect profile ID
+    const architectId = await profileService.getArchitectProfileId(userId);
+
+    // Claim the challenge
+    const challenge = await this.claimChallengeForReview(challengeId, architectId);
+
+    return challenge;
+  }
+
+  async getArchitectClaimedChallenges(
+    userId: string,
+    queryParams: any
+  ): Promise<{
+    challenges: Array<IChallenge & { solutionStats?: Record<string, number> }>;
+    total: number;
+    page: number;
+    limit: number;
+  }> {
+    // Get architect profile ID
+    const architectId = await profileService.getArchitectProfileId(userId);
+
+    // Parse query parameters
+    const status = queryParams.status as ChallengeStatus | undefined;
+    const page = queryParams.page ? parseInt(queryParams.page as string) : 1;
+    const limit = queryParams.limit ? parseInt(queryParams.limit as string) : 10;
+
+    // Get claimed challenges
+    return this.getClaimedChallenges(architectId, { status, page, limit });
+  }
+
+  async claimSolutionViaChallenge(
+    userId: string,
+    solutionId: string
+  ): Promise<ISolution> {
+    // Validate IDs
+    if (!Types.ObjectId.isValid(solutionId)) {
+      throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid solution ID format');
+    }
+
+    // Get architect profile ID
+    const architectId = await profileService.getArchitectProfileId(userId);
+
+    // Get the solution to find its challenge
+    const solution = await Solution.findById(solutionId).select('challenge');
+
+    if (!solution) {
+      throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Solution not found');
+    }
+
+    // Extract the challenge ID
+    const challengeId = solution.challenge?.toString();
+
+    if (!challengeId) {
+      throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Solution has no associated challenge');
+    }
+
+    // Claim the entire challenge
+    await this.claimChallengeForReview(challengeId, architectId);
+
+    // Get the updated solution
+    const updatedSolution = await solutionService.getSolutionById(solutionId, userId, UserRole.ARCHITECT);
+
+    return updatedSolution;
+  }
+
+
 
   /**
    * Process review data and validate it
@@ -466,71 +1014,70 @@ export class ArchitectService {
     reviewData: { status: SolutionStatus; feedback: string; score?: number }
   ): Promise<ISolution> {
     try {
-      // Start a transaction for atomicity
-      const session = await Solution.startSession();
-      session.startTransaction();
-
-      try {
+      return await this.withTransaction(async (session) => {
         // Validate solution for review
         const solution = await this.validateSolutionForReview(solutionId, architectId);
-
+  
         // If approving, check if challenge approval limit reached
         if (reviewData.status === SolutionStatus.APPROVED) {
           const challenge = await Challenge.findById(solution.challenge).session(session);
           if (!challenge) {
             throw ApiError.notFound('Challenge not found');
           }
-
+  
           if (challenge.isApprovalLimitReached()) {
             throw ApiError.badRequest('Maximum number of approved solutions reached for this challenge');
           }
-
+  
           // Increment the approved solutions count
           challenge.approvedSolutionsCount += 1;
           await challenge.save({ session });
         }
-
+  
         // Update solution with review data
         solution.status = reviewData.status;
         solution.feedback = reviewData.feedback;
         solution.reviewedBy = new Types.ObjectId(architectId);
         solution.reviewedAt = new Date();
-
+  
         if (reviewData.score !== undefined) {
           solution.score = reviewData.score;
         }
-
+  
         await solution.save({ session });
-
-        // Commit the transaction
-        await session.commitTransaction();
-
+  
         logger.info(`Solution ${solutionId} reviewed by architect ${architectId} with status ${reviewData.status}`);
-
+  
         // Return populated solution
-        const updatedSolution = await Solution.findById(solutionId).populate([
-          { path: 'challenge' },
-          { path: 'student' },
-          { path: 'reviewedBy' }
-        ]);
-
+        const updatedSolution = await Solution.findById(solutionId)
+          .populate([
+            { path: 'challenge' },
+            { path: 'student' },
+            { path: 'reviewedBy' }
+          ])
+          .session(session);
+  
         if (!updatedSolution) {
           throw ApiError.notFound('Solution not found after review');
         }
-
+  
         return updatedSolution;
-      } catch (error) {
-        // Abort transaction on error
-        await session.abortTransaction();
-        throw error;
-      } finally {
-        // End session
-        session.endSession();
-      }
+      });
     } catch (error) {
-      logger.error(`Error reviewing solution ${solutionId}:`, error);
+      logger.error(`Error reviewing solution ${solutionId}:`, {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        solutionId,
+        architectId
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to review solution');
+      throw new ApiError(
+        HTTP_STATUS.INTERNAL_SERVER_ERROR, 
+        'Failed to review solution',
+        true,
+        'SOLUTION_REVIEW_ERROR'
+      );
     }
   }
 
@@ -657,48 +1204,57 @@ export class ArchitectService {
   }
 
   /**
-   * Claim a solution for review
+   * Claim a solution for review -> Architect should claim a challenge instead, this method exists for backward compatibility
    * @param solutionId - The ID of the solution
    * @param architectId - The ID of the architect
    * @returns The updated solution
    */
   async claimSolutionForReview(solutionId: string, architectId: string): Promise<ISolution> {
-    const session = await Solution.startSession();
     try {
-      session.startTransaction();
-      if (!Types.ObjectId.isValid(solutionId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid solution ID format');
-      }
-
-      if (!Types.ObjectId.isValid(architectId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid architect ID format');
-      }
-
-      const solution = await Solution.findById(solutionId);
-
-      if (!solution) {
-        throw ApiError.notFound('Solution not found');
-      }
-
-      if (solution.status !== SolutionStatus.SUBMITTED) {
-        throw ApiError.badRequest('Solution is not available for review');
-      }
-
-      // Update solution status and assign reviewer
-      solution.status = SolutionStatus.UNDER_REVIEW;
-      solution.reviewedBy = new Types.ObjectId(architectId);
-      await solution.save({ session });
-
-      await session.commitTransaction();
-
-      return solution.populate([
-        { path: 'challenge' },
-        { path: 'student' }
-      ]);
+      return await this.withTransaction(async (session) => {
+        if (!Types.ObjectId.isValid(solutionId)) {
+          throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid solution ID format');
+        }
+  
+        if (!Types.ObjectId.isValid(architectId)) {
+          throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid architect ID format');
+        }
+  
+        const solution = await Solution.findById(solutionId).session(session);
+  
+        if (!solution) {
+          throw ApiError.notFound('Solution not found');
+        }
+  
+        if (solution.status !== SolutionStatus.SUBMITTED) {
+          throw ApiError.badRequest('Solution is not available for review');
+        }
+  
+        // Update solution status and assign reviewer
+        solution.status = SolutionStatus.UNDER_REVIEW;
+        solution.reviewedBy = new Types.ObjectId(architectId);
+        await solution.save({ session });
+  
+        return solution.populate([
+          { path: 'challenge' },
+          { path: 'student' }
+        ]);
+      });
     } catch (error) {
-      logger.error(`Error claiming solution ${solutionId} for review:`, error);
+      logger.error(`Error claiming solution ${solutionId} for review:`, {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        solutionId,
+        architectId
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to claim solution for review');
+      throw new ApiError(
+        HTTP_STATUS.INTERNAL_SERVER_ERROR, 
+        'Failed to claim solution for review',
+        true,
+        'CLAIM_SOLUTION_ERROR'
+      );
     }
   }
 
@@ -806,6 +1362,162 @@ export class ArchitectService {
     }
   }
 
+  /**
+ * Get pending challenges available for review
+ * @param userId - The ID of the architect user
+ * @param queryParams - Query parameters for filtering and pagination
+ * @returns Paginated list of pending challenges
+ */
+  async getPendingChallenges(
+    userId: string,
+    queryParams: any
+  ): Promise<{
+    challenges: Array<IChallenge & { solutionsCount?: number }>;
+    total: number;
+    page: number;
+    limit: number;
+  }> {
+    try {
+      // Parse query parameters
+      const status = queryParams.status as ChallengeStatus || ChallengeStatus.CLOSED;
+      const page = queryParams.page ? parseInt(queryParams.page as string) : 1;
+      const limit = queryParams.limit ? parseInt(queryParams.limit as string) : 10;
+      const skip = (page - 1) * limit;
+
+      // Get architect profile ID for filtering out already claimed challenges
+      const architectId = await profileService.getArchitectProfileId(userId);
+
+      // Build query - looking for challenges in CLOSED status without a claimedBy field
+      // or not claimed by this architect
+      const query: FilterQuery<IChallenge> = {
+        status: status,
+        $or: [
+          { claimedBy: { $exists: false } },
+          { claimedBy: null }
+        ]
+      };
+
+      // Use aggregation for efficient query with counts
+      const aggregationPipeline = [
+        { $match: query },
+        { $sort: { deadline: -1 as 1 | -1 } },
+        {
+          $facet: {
+            // Get total count
+            totalCount: [
+              { $count: 'count' }
+            ],
+            // Get paginated results with populated data
+            paginatedResults: [
+              { $skip: skip },
+              { $limit: limit },
+              // Add solutions count
+              {
+                $lookup: {
+                  from: 'solutions',
+                  let: { challengeId: '$_id' },
+                  pipeline: [
+                    {
+                      $match: {
+                        $expr: { $eq: ['$challenge', '$$challengeId'] },
+                        status: SolutionStatus.SUBMITTED
+                      }
+                    },
+                    { $count: 'count' }
+                  ],
+                  as: 'solutionsData'
+                }
+              },
+              // Populate company data
+              {
+                $lookup: {
+                  from: 'companies',
+                  localField: 'company',
+                  foreignField: '_id',
+                  as: 'company'
+                }
+              },
+              {
+                $unwind: {
+                  path: '$company',
+                  preserveNullAndEmptyArrays: true
+                }
+              },
+              // Format the solutions count
+              {
+                $addFields: {
+                  solutionsCount: {
+                    $cond: {
+                      if: { $gt: [{ $size: '$solutionsData' }, 0] },
+                      then: { $arrayElemAt: ['$solutionsData.count', 0] },
+                      else: 0
+                    }
+                  }
+                }
+              },
+              // Project needed fields only
+              {
+                $project: {
+                  _id: 1,
+                  title: 1,
+                  description: 1,
+                  status: 1,
+                  difficulty: 1,
+                  deadline: 1,
+                  createdAt: 1,
+                  solutionsCount: 1,
+                  'company._id': 1,
+                  'company.companyName': 1,
+                  'company.logo': 1,
+                }
+              }
+            ]
+          }
+        }
+      ];
+
+      const results = await Challenge.aggregate(aggregationPipeline);
+
+      const total = results[0].totalCount[0]?.count || 0;
+      const challenges = results[0].paginatedResults;
+
+      logger.info(`Retrieved ${challenges.length} pending challenges for architect ${userId}`, {
+        architectId,
+        totalChallenges: total,
+        currentPage: page
+      });
+
+      return {
+        challenges,
+        total,
+        page,
+        limit
+      };
+    } catch (error) {
+      logger.error(
+        `Error getting pending challenges: ${error instanceof Error ? error.message : String(error)}`,
+        {
+          userId,
+          queryParams: JSON.stringify(queryParams),
+          error: error instanceof Error ? {
+            name: error.name,
+            message: error.message,
+            stack: error.stack
+          } : String(error)
+        }
+      );
+
+      if (error instanceof ApiError) throw error;
+
+      throw new ApiError(
+        HTTP_STATUS.INTERNAL_SERVER_ERROR,
+        'Failed to retrieve pending challenges',
+        true,
+        'PENDING_CHALLENGES_RETRIEVAL_ERROR'
+      );
+    }
+  }
+
 
   /**
  * Select solutions to forward to the company
@@ -819,67 +1531,81 @@ export class ArchitectService {
     solutionIds: string[],
     architectId: string
   ): Promise<ISolution[]> {
-    // Start a transaction for atomicity
-    const session = await Solution.startSession();
-
     try {
-      session.startTransaction();
-
-      // Use the validation method to verify all selections are valid
-      // This avoids duplicating validation logic
-      const { solutions, challenge } = await this.validateSolutionsForSelection(
-        challengeId,
-        solutionIds,
-        architectId,
-        session
-      );
-
-      // Prepare solution IDs for bulk update
-      const validatedSolutionIds = solutions.map(solution => solution._id);
-
-      // Update solutions to SELECTED status using bulkWrite for efficiency
-      await Solution.bulkWrite(
-        validatedSolutionIds.map((id) => ({
-          updateOne: {
-            filter: { _id: id },
-            update: {
-              $set: {
-                status: SolutionStatus.SELECTED,
-                selectedAt: new Date(),
-                selectedBy: new Types.ObjectId(architectId)
+      return await this.withTransaction(async (session) => {
+        // Use the validation method to verify all selections are valid
+        const { solutions, challenge } = await this.validateSolutionsForSelection(
+          challengeId,
+          solutionIds,
+          architectId,
+          session
+        );
+      
+        const validatedSolutionIds = solutions.map(solution => solution._id);
+      
+        // Add result verification
+        const bulkWriteResult = await Solution.bulkWrite(
+          validatedSolutionIds.map((id) => ({
+            updateOne: {
+              filter: { _id: id },
+              update: {
+                $set: {
+                  status: SolutionStatus.SELECTED,
+                  selectedAt: new Date(),
+                  selectedBy: new Types.ObjectId(architectId)
+                }
               }
             }
-          }
-        })),
-        { session }
-      );
-
-      // Update challenge status
-      challenge.status = ChallengeStatus.COMPLETED;
-      await challenge.save({ session });
-
-      // Commit the transaction
-      await session.commitTransaction();
-
-      logger.info(`${solutionIds.length} solutions selected for challenge ${challengeId} by architect ${architectId}`);
-
-      // Return the updated solutions with optimized population (select only needed fields)
-      return await Solution.find({ _id: { $in: validatedSolutionIds } })
-        .populate([
-          { path: 'challenge', select: 'title description status' },
-          { path: 'student', select: 'firstName lastName email' },
-          { path: 'reviewedBy', select: 'firstName lastName' }
-        ]);
-
+          })),
+          { session }
+        );
+      
+        // Verify that all documents were updated as expected
+        if (bulkWriteResult.modifiedCount !== validatedSolutionIds.length) {
+          throw new ApiError(
+            HTTP_STATUS.INTERNAL_SERVER_ERROR, 
+            'Not all solutions could be updated to SELECTED status'
+          );
+        }
+      
+        // Update challenge status
+        challenge.status = ChallengeStatus.COMPLETED;
+        await challenge.save({ session });
+      
+        logger.info(`${validatedSolutionIds.length} solutions selected for challenge ${challengeId} by architect ${architectId}`, {
+          challengeId,
+          architectId,
+          solutionCount: validatedSolutionIds.length
+        });
+      
+        // Return the updated solutions with optimized population
+        return await Solution.find({ _id: { $in: validatedSolutionIds } })
+          .populate([
+            { path: 'challenge', select: 'title description status' },
+            { path: 'student', select: 'firstName lastName email' },
+            { path: 'reviewedBy', select: 'firstName lastName' }
+          ])
+          .session(session);
+      });
     } catch (error) {
-      // Abort transaction on error
-      await session.abortTransaction();
-      logger.error(`Error selecting solutions for company:`, error);
+      // Improved error handling with more context
+      logger.error(`Error selecting solutions for company:`, {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        challengeId,
+        architectId,
+        solutionCount: solutionIds.length
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to select solutions for company');
-    } finally {
-      // End session in finally block to ensure it always gets closed
-      session.endSession();
+      throw new ApiError(
+        HTTP_STATUS.INTERNAL_SERVER_ERROR, 
+        'Failed to select solutions for company',
+        true,
+        'SOLUTION_SELECTION_ERROR'
+      );
     }
   }
 }
+
+export const architectService = new ArchitectService();

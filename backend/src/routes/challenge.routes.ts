@@ -1,16 +1,18 @@
-import express from 'express';
+import { Router } from 'express';
 import { challengeController } from '../controllers/challenge.controller';
 import { authenticate, authorizePattern } from '../middlewares/auth.middleware';
 import { validateRequest } from '../middlewares/validation.middleware';
 import { createChallengeSchemaWithRefinements, updateChallengeSchema } from '../validations/challenge.validation';
 import { AuthPattern } from '../types/authorization.types';
 
-const router = express.Router();
+const router = Router();
 
 /**
  * @route   POST /api/challenges
  * @desc    Create a new challenge
  * @access  Private - Company only
+ * @swagger
+ * /challenges:
  */
 router.post(
   '/',
@@ -24,6 +26,8 @@ router.post(
  * @route   GET /api/challenges
  * @desc    Get all challenges with filters
  * @access  Private - Authentication required
+ * @swagger
+ * /challenges:
  */
 router.get(
   '/',
@@ -36,6 +40,8 @@ router.get(
  * @route   GET /api/challenges/company
  * @desc    Get all challenges created by current company
  * @access  Private - Company only
+ * @swagger
+ * /challenges/company:
  */
 router.get(
   '/company',
@@ -48,6 +54,8 @@ router.get(
  * @route   GET /api/challenges/:id
  * @desc    Get a challenge by ID
  * @access  Private - Authentication required with dynamic permission checks
+ * @swagger
+ * /challenges/{id}:
  */
 router.get(
   '/:id',
@@ -60,6 +68,8 @@ router.get(
  * @route   PUT /api/challenges/:id
  * @desc    Update a challenge
  * @access  Private - Challenge owner (Company) or Admin only
+ * @swagger
+ * /challenges/{id}:
  */
 router.put(
   '/:id',
@@ -73,6 +83,8 @@ router.put(
  * @route   DELETE /api/challenges/:id
  * @desc    Delete a challenge
  * @access  Private - Challenge owner (Company) or Admin only
+ * @swagger
+ * /challenges/{id}:
  */
 router.delete(
   '/:id',
@@ -85,6 +97,8 @@ router.delete(
  * @route   PATCH /api/challenges/:id/close
  * @desc    Close a challenge for submissions
  * @access  Private - Challenge owner (Company) or Admin only
+ * @swagger
+ * /challenges/{id}/close:
  */
 router.patch(
   '/:id/close',
@@ -97,6 +111,8 @@ router.patch(
  * @route   PATCH /api/challenges/:id/complete
  * @desc    Complete a challenge (finalize after review process)
  * @access  Private - Challenge owner (Company) or Admin only
+ * @swagger
+ * /challenges/{id}/complete:
  */
 router.patch(
   '/:id/complete',
@@ -105,7 +121,13 @@ router.patch(
   challengeController.completeChallenge
 );
 
-// Add statistics route
+/**
+ * @route   GET /api/challenges/:id/statistics
+ * @desc    Get challenge statistics
+ * @access  Private - Challenge owner (Company) or Admin only
+ * @swagger
+ * /challenges/{id}/statistics:
+ */
 router.get(
   '/:id/statistics',
   authenticate,
@@ -113,12 +135,18 @@ router.get(
   challengeController.getChallengeStatistics
 );
 
-// // Add solutions route -> to be implemented in future
-// router.get(
-//   '/:id/solutions',
-//   authenticate,
-//   authorizePattern(AuthPattern.RESOURCE_OWNER),
-//   challengeController.getChallengeSolutions
-// );
+/**
+ * @route   PATCH /api/challenges/:id/publish
+ * @desc    Publish a challenge
+ * @access  Private - Challenge owner (Company) or Admin only
+ * @swagger
+ * /challenges/{id}/publish:
+ */
+router.patch(
+  '/:id/publish',
+  authenticate,
+  authorizePattern(AuthPattern.RESOURCE_OWNER),
+  challengeController.publishChallenge
+);
 
 export default router;

@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { HTTP_STATUS } from '../constants';
-import { ApiError } from '../utils/ApiError';
-import { ApiResponse } from '../utils/ApiResponse';
+import { ApiError } from '../utils/api.error';
+import { ApiResponse } from '../utils/api.response';
 import { logger } from '../utils/logger';
 import mongoose from 'mongoose';
 

@@ -1,5 +1,4 @@
 import { Request } from 'express';
-import { Types } from 'mongoose';
 import { UserRole } from '../models/interfaces';
 
 /**
@@ -10,8 +9,8 @@ export interface AuthRequest extends Request {
     userId: string;
     email: string;
     role: UserRole | string; // Allow both string and enum for compatibility
-    profile?: Types.ObjectId | string;
-  };
+    profile?: string; // Remove ObjectId type since it's not compatible with the base Request
+  } & Record<string, any>; // Allow additional properties
   
   /**
    * Validated data from request validation middleware

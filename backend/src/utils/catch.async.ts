@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { ApiError } from './ApiError';
+import { ApiError } from './api.error';
 import { logger } from './logger';
 import { HTTP_STATUS } from '../constants';
 

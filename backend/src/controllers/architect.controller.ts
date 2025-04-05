@@ -1,12 +1,11 @@
 import { Response, NextFunction } from 'express';
-import { ArchitectService } from '../services/architect.service';
-import { UserRole } from '../models/interfaces';
+import { architectService, ArchitectService} from '../services/architect.service';
+import { ChallengeStatus, HTTP_STATUS, UserRole } from '../models/interfaces';
 import { BaseController } from './BaseController';
 import { AuthRequest } from '../types/request.types';
-import { catchAsync } from '../utils/catchAsync';
+import { catchAsync } from '../utils/catch.async';
+import { logger } from '../utils/logger';
 
-// Instantiate service for controller
-const architectService = new ArchitectService();
 
 /**
  * Controller for architect-related operations
@@ -14,9 +13,52 @@ const architectService = new ArchitectService();
  * Contains no business logic - delegates to ArchitectService
  */
 export class ArchitectController extends BaseController {
+  private readonly architectService: ArchitectService;
   constructor() {
     super();
+    this.architectService = architectService;
   }
+
+  /**
+ * Create a new architect user (admin only)
+ * @route POST /api/admin/architects
+ * @access Private - Admin only
+ */
+  public createArchitectUser = catchAsync(
+    async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      // Verify admin authorization
+      this.verifyAuthorization(req, [UserRole.ADMIN]);
+
+      // Create architect via service
+      const result = await this.architectService.createArchitectUser(
+        req.user!.userId,
+        req.body
+      );
+
+      // Prepare sanitized response (remove sensitive data)
+      const sanitizedResponse = {
+        user: {
+          _id: result.user._id,
+          email: result.user.email,
+          role: result.user.role,
+        },
+        profile: result.profile
+      };
+
+      // Log the action
+      this.logAction('create-architect-user', req.user!.userId, {
+        architectId: result.user._id.toString()
+      });
+
+      // Send success response
+      this.sendSuccess(
+        res,
+        sanitizedResponse,
+        'Architect user created successfully',
+        HTTP_STATUS.CREATED
+      );
+    }
+  );
 
   /**
    * Get architect profile
@@ -26,10 +68,10 @@ export class ArchitectController extends BaseController {
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
       // Verify user has architect role (authorization check)
       this.verifyAuthorization(req, [UserRole.ARCHITECT]);
-      
+
       // Delegate to service
-      const profile = await architectService.getProfileByUserId(req.user!.userId);
-      
+      const profile = await this.architectService.getProfileByUserId(req.user!.userId);
+
       // Log and respond
       this.logAction('get-profile', req.user!.userId, { profileId: profile?._id });
       this.sendSuccess(res, profile, 'Architect profile retrieved successfully');
@@ -44,18 +86,18 @@ export class ArchitectController extends BaseController {
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
       // Verify user has architect role (authorization check)
       this.verifyAuthorization(req, [UserRole.ARCHITECT]);
-      
+
       // Delegate validation and update to service
-      const updatedProfile = await architectService.createOrUpdateProfile(
-        req.user!.userId, 
+      const updatedProfile = await this.architectService.createOrUpdateProfile(
+        req.user!.userId,
         req.body
       );
-      
+
       // Log and respond
       this.logAction('update-profile', req.user!.userId);
       this.sendSuccess(
-        res, 
-        updatedProfile, 
+        res,
+        updatedProfile,
         'Architect profile updated successfully'
       );
     }
@@ -68,14 +110,14 @@ export class ArchitectController extends BaseController {
   public getPendingSolutions = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
       // Authorization via service
-      await architectService.authorizeArchitect(req.user!.userId, 'list-solutions');
-      
+      await this.architectService.authorizeArchitect(req.user!.userId, 'list-solutions');
+
       // Filter parsing and validation via service
-      const filters = architectService.parseSolutionFilters(req.query);
-      
+      const filters = this.architectService.parseSolutionFilters(req.query);
+
       // Get solutions via service
-      const result = await architectService.getPendingSolutions(filters);
-      
+      const result = await this.architectService.getPendingSolutions(filters);
+
       // Respond with paginated result - transform to expected PaginationResult format
       this.sendPaginatedSuccess(
         res,
@@ -100,11 +142,11 @@ export class ArchitectController extends BaseController {
   public getSolution = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
       // Authorization via service
-      await architectService.authorizeArchitect(req.user!.userId, 'view-solution');
-      
+      await this.architectService.authorizeArchitect(req.user!.userId, 'view-solution');
+
       // Get solution via service (includes ID validation)
-      const solution = await architectService.getSolutionById(req.params.id);
-      
+      const solution = await this.architectService.getSolutionById(req.params.id);
+
       // Respond
       this.sendSuccess(res, solution, 'Solution retrieved successfully');
     }
@@ -117,60 +159,185 @@ export class ArchitectController extends BaseController {
   public reviewSolution = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
       // Authorization via service
-      const { architectId } = await architectService.authorizeArchitectForSolution(
+      const { architectId } = await this.architectService.authorizeArchitectForSolution(
         req.user!.userId,
         req.params.id,
         'review'
       );
-      
+
       // Validate review data via service
-      const reviewData = architectService.validateReviewData(req.body);
-      
+      const reviewData = this.architectService.validateReviewData(req.body);
+
       // Submit review via service
-      const updatedSolution = await architectService.reviewSolution(
+      const updatedSolution = await this.architectService.reviewSolution(
         req.params.id,
         architectId,
         reviewData
       );
-      
+
       // Log and respond
-      this.logAction('review-solution', req.user!.userId, { 
-        solutionId: req.params.id, 
-        status: reviewData.status 
+      this.logAction('review-solution', req.user!.userId, {
+        solutionId: req.params.id,
+        status: reviewData.status
       });
-      
+
       this.sendSuccess(
-        res, 
-        updatedSolution, 
+        res,
+        updatedSolution,
         'Solution reviewed successfully'
       );
     }
   );
 
   /**
-   * Claim a solution for review
-   * @route POST /architect/solutions/:id/claim
-   */
+ * Claim a solution for review
+ * @route PATCH /api/solutions/:id/claim
+ * @access Private - Architect only
+ * @deprecated Use challenge claiming instead
+ */
   public claimSolution = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
-      // Authorization via service
-      const architectId = await architectService.authorizeArchitect(
-        req.user!.userId, 
-        'claim-solution'
+      // Verify user has architect role
+      this.verifyAuthorization(req, [UserRole.ARCHITECT]);
+
+      const { id } = req.params;
+
+      // Business logic moved to service
+      const updatedSolution = await this.architectService.claimSolutionViaChallenge(
+        req.user!.userId,
+        id
       );
-      
-      // Claim solution via service (includes validation)
-      const claimedSolution = await architectService.claimSolutionForReview(
-        req.params.id,
-        architectId
-      );
-      
-      // Log and respond
-      this.logAction('claim-solution', req.user!.userId, { solutionId: req.params.id });
+
+      // Log action and send response
+      this.logAction('claim-solution-via-challenge', req.user!.userId, {
+        solutionId: id,
+        challengeId: typeof updatedSolution.challenge === 'string'
+          ? updatedSolution.challenge
+          : updatedSolution.challenge?._id?.toString()
+      });
+
       this.sendSuccess(
-        res, 
-        claimedSolution, 
-        'Solution successfully claimed for review'
+        res,
+        updatedSolution,
+        'Solution claimed for review successfully by claiming its parent challenge'
+      );
+    }
+  );
+
+  /**
+ * Claim a challenge for review
+ * @route POST /api/architect/challenges/:challengeId/claim
+ * @access Private - Architect only
+ */
+  public claimChallenge = catchAsync(
+    async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      // Verify architect authorization
+      this.verifyAuthorization(req, [UserRole.ARCHITECT], 'claiming challenges for review');
+
+      const { challengeId } = req.params;
+
+      // Business logic moved to service
+      const challenge = await this.architectService.claimChallengeById(
+        req.user!.userId,
+        challengeId
+      );
+
+      // Log the action for audit trail
+      this.logAction('claim-challenge', req.user!.userId, {
+        challengeId,
+        challengeTitle: challenge.title
+      });
+
+      // Return success response
+      this.sendSuccess(
+        res,
+        challenge,
+        'Challenge claimed successfully. All associated solutions are now assigned to you for review.',
+        HTTP_STATUS.OK
+      );
+    }
+  );
+
+  /**
+ * Get pending challenges available for review
+ * @route GET /api/architect/challenges
+ * @access Private - Architect only
+ */
+  public getPendingChallenges = catchAsync(
+    async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      // Verify architect authorization
+      this.verifyAuthorization(req, [UserRole.ARCHITECT], 'viewing pending challenges');
+  
+      // Log request parameters for debugging
+      logger.debug('Getting pending challenges with params:', {
+        userId: req.user!.userId,
+        query: req.query
+      });
+  
+      // Delegate to service layer
+      const result = await this.architectService.getPendingChallenges(
+        req.user!.userId,
+        req.query
+      );
+  
+      // Log the action
+      this.logAction('get-pending-challenges', req.user!.userId, {
+        count: result.challenges?.length || 0,
+        filter: req.query.status || 'all'
+      });
+  
+      // Send paginated success response
+      this.sendPaginatedSuccess(
+        res,
+        {
+          data: result.challenges || [],
+          total: result.total || 0,
+          page: result.page || 1,
+          limit: result.limit || 10,
+          totalPages: Math.ceil((result.total || 0) / (result.limit || 10)),
+          hasNextPage: (result.page || 1) * (result.limit || 10) < (result.total || 0),
+          hasPrevPage: (result.page || 1) > 1
+        },
+        'Pending challenges retrieved successfully'
+      );
+    }
+  );
+
+  /**
+   * Get all challenges claimed by the architect
+   * @route GET /api/architect/challenges/claimed
+   * @access Private - Architect only
+   */
+  public getClaimedChallenges = catchAsync(
+    async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      // Verify architect authorization
+      this.verifyAuthorization(req, [UserRole.ARCHITECT], 'viewing claimed challenges');
+
+      // Business logic moved to service
+      const result = await this.architectService.getArchitectClaimedChallenges(
+        req.user!.userId,
+        req.query
+      );
+
+      // Log the action
+      this.logAction('get-claimed-challenges', req.user!.userId, {
+        count: result.challenges.length,
+        filter: req.query.status || 'all'
+      });
+
+      // Send paginated success response
+      this.sendPaginatedSuccess(
+        res,
+        {
+          data: result.challenges,
+          total: result.total,
+          page: result.page,
+          limit: result.limit,
+          totalPages: Math.ceil(result.total / result.limit),
+          hasNextPage: result.page * result.limit < result.total,
+          hasPrevPage: result.page > 1
+        },
+        'Claimed challenges retrieved successfully'
       );
     }
   );
@@ -182,14 +349,14 @@ export class ArchitectController extends BaseController {
   public getDashboardStats = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
       // Authorization via service
-      const architectId = await architectService.authorizeArchitect(
-        req.user!.userId, 
+      const architectId = await this.architectService.authorizeArchitect(
+        req.user!.userId,
         'dashboard'
       );
-      
+
       // Get stats via service
-      const stats = await architectService.getDashboardStats(architectId);
-      
+      const stats = await this.architectService.getDashboardStats(architectId);
+
       // Respond
       this.sendSuccess(res, stats, 'Dashboard statistics retrieved successfully');
     }
@@ -202,33 +369,33 @@ export class ArchitectController extends BaseController {
   public selectSolutionsForCompany = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
       // Authorization via service
-      const architectId = await architectService.authorizeArchitect(
-        req.user!.userId, 
+      const architectId = await this.architectService.authorizeArchitect(
+        req.user!.userId,
         'select-solutions'
       );
-      
+
       // Validate input data via service
-      const validatedSolutionIds = architectService.validateSolutionSelectionData(
+      const validatedSolutionIds = this.architectService.validateSolutionSelectionData(
         req.params.challengeId,
         req.body.solutionIds
       );
-      
+
       // Process selection via service
-      const selectedSolutions = await architectService.selectSolutionsForCompany(
+      const selectedSolutions = await this.architectService.selectSolutionsForCompany(
         req.params.challengeId,
         validatedSolutionIds,
         architectId
       );
-      
+
       // Log and respond
-      this.logAction('select-solutions', req.user!.userId, { 
-        challengeId: req.params.challengeId, 
-        solutionCount: validatedSolutionIds.length 
+      this.logAction('select-solutions', req.user!.userId, {
+        challengeId: req.params.challengeId,
+        solutionCount: validatedSolutionIds.length
       });
-      
+
       this.sendSuccess(
-        res, 
-        selectedSolutions, 
+        res,
+        selectedSolutions,
         'Solutions have been successfully selected for the company'
       );
     }

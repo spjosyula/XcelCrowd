@@ -12,7 +12,10 @@ import { errorHandler, notFoundHandler } from './middlewares/errorhandler.middle
 import { logger, logRequest } from './utils/logger';
 import { validateEnv, config } from './utils/config';
 import { xssProtection, configureCSP, enhancedCsrfProtection } from './middlewares/security.middleware';
-import { authenticatedUsersOnly } from './middlewares/auth.middleware';
+import { authenticate, conditionalAuthenticate } from './middlewares/auth.middleware';
+import swaggerUi from 'swagger-ui-express';
+import { setupSwagger } from './config/swagger.config';
+
 
 // Validate environment variables before starting
 validateEnv();
@@ -23,9 +26,9 @@ export const app = express();
 // Trust proxy for proper IP detection behind a reverse proxy
 app.set('trust proxy', 1);
 
-// Apply security middlewares
-app.use(helmet());  // Sets security HTTP headers
-app.use(configureCSP); // Content Security Policy
+// Apply security middlewares -> ENABLE THESE FOR PRODUCTION
+//app.use(helmet());  // Sets security HTTP headers
+//app.use(configureCSP); // Content Security Policy
 
 // Set CORS options
 const corsOptions = {
@@ -54,7 +57,7 @@ app.use(cookieParser());
 
 // Data sanitization
 app.use(mongoSanitize());  // Against NoSQL injection
-app.use(xssProtection);   // Against XSS - using enhanced version
+app.use(xssProtection);   // Against XSS attacks
 app.use(enhancedCsrfProtection); // CSRF protection
 
 // Prevent parameter pollution
@@ -64,8 +67,11 @@ app.use(hpp());
 app.use(morgan('dev'));
 app.use(logRequest);
 
-//Platform middleware (restricts all access to authenticated users)
-app.use(authenticatedUsersOnly());
+app.use(conditionalAuthenticate);
+
+// Swagger documentation
+setupSwagger(app);
+
 
 // Main routes
 app.use('/api', routes);

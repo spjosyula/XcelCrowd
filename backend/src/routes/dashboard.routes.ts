@@ -1,9 +1,6 @@
 import { Router } from 'express';
-import { authenticate } from '../middlewares/auth.middleware';
-import { authorize } from '../middlewares/auth.middleware';
-import { UserRole } from '../models';
+import { authenticate, authorizePattern } from '../middlewares/auth.middleware';
 import { dashboardController } from '../controllers/dashboard.controller';
-import { authorizePattern } from '../middlewares/auth.middleware';
 import { AuthPattern } from '../types/authorization.types';
 
 const router = Router();
@@ -16,7 +13,7 @@ const router = Router();
 router.get(
   '/student',
   authenticate,
-  authorize([UserRole.STUDENT]),
+  authorizePattern(AuthPattern.STUDENT_ONLY),
   dashboardController.getStudentDashboard
 );
 

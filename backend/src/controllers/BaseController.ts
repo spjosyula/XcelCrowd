@@ -1,6 +1,6 @@
 import { Response } from 'express';
 import { AuthRequest } from '../types/request.types';
-import { ApiError } from '../utils/ApiError';
+import { ApiError } from '../utils/api.error';
 import { HTTP_STATUS } from '../constants';
 import { UserRole } from '../models/interfaces';
 import { AuthorizationService, OwnershipCheck, RelationshipCheck } from '../utils/authorization';
@@ -13,29 +13,105 @@ import { PaginationResult } from '../utils/paginationUtils';
  */
 export class BaseController {
   /**
-   * Verify that the user is authorized based on role
-   */
-  protected verifyAuthorization(req: AuthRequest, allowedRoles?: UserRole[]): void {
-    AuthorizationService.verifyRole(req, allowedRoles || []);
+ * Verify that the user is authorized based on role
+ * 
+ * @param req - The authenticated request object
+ * @param allowedRoles - Roles permitted to perform this action
+ * @param actionDescription - Optional description for logging and error messages
+ * @throws {ApiError} HTTP 401 if unauthenticated, HTTP 403 if unauthorized
+ */
+  protected verifyAuthorization(
+    req: AuthRequest,
+    allowedRoles?: UserRole[],
+    actionDescription?: string
+  ): void {
+    try {
+      // Perform authentication check
+      if (!req.user) {
+        const error = new ApiError(
+          HTTP_STATUS.UNAUTHORIZED,
+          'Authentication required',
+          true,
+          'AUTHENTICATION_REQUIRED'
+        );
+        logger.warn('Authentication failed: No user in request', {
+          path: req.path,
+          method: req.method
+        });
+        throw error;
+      }
+
+      // Skip role check if no roles specified
+      if (!allowedRoles || allowedRoles.length === 0) {
+        return;
+      }
+
+      // Perform role check
+      const userRole = req.user.role as UserRole;
+      if (!allowedRoles.includes(userRole)) {
+        const action = actionDescription ? ` for ${actionDescription}` : '';
+        const error = new ApiError(
+          HTTP_STATUS.FORBIDDEN,
+          `Access denied. You need ${allowedRoles.length > 1 ?
+            'one of these roles: ' + allowedRoles.join(', ') :
+            'the ' + allowedRoles[0] + ' role'}${action}`,
+          true,
+          'INSUFFICIENT_ROLE'
+        );
+
+        logger.warn(`Authorization failed: User ${req.user.userId} with role ${userRole} attempted restricted action${action}`, {
+          userId: req.user.userId,
+          userRole,
+          allowedRoles,
+          action: actionDescription || req.path,
+          method: req.method
+        });
+
+        throw error;
+      }
+
+      // Log successful authorization for sensitive operations (optional)
+      if (allowedRoles.includes(UserRole.ADMIN)) {
+        logger.info(`Admin authorization successful: User ${req.user.userId}${actionDescription ? ' ' + actionDescription : ''}`, {
+          userId: req.user.userId,
+          action: actionDescription || req.path
+        });
+      }
+    } catch (error) {
+      // Ensure we're not swallowing any errors
+      if (error instanceof ApiError) {
+        throw error;
+      }
+      // Convert unknown errors to ApiError
+      logger.error('Unexpected error during authorization', {
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw new ApiError(
+        HTTP_STATUS.INTERNAL_SERVER_ERROR,
+        'Authorization check failed',
+        true,
+        'AUTHORIZATION_ERROR'
+      );
+    }
   }
 
   /**
    * Get the profile ID for a user with a specific role
    */
-  protected getUserProfileId(req: AuthRequest, expectedRole: UserRole): string {
+  protected async getUserProfileId(req: AuthRequest, expectedRole: UserRole): Promise<string> {
     return AuthorizationService.getUserProfileId(req, expectedRole);
   }
 
   /**
    * Verify that the authenticated user owns a resource
    */
-  protected verifyResourceOwnership(
+  protected async verifyResourceOwnership(
     req: AuthRequest,
     resource: any,
     ownerIdField: string,
     ownerRole: UserRole,
     message?: string
-  ): void {
+  ): Promise<void> {
     const ownershipCheck: OwnershipCheck = {
       resource,
       resourceOwnerIdField: ownerIdField,
@@ -43,7 +119,7 @@ export class BaseController {
       message
     };
 
-    AuthorizationService.verifyOwnership(req, ownershipCheck);
+    await AuthorizationService.verifyOwnership(req, ownershipCheck);
   }
 
   /**

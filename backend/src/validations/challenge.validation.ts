@@ -9,42 +9,48 @@ export const createChallengeSchema = z.object({
     .min(1, 'Title is required')
     .max(100, 'Title cannot exceed 100 characters')
     .trim(),
-  
+
   description: z.string()
     .min(1, 'Description is required')
     .trim(),
-  
+
   requirements: z.array(z.string().trim())
     .min(1, 'At least one requirement is needed'),
-  
+
   resources: z.array(z.string().trim())
     .optional(),
-  
+
   rewards: z.string().trim().optional(),
-  
+
   deadline: z.string()
     .refine(val => new Date(val) > new Date(), {
       message: 'Deadline must be in the future'
     })
     .optional(),
-  
+
+  reviewDeadline: z.string()
+    .refine(val => new Date(val) > new Date(), {
+      message: 'Review deadline must be in the future'
+    })
+    .optional(),
+
   difficulty: z.enum(Object.values(ChallengeDifficulty) as [string, ...string[]]),
-  
+
   category: z.array(z.string().trim())
     .min(1, 'At least one category is required'),
-  
+
   maxParticipants: z.number().int().min(1).optional(),
-  
+
   tags: z.array(z.string().trim()).optional(),
-  
+
   maxApprovedSolutions: z.number().int().min(1).default(5),
-  
+
   visibility: z.enum(Object.values(ChallengeVisibility) as [string, ...string[]])
     .default(ChallengeVisibility.PUBLIC),
-  
+
   allowedInstitutions: z.array(z.string().trim())
     .optional(),
-  
+
   isCompanyVisible: z.boolean()
     .optional()
 });
@@ -58,6 +64,15 @@ export const createChallengeSchemaWithRefinements = createChallengeSchema.superR
         code: z.ZodIssueCode.custom,
         message: 'At least one institution must be specified for private challenges',
         path: ['allowedInstitutions']
+      });
+    }
+  }
+  if (data.reviewDeadline && data.deadline) {
+    if (new Date(data.reviewDeadline) <= new Date(data.deadline)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Review deadline must be after submission deadline',
+        path: ['reviewDeadline']
       });
     }
   }

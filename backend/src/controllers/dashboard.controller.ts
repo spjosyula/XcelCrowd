@@ -2,7 +2,7 @@ import { Response, NextFunction } from 'express';
 import { BaseController } from './BaseController';
 import { DashboardService } from '../services/dashboard.service';
 import { AuthRequest } from '../types/request.types';
-import { catchAsync } from '../utils/catchAsync';
+import { catchAsync } from '../utils/catch.async';
 import { ArchitectService } from '../services/architect.service';
 
 /**

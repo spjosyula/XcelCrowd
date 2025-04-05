@@ -1,10 +1,10 @@
 import { Response, NextFunction } from 'express';
-import { userService, CreateUserDTO, UpdateUserDTO } from '../services/user.service';
+import { userService, CreateUserDTO, UpdateUserDTO, UserService } from '../services/user.service';
 import { HTTP_STATUS } from '../constants';
-import { catchAsync } from '../utils/catchAsync';
+import { catchAsync } from '../utils/catch.async';
 import { BaseController } from './BaseController';
 import { AuthRequest } from '../types/request.types';
-import { ApiError } from '../utils/ApiError';
+import { ApiError } from '../utils/api.error';
 import { UserRole } from '../models/interfaces';
 
 /**
@@ -12,8 +12,10 @@ import { UserRole } from '../models/interfaces';
  * Extends BaseController for standardized response handling
  */
 export class UserController extends BaseController {
+  private readonly userService: UserService;
   constructor() {
     super();
+    this.userService = userService;
   }
 
   /**
@@ -29,7 +31,7 @@ export class UserController extends BaseController {
       const userData: CreateUserDTO = req.body;
 
       // Call service to create user
-      const user = await userService.createUser(userData);
+      const user = await this.userService.createUser(userData);
 
       this.logAction('user-create', req.user!.userId, {
         createdUserId: user._id!.toString(),
@@ -71,7 +73,7 @@ export class UserController extends BaseController {
       }
 
       // Call service to get user
-      const user = await userService.getUserById(id);
+      const user = await this.userService.getUserById(id);
 
       this.logAction('user-view', req.user!.userId, { viewedUserId: id });
 
@@ -119,7 +121,7 @@ export class UserController extends BaseController {
       const updateData: UpdateUserDTO = req.body;
 
       // Call service to update user
-      const user = await userService.updateUser(id, updateData);
+      const user = await this.userService.updateUser(id, updateData);
 
       this.logAction('user-update', req.user!.userId, {
         updatedUserId: id,
@@ -159,7 +161,7 @@ export class UserController extends BaseController {
       }
 
       // Call service to delete user
-      await userService.deleteUser(id);
+      await this.userService.deleteUser(id);
 
       this.logAction('user-delete', req.user!.userId, { deletedUserId: id });
 
@@ -186,7 +188,7 @@ export class UserController extends BaseController {
         page = '1',
         limit = '10',
         role,
-        search,
+        searchTerm,
         sortBy = 'createdAt',
         sortOrder = 'desc'
       } = req.query;
@@ -202,8 +204,8 @@ export class UserController extends BaseController {
         filters.role = role;
       }
   
-      if (search) {
-        const searchRegex = new RegExp(String(search), 'i');
+      if (searchTerm) {
+        const searchRegex = new RegExp(String(searchTerm), 'i');
         filters.$or = [
           { email: searchRegex },
           { name: searchRegex }
@@ -211,7 +213,7 @@ export class UserController extends BaseController {
       }
   
       // Call service to get users with pagination
-      const result = await userService.getUsers(
+      const result = await this.userService.getUsers(
         filters,
         {
           page: pageNum,

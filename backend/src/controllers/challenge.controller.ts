@@ -1,9 +1,9 @@
 import { Response, NextFunction } from 'express';
 import { UserRole, ChallengeStatus } from '../models/interfaces';
-import { challengeService } from '../services/challenge.service';
-import { profileService } from '../services/profile.service';
-import { ApiError } from '../utils/ApiError';
-import { catchAsync } from '../utils/catchAsync';
+import { ChallengeService, challengeService } from '../services/challenge.service';
+import { ProfileService, profileService } from '../services/profile.service';
+import { ApiError } from '../utils/api.error';
+import { catchAsync } from '../utils/catch.async';
 import { BaseController } from './BaseController';
 import { AuthRequest } from '../types/request.types';
 import { HTTP_STATUS } from '../constants';
@@ -13,13 +13,18 @@ import { HTTP_STATUS } from '../constants';
  * Extends BaseController for standardized response handling
  */
 export class ChallengeController extends BaseController {
+  private readonly challengeService: ChallengeService;
+  private readonly profileService: ProfileService;
+
   constructor() {
     super();
+    this.challengeService = challengeService;
+    this.profileService = profileService;
   }
 
   /**
-   * Helper method for common challenge owner authorization
-   */
+  * Helper method for common challenge owner authorization
+  */
   private async authorizeChallengeOwner(
     req: AuthRequest,
     challengeId: string,
@@ -32,7 +37,7 @@ export class ChallengeController extends BaseController {
     this.validateObjectId(challengeId, 'challenge');
 
     // Get the challenge
-    const challenge = await challengeService.getChallengeById(challengeId);
+    const challenge = await this.challengeService.getChallengeById(challengeId);
 
     // Verify ownership (except for admin)
     await this.authorize(req, {
@@ -57,13 +62,24 @@ export class ChallengeController extends BaseController {
       this.verifyAuthorization(req, [UserRole.COMPANY]);
 
       // Get company profile ID
-      const companyId = this.getUserProfileId(req, UserRole.COMPANY);
+      const companyId = await this.getUserProfileId(req, UserRole.COMPANY);
 
-      // Create challenge via service
-      const challenge = await challengeService.createChallenge(companyId, req.body) as { _id: string };
+      // Determine initial status based on autoPublish flag
+      const initialStatus = req.body.autoPublish === true ?
+        ChallengeStatus.ACTIVE : ChallengeStatus.DRAFT;
+
+      // Create challenge via service with explicit status
+      const challengeData = {
+        ...req.body,
+        status: initialStatus
+      };
+      delete challengeData.autoPublish; // Remove the flag before saving
+
+      const challenge = await this.challengeService.createChallenge(companyId, challengeData) as { _id: string };
 
       this.logAction('challenge-create', req.user!.userId, {
-        challengeId: challenge._id.toString()
+        challengeId: challenge._id.toString(),
+        status: initialStatus
       });
 
       this.sendSuccess(
@@ -72,6 +88,43 @@ export class ChallengeController extends BaseController {
         'Challenge created successfully',
         HTTP_STATUS.CREATED
       );
+    }
+  );
+
+  /**
+ * Publish a challenge (transition from DRAFT to ACTIVE)
+ * @route PATCH /api/challenges/:id/publish
+ * @access Private - Challenge owner (Company) or Admin only
+ */
+  publishChallenge = catchAsync(
+    async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      const { id } = req.params;
+
+      // Use helper for standard owner authorization
+      const challenge = await this.authorizeChallengeOwner(req, id, 'publish');
+
+      // Verify business rules
+      if (challenge.status !== ChallengeStatus.DRAFT) {
+        throw new ApiError(
+          HTTP_STATUS.BAD_REQUEST,
+          `Cannot publish a challenge that is ${challenge.status}. Only draft challenges can be published.`
+        );
+      }
+
+      // Get company profile ID
+      const companyId = req.user!.role === UserRole.COMPANY ?
+        await this.getUserProfileId(req, UserRole.COMPANY) : challenge.company.toString();
+
+      // Publish via service
+      const updatedChallenge = await this.challengeService.publishChallenge(id, companyId);
+
+      this.logAction('challenge-publish', req.user!.userId, {
+        challengeId: id,
+        previousStatus: challenge.status,
+        newStatus: ChallengeStatus.ACTIVE
+      });
+
+      this.sendSuccess(res, updatedChallenge, 'Challenge published successfully');
     }
   );
 
@@ -85,25 +138,27 @@ export class ChallengeController extends BaseController {
       // Verify user is authenticated
       this.verifyAuthorization(req);
 
-      const { status, difficulty, category, search } = req.query;
+      const { status, difficulty, category, searchTerm } = req.query;
 
       // Get student profile for visibility filters if applicable
       let studentProfile = null;
       const userRole = req.user!.role as UserRole;
       if (userRole === UserRole.STUDENT && req.user?.userId) {
         try {
-          studentProfile = await profileService.getStudentProfileByUserId(req.user.userId);
+          studentProfile = await this.profileService.getStudentProfileByUserId(req.user.userId);
         } catch (error) {
           // If profile can't be found, continue without it (public visibility only)
         }
       }
 
       // Use service with user context for proper visibility filtering
-      const result = await challengeService.getChallengesForUser({
-        status: status && Object.values(ChallengeStatus).includes(status as ChallengeStatus) ? status as ChallengeStatus : undefined,
+      const result = await this.challengeService.getChallengesForUser({
+        status: status === '' ? 'all' :
+          (status && Object.values(ChallengeStatus).includes(status as ChallengeStatus) ?
+            status as ChallengeStatus : undefined),
         difficulty: difficulty as string,
         category: category as string | string[],
-        searchTerm: search as string,
+        searchTerm: searchTerm as string,
         page: req.query.page ? parseInt(req.query.page as string) : 1,
         limit: req.query.limit ? parseInt(req.query.limit as string) : 10
       }, req.user?.userId, userRole, studentProfile);
@@ -113,12 +168,18 @@ export class ChallengeController extends BaseController {
         filters: { status, difficulty, category }
       });
 
-      this.sendSuccess(
+      this.sendPaginatedSuccess(
         res,
-        result.challenges,
-        'Challenges retrieved successfully',
-        HTTP_STATUS.OK,
-        //{ total: result.total, page: result.page, limit: result.limit }
+        {
+          data: result.challenges,
+          total: result.total,
+          page: result.page,
+          limit: result.limit,
+          totalPages: Math.ceil(result.total / result.limit),
+          hasNextPage: result.page * result.limit < result.total,
+          hasPrevPage: result.page > 1
+        },
+        'Challenges retrieved successfully'
       );
     }
   );
@@ -142,11 +203,11 @@ export class ChallengeController extends BaseController {
       let studentProfile = null;
 
       if (userRole === UserRole.STUDENT) {
-        studentProfile = await profileService.getStudentProfileByUserId(req.user!.userId);
+        studentProfile = await this.profileService.getStudentProfileByUserId(req.user!.userId);
       }
 
       // Use service to get challenge with visibility controls
-      const challenge = await challengeService.getChallengeByIdWithVisibility(
+      const challenge = await this.challengeService.getChallengeByIdWithVisibility(
         id,
         userRole,
         profileId,
@@ -176,10 +237,10 @@ export class ChallengeController extends BaseController {
 
       // Get company profile ID for company user
       const companyId = req.user!.role === UserRole.COMPANY ?
-        this.getUserProfileId(req, UserRole.COMPANY) : null;
+        await this.getUserProfileId(req, UserRole.COMPANY) : null;
 
       // Update via service
-      const updatedChallenge = await challengeService.updateChallenge(
+      const updatedChallenge = await this.challengeService.updateChallenge(
         id,
         companyId || challenge.company.toString(),
         req.body
@@ -203,10 +264,10 @@ export class ChallengeController extends BaseController {
       const challenge = await this.authorizeChallengeOwner(req, id, 'delete');
 
       // Validate if challenge can be deleted based on business rules
-      await challengeService.validateChallengeCanBeDeleted(id);
+      await this.challengeService.validateChallengeCanBeDeleted(id);
 
       // Delete via service
-      await challengeService.deleteChallenge(id);
+      await this.challengeService.deleteChallenge(id);
 
       this.logAction('challenge-delete', req.user!.userId, { challengeId: id });
       this.sendSuccess(res, null, 'Challenge deleted successfully');
@@ -235,10 +296,10 @@ export class ChallengeController extends BaseController {
 
       // Get company profile ID
       const companyId = req.user!.role === UserRole.COMPANY ?
-        this.getUserProfileId(req, UserRole.COMPANY) : challenge.company.toString();
+        await this.getUserProfileId(req, UserRole.COMPANY) : challenge.company.toString();
 
       // Close via service
-      const updatedChallenge = await challengeService.closeChallenge(id, companyId);
+      const updatedChallenge = await this.challengeService.closeChallenge(id, companyId);
 
       this.logAction('challenge-close', req.user!.userId, { challengeId: id });
       this.sendSuccess(res, updatedChallenge, 'Challenge closed successfully');
@@ -267,10 +328,10 @@ export class ChallengeController extends BaseController {
 
       // Get company profile ID
       const companyId = req.user!.role === UserRole.COMPANY ?
-        this.getUserProfileId(req, UserRole.COMPANY) : challenge.company.toString();
+        await this.getUserProfileId(req, UserRole.COMPANY) : challenge.company.toString();
 
       // Complete via service
-      const updatedChallenge = await challengeService.completeChallenge(id, companyId);
+      const updatedChallenge = await this.challengeService.completeChallenge(id, companyId);
 
       this.logAction('challenge-complete', req.user!.userId, { challengeId: id });
       this.sendSuccess(res, updatedChallenge, 'Challenge marked as completed successfully');
@@ -285,16 +346,16 @@ export class ChallengeController extends BaseController {
   getCompanyChallenges = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
       // Verify user has company role and get company profile ID
-      const companyId = this.getUserProfileId(req, UserRole.COMPANY);
+      const companyId = await this.getUserProfileId(req, UserRole.COMPANY);
 
-      const { status } = req.query;
+      const { status, page, limit } = req.query;
 
       // Get challenges via service
-      const result = await challengeService.getChallenges({
+      const result = await this.challengeService.getChallenges({
         companyId,
         status: status && Object.values(ChallengeStatus).includes(status as ChallengeStatus) ? status as ChallengeStatus : undefined,
-        page: req.query.page ? parseInt(req.query.page as string) : 1,
-        limit: req.query.limit ? parseInt(req.query.limit as string) : 10
+        page: page ? parseInt(page as string) : 1,
+        limit: limit ? parseInt(limit as string) : 10
       });
 
       this.logAction('company-challenges-list', req.user!.userId, {
@@ -302,17 +363,18 @@ export class ChallengeController extends BaseController {
         filters: { status }
       });
 
-      this.sendSuccess(
+      this.sendPaginatedSuccess(
         res,
-        result.challenges,
-        'Company challenges retrieved successfully',
-        HTTP_STATUS.OK,
-        // { 
-        //   total: result.total,
-        //   page: result.page,
-        //   limit: result.limit,
-        //   totalPages: result.totalPages
-        // }
+        {
+          data: result.challenges,
+          total: result.total,
+          page: result.page,
+          limit: result.limit,
+          totalPages: Math.ceil(result.total / result.limit),
+          hasNextPage: result.page * result.limit < result.total,
+          hasPrevPage: result.page > 1
+        },
+        'Challenges retrieved successfully'
       );
     }
   );
@@ -331,10 +393,10 @@ export class ChallengeController extends BaseController {
 
       // Get company profile ID
       const companyId = req.user!.role === UserRole.COMPANY ?
-        this.getUserProfileId(req, UserRole.COMPANY) : null;
+        await this.getUserProfileId(req, UserRole.COMPANY) : null;
 
       // Get statistics via service
-      const statistics = await challengeService.getChallengeStatistics(
+      const statistics = await this.challengeService.getChallengeStatistics(
         id,
         companyId || 'admin' // Handle admin case
       );
