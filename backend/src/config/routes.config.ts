@@ -16,7 +16,10 @@ export const routeConfig = {
       '/api/auth/forgot-password',
       '/api/auth/reset-password',
       '/api/health',
-      '/' 
+      '/' ,
+      // Add Swagger documentation paths
+      '/api-docs',
+      '/api-docs.json',
     ],
     
     /**
@@ -27,6 +30,7 @@ export const routeConfig = {
     isPublicPath: (path: string): boolean => {
       return routeConfig.publicPaths.includes(path) || 
              path.startsWith('/static/') ||
-             path.startsWith('/assets/');
+             path.startsWith('/assets/') ||
+              path.startsWith('/api-docs/');
     }
   };
