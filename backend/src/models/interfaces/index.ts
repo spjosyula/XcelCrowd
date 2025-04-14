@@ -151,7 +151,6 @@ export interface IChallenge extends Document, ITimestamps {
   resources?: string[];  // Optional resources provided to help with the challenge (need to allow file uploads)
   rewards?: string;  // Incentives or rewards offered for successful solutions
   deadline: Date;  // Due date for submitting solutions
-  reviewDeadline?: Date;  // Deadline for architects to complete reviews and select solutions
   status: ChallengeStatus;  // Current status of the challenge
   difficulty: ChallengeDifficulty;  // Difficulty level of the challenge
   category: string[];  // Categories or domains the challenge belongs to
@@ -171,7 +170,6 @@ export interface IChallenge extends Document, ITimestamps {
   // Methods
   isDeadlinePassed(): boolean;  // Checks if the challenge deadline has passed
   isApprovalLimitReached(): boolean;  // Checks if the maximum number of approvals has been reached
-  isReviewDeadlinePassed(): boolean;  // Checks if the review deadline has passed
 }
 
 /**

@@ -41,18 +41,6 @@ const challengeSchema = new Schema<IChallenge>({
       message: 'Deadline must be in the future'
     }
   },
-  reviewDeadline: {
-    type: Date,
-    validate: {
-      validator: function(this: IChallenge, value: Date) {
-        // Review deadline must be after submission deadline and in the future
-        const isAfterDeadline = this.deadline && value > this.deadline;
-        const isInFuture = value > new Date();
-        return !value || (isAfterDeadline && isInFuture);
-      },
-      message: 'Review deadline must be after submission deadline and in the future'
-    }
-  },
   status: {
     type: String,
     enum: Object.values(ChallengeStatus),
@@ -166,14 +154,6 @@ challengeSchema.methods.isDeadlinePassed = function(): boolean {
 challengeSchema.methods.isApprovalLimitReached = function(): boolean {
   if (!this.maxApprovedSolutions) return false;
   return this.approvedSolutionsCount >= this.maxApprovedSolutions;
-};
-
-/**
- * Method to check if review deadline has passed
- */
-challengeSchema.methods.isReviewDeadlinePassed = function(): boolean {
-  if (!this.reviewDeadline) return false;
-  return new Date() > this.reviewDeadline;
 };
 
 /**

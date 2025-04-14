@@ -28,12 +28,6 @@ export const createChallengeSchema = z.object({
     })
     .optional(),
 
-  reviewDeadline: z.string()
-    .refine(val => new Date(val) > new Date(), {
-      message: 'Review deadline must be in the future'
-    })
-    .optional(),
-
   difficulty: z.enum(Object.values(ChallengeDifficulty) as [string, ...string[]]),
 
   category: z.array(z.string().trim())
@@ -64,15 +58,6 @@ export const createChallengeSchemaWithRefinements = createChallengeSchema.superR
         code: z.ZodIssueCode.custom,
         message: 'At least one institution must be specified for private challenges',
         path: ['allowedInstitutions']
-      });
-    }
-  }
-  if (data.reviewDeadline && data.deadline) {
-    if (new Date(data.reviewDeadline) <= new Date(data.deadline)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'Review deadline must be after submission deadline',
-        path: ['reviewDeadline']
       });
     }
   }

@@ -27,42 +27,56 @@ export class ArchitectService extends BaseService {
    * Business logic for architect authorization
    * 
    * @param userId - The ID of the user
-   * @param action - Logging the arhcitect
+   * @param action - The action being performed (for logging)
    * @returns The architect profile ID
    * @throws ApiError if user is not an architect or profile doesn't exist
    */
   async authorizeArchitect(userId: string, action: string): Promise<string> {
-    try {
-      if (!userId) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'User ID is required');
-      }
+    if (!userId) {
+      logger.warn('Authorization attempt without userId', { action });
+      throw ApiError.badRequest('User ID is required');
+    }
 
+    try {
       const profile = await this.getProfileByUserId(userId);
 
       if (!profile || !profile._id) {
-        throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Architect profile not found');
+        logger.warn(`Architect profile not found for user ${userId}`, { 
+          userId, 
+          action 
+        });
+        throw ApiError.notFound('Architect profile not found');
       }
 
-      logger.info(`Architect ${userId} authorized for ${action}`, {
+      const profileId = profile._id.toString();
+      
+      logger.info(`Architect authorized for ${action}`, {
         userId,
         action,
-        profileId: profile._id.toString()
+        profileId
       });
 
-      return profile._id.toString();
+      return profileId;
     } catch (error) {
-      logger.error(`Authorization failed for architect ${userId} to ${action}:`, error);
+      logger.error(`Authorization failed for architect ${userId}`, {
+        userId,
+        action,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to authorize architect');
+      
+      throw ApiError.internal('Failed to authorize architect');
     }
   }
 
   /**
- * Create a new architect user with profile (admin only)
- * @param adminUserId - The ID of the admin creating the architect
- * @param architectData - User and profile data for the new architect
- * @returns Created user and profile information
- */
+   * Create a new architect user with profile (admin only)
+   * @param adminUserId - The ID of the admin creating the architect
+   * @param architectData - User and profile data for the new architect
+   * @returns Created user and profile information
+   */
   async createArchitectUser(
     adminUserId: string,
     architectData: {
@@ -77,12 +91,21 @@ export class ArchitectService extends BaseService {
       certifications?: string[];
     }
   ): Promise<{ user: IUser; profile: IArchitectProfile }> {
+    if (!adminUserId) {
+      throw ApiError.badRequest('Admin user ID is required');
+    }
+    
+    if (!architectData || !architectData.email || !architectData.password) {
+      throw ApiError.badRequest('Architect email and password are required');
+    }
+
     try {
       return await this.withTransaction(async (session) => {
         // Check if user with email already exists
         const existingUser = await User.findOne({ email: architectData.email }).session(session);
         if (existingUser) {
-          throw new ApiError(HTTP_STATUS.CONFLICT, 'Email already in use');
+          logger.warn(`Email already in use: ${architectData.email}`, { adminId: adminUserId });
+          throw ApiError.conflict('Email already in use');
         }
   
         // Create user document with architect role
@@ -108,7 +131,7 @@ export class ArchitectService extends BaseService {
         ], { session });
         const architectProfile = createdProfiles[0];
   
-        logger.info(`Architect user created by admin ${adminUserId}`, {
+        logger.info(`Architect user created successfully`, {
           adminId: adminUserId,
           architectId: user._id.toString(),
           architectEmail: user.email
@@ -120,17 +143,17 @@ export class ArchitectService extends BaseService {
         };
       });
     } catch (error) {
-      logger.error(`Error creating architect user: ${error instanceof Error ? error.message : String(error)}`, {
+      logger.error(`Error creating architect user`, {
         adminId: adminUserId,
         email: architectData.email,
-        error
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
       });
   
       if (error instanceof ApiError) throw error;
-      throw new ApiError(
-        HTTP_STATUS.INTERNAL_SERVER_ERROR, 
+      
+      throw ApiError.internal(
         'Failed to create architect user',
-        true,
         'ARCHITECT_USER_CREATION_ERROR'
       );
     }
@@ -151,13 +174,17 @@ export class ArchitectService extends BaseService {
     solutionId: string,
     action: string
   ): Promise<{ architectId: string, solution: ISolution }> {
+    if (!userId || !solutionId) {
+      throw ApiError.badRequest('User ID and solution ID are required');
+    }
+
     try {
       // Get architect profile ID
       const architectId = await this.authorizeArchitect(userId, action);
 
       // Validate solution ID format
       if (!Types.ObjectId.isValid(solutionId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid solution ID format');
+        throw ApiError.badRequest('Invalid solution ID format');
       }
 
       // Get the solution 
@@ -168,14 +195,20 @@ export class ArchitectService extends BaseService {
         const reviewerId = solution.reviewedBy.toString();
 
         if (reviewerId !== architectId) {
-          throw new ApiError(
-            HTTP_STATUS.FORBIDDEN,
+          logger.warn(`Unauthorized review attempt`, {
+            userId,
+            solutionId,
+            architectId,
+            assignedReviewerId: reviewerId
+          });
+          
+          throw ApiError.forbidden(
             'Only the architect who claimed this solution can review it'
           );
         }
       }
 
-      logger.info(`Architect ${userId} authorized for ${action} on solution ${solutionId}`, {
+      logger.info(`Architect authorized for solution operation`, {
         userId,
         action,
         solutionId,
@@ -184,9 +217,17 @@ export class ArchitectService extends BaseService {
 
       return { architectId, solution };
     } catch (error) {
-      logger.error(`Authorization failed for architect ${userId} to ${action} solution ${solutionId}:`, error);
+      logger.error(`Solution authorization failed`, {
+        userId,
+        action,
+        solutionId,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to authorize architect for solution operation');
+      
+      throw ApiError.internal('Failed to authorize architect for solution operation');
     }
   }
 
@@ -196,21 +237,29 @@ export class ArchitectService extends BaseService {
    * @returns The architect profile
    */
   async getProfileByUserId(userId: string): Promise<IArchitectProfile> {
-    try {
-      if (!userId) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'User ID is required');
-      }
+    if (!userId) {
+      throw ApiError.badRequest('User ID is required');
+    }
 
+    try {
       const profile = await ArchitectProfile.findOne({ user: userId });
+      
       if (!profile) {
+        logger.warn(`Architect profile not found`, { userId });
         throw ApiError.notFound('Architect profile not found');
       }
 
       return profile;
     } catch (error) {
-      logger.error(`Error fetching architect profile for user ${userId}:`, error);
+      logger.error(`Error fetching architect profile`, {
+        userId,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to retrieve architect profile');
+      
+      throw ApiError.internal('Failed to retrieve architect profile');
     }
   }
 
@@ -221,28 +270,34 @@ export class ArchitectService extends BaseService {
    * @returns The updated architect profile
    */
   async createOrUpdateProfile(userId: string, profileData: Partial<IArchitectProfile>): Promise<IArchitectProfile> {
-    try {
-      if (!userId) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'User ID is required');
-      }
+    if (!userId) {
+      throw ApiError.badRequest('User ID is required');
+    }
 
+    try {
       const profile = await ArchitectProfile.findOneAndUpdate(
         { user: userId },
         { ...profileData, user: userId },
         { new: true, upsert: true, runValidators: true }
       );
 
-      logger.info(`Architect profile updated for user ${userId}`);
+      logger.info(`Architect profile updated`, { userId });
       return profile;
     } catch (error) {
-      logger.error(`Error updating architect profile for user ${userId}:`, error);
+      logger.error(`Error updating architect profile`, {
+        userId,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to update architect profile');
+      
+      throw ApiError.internal('Failed to update architect profile');
     }
   }
 
   /**
-   * Parse and validate solution filter parameters
+   * Validate query parameters and parse into solution filters
    * @param queryParams - Raw query parameters from request
    * @returns Validated and processed filter parameters
    */
@@ -258,14 +313,14 @@ export class ArchitectService extends BaseService {
 
       // Validate status enum value
       if (status && !Object.values(SolutionStatus).includes(status)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid status value');
+        throw ApiError.badRequest('Invalid status value');
       }
 
       // Parse and validate challengeId if provided
       let challengeId: string | undefined = undefined;
       if (queryParams.challengeId) {
         if (!Types.ObjectId.isValid(queryParams.challengeId)) {
-          throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid challenge ID format');
+          throw ApiError.badRequest('Invalid challenge ID format');
         }
         challengeId = queryParams.challengeId;
       }
@@ -274,7 +329,7 @@ export class ArchitectService extends BaseService {
       let studentId: string | undefined = undefined;
       if (queryParams.studentId) {
         if (!Types.ObjectId.isValid(queryParams.studentId)) {
-          throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid student ID format');
+          throw ApiError.badRequest('Invalid student ID format');
         }
         studentId = queryParams.studentId;
       }
@@ -282,12 +337,12 @@ export class ArchitectService extends BaseService {
       // Parse and validate pagination parameters
       const page = queryParams.page ? parseInt(queryParams.page as string) : 1;
       if (isNaN(page) || page < 1) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Page must be a positive integer');
+        throw ApiError.badRequest('Page must be a positive integer');
       }
 
       const limit = queryParams.limit ? parseInt(queryParams.limit as string) : 10;
       if (isNaN(limit) || limit < 1 || limit > 100) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Limit must be between 1 and 100');
+        throw ApiError.badRequest('Limit must be between 1 and 100');
       }
 
       return {
@@ -298,9 +353,14 @@ export class ArchitectService extends BaseService {
         limit
       };
     } catch (error) {
-      logger.error('Error parsing solution filters:', error);
+      logger.error('Error parsing solution filters', {
+        queryParams: JSON.stringify(queryParams),
+        error: error instanceof Error ? error.message : String(error)
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid filter parameters');
+      
+      throw ApiError.badRequest('Invalid filter parameters');
     }
   }
 
@@ -324,14 +384,14 @@ export class ArchitectService extends BaseService {
 
       if (challengeId) {
         if (!Types.ObjectId.isValid(challengeId)) {
-          throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid challenge ID format');
+          throw ApiError.badRequest('Invalid challenge ID format');
         }
         query.challenge = new Types.ObjectId(challengeId);
       }
 
       if (studentId) {
         if (!Types.ObjectId.isValid(studentId)) {
-          throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid student ID format');
+          throw ApiError.badRequest('Invalid student ID format');
         }
         query.student = new Types.ObjectId(studentId);
       }
@@ -409,6 +469,15 @@ export class ArchitectService extends BaseService {
       const total = results[0].totalCount[0]?.count || 0;
       const solutions = results[0].paginatedResults;
 
+      logger.debug(`Retrieved pending solutions`, {
+        totalSolutions: total,
+        page,
+        limit,
+        filterStatus: status,
+        hasChallengeFilter: !!challengeId,
+        hasStudentFilter: !!studentId
+      });
+
       return {
         solutions,
         total,
@@ -416,9 +485,15 @@ export class ArchitectService extends BaseService {
         limit
       };
     } catch (error) {
-      logger.error('Error fetching pending solutions:', error);
+      logger.error('Error fetching pending solutions', {
+        filters: JSON.stringify(filters),
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to retrieve pending solutions');
+      
+      throw ApiError.internal('Failed to retrieve pending solutions');
     }
   }
 
@@ -428,9 +503,13 @@ export class ArchitectService extends BaseService {
    * @returns The solution with populated references
    */
   async getSolutionById(solutionId: string): Promise<ISolution> {
+    if (!solutionId) {
+      throw ApiError.badRequest('Solution ID is required');
+    }
+
     try {
       if (!Types.ObjectId.isValid(solutionId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid solution ID format');
+        throw ApiError.badRequest('Invalid solution ID format');
       }
 
       const solution = await Solution.findById(solutionId)
@@ -439,46 +518,52 @@ export class ArchitectService extends BaseService {
         .populate('reviewedBy');
 
       if (!solution) {
+        logger.warn(`Solution not found: ${solutionId}`);
         throw ApiError.notFound('Solution not found');
       }
 
       return solution;
     } catch (error) {
-      logger.error(`Error fetching solution ${solutionId}:`, error);
+      logger.error(`Error fetching solution`, {
+        solutionId,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to retrieve solution');
+      
+      throw ApiError.internal('Failed to retrieve solution');
     }
   }
 
   /**
- * Claim an entire challenge for review
- * This assigns all solutions in this challenge to the architect
- * 
- * @param challengeId - The ID of the challenge to claim
- * @param architectId - The ID of the architect claiming the challenge
- * @returns The updated challenge with claimed status
- * @throws ApiError if challenge is not found, not in CLOSED status, or already claimed
- */
+   * Claim an entire challenge for review
+   * This assigns all solutions in this challenge to the architect
+   * 
+   * @param challengeId - The ID of the challenge to claim
+   * @param architectId - The ID of the architect claiming the challenge
+   * @returns The updated challenge with claimed status
+   * @throws ApiError if challenge is not found, not in CLOSED status, or already claimed
+   */
   async claimChallengeForReview(
     challengeId: string,
     architectId: string
   ): Promise<IChallenge> {
     // Validate input parameters
     if (!challengeId || !architectId) {
-      throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Challenge ID and architect ID are required');
+      throw ApiError.badRequest('Challenge ID and architect ID are required');
+    }
+    
+    if (!Types.ObjectId.isValid(challengeId)) {
+      throw ApiError.badRequest('Invalid challenge ID format');
+    }
+
+    if (!Types.ObjectId.isValid(architectId)) {
+      throw ApiError.badRequest('Invalid architect ID format');
     }
   
     try {
       return await this.withTransaction(async (session) => {
-        // Validate IDs with type checking
-        if (!Types.ObjectId.isValid(challengeId)) {
-          throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid challenge ID format');
-        }
-  
-        if (!Types.ObjectId.isValid(architectId)) {
-          throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid architect ID format');
-        }
-  
         // Find the challenge using session
         const challenge = await Challenge.findById(challengeId)
           .session(session)
@@ -487,36 +572,20 @@ export class ArchitectService extends BaseService {
   
         // Comprehensive null checking
         if (!challenge) {
-          throw new ApiError(
-            HTTP_STATUS.NOT_FOUND,
-            `Challenge with ID ${challengeId} not found`
-          );
+          logger.warn(`Challenge not found for claiming`, { challengeId, architectId });
+          throw ApiError.notFound(`Challenge with ID ${challengeId} not found`);
         }
         
-        // Check if review deadline has passed
-        if (challenge.reviewDeadline && new Date() > challenge.reviewDeadline) {
-          logger.warn(`Attempt to claim challenge with expired review deadline`, {
-            challengeId,
-            architectId,
-            reviewDeadline: challenge.reviewDeadline
-          });
-      
-          throw new ApiError(
-            HTTP_STATUS.BAD_REQUEST,
-            `Cannot claim this challenge as the review deadline has passed: ${challenge.reviewDeadline.toISOString().split('T')[0]}`
-          );
-        }
-  
         // Check if challenge is in CLOSED status
         if (challenge.status !== ChallengeStatus.CLOSED) {
-          logger.warn(`Attempt to claim challenge in invalid status: ${challenge.status}`, {
+          logger.warn(`Claim attempt for challenge in invalid status`, {
             challengeId,
             architectId,
-            currentStatus: challenge.status
+            currentStatus: challenge.status,
+            requiredStatus: ChallengeStatus.CLOSED
           });
   
-          throw new ApiError(
-            HTTP_STATUS.BAD_REQUEST,
+          throw ApiError.badRequest(
             `Only challenges with status 'closed' can be claimed for review. Current status: ${challenge.status}`
           );
         }
@@ -528,22 +597,24 @@ export class ArchitectService extends BaseService {
             .lean()
             .exec();
   
-          logger.warn(`Conflict: Challenge already claimed by another architect`, {
+          logger.warn(`Challenge already claimed by another architect`, {
             challengeId,
             attemptingArchitectId: architectId,
             currentClaimantId: challenge.claimedBy.toString(),
             claimantName: `${claimingArchitect?.firstName || 'Unknown'} ${claimingArchitect?.lastName || 'Architect'}`
           });
   
-          throw new ApiError(
-            HTTP_STATUS.CONFLICT,
+          throw ApiError.conflict(
             `This challenge has already been claimed by another architect: ${claimingArchitect?.firstName || 'Unknown'} ${claimingArchitect?.lastName || 'Architect'}`
           );
         }
   
         // If already claimed by this architect, just return the challenge
         if (challenge.claimedBy && challenge.claimedBy.toString() === architectId) {
-          logger.info(`Challenge ${challengeId} already claimed by architect ${architectId}, returning existing claim`);
+          logger.info(`Challenge already claimed by this architect`, {
+            challengeId, 
+            architectId
+          });
   
           // Return fresh data with population
           const populatedChallenge = await Challenge.findById(challengeId)
@@ -552,7 +623,7 @@ export class ArchitectService extends BaseService {
             .exec();
   
           if (!populatedChallenge) {
-            throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Challenge not found after claiming');
+            throw ApiError.notFound('Challenge not found after claiming');
           }
   
           return populatedChallenge as IChallenge;
@@ -565,7 +636,8 @@ export class ArchitectService extends BaseService {
           .exec();
   
         if (!architect) {
-          throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Architect profile not found');
+          logger.warn(`Architect profile not found during challenge claim`, { architectId });
+          throw ApiError.notFound('Architect profile not found');
         }
   
         // Update challenge document to mark as claimed
@@ -584,7 +656,11 @@ export class ArchitectService extends BaseService {
         );
   
         if (!updatedChallenge) {
-          throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to update challenge');
+          logger.error(`Failed to update challenge during claim operation`, { 
+            challengeId, 
+            architectId 
+          });
+          throw ApiError.internal('Failed to update challenge');
         }
   
         // Get all SUBMITTED solutions for this challenge - use countDocuments first for optimization
@@ -611,26 +687,31 @@ export class ArchitectService extends BaseService {
             { session }
           );
   
-          logger.info(`Updated ${updateResult.modifiedCount} solutions to UNDER_REVIEW status for challenge ${challengeId}`);
+          logger.info(`Solutions updated to UNDER_REVIEW status`, {
+            challengeId,
+            updatedCount: updateResult.modifiedCount,
+            expectedCount: submittedSolutionsCount
+          });
   
           // Verify update succeeded
           if (updateResult.modifiedCount !== submittedSolutionsCount) {
-            logger.warn(`Not all solutions were updated (${updateResult.modifiedCount}/${submittedSolutionsCount})`, {
+            logger.warn(`Solution update discrepancy during challenge claim`, {
               challengeId,
-              architectId
+              architectId,
+              updatedCount: updateResult.modifiedCount,
+              expectedCount: submittedSolutionsCount
             });
           }
         } else {
-          logger.info(`No submitted solutions found for challenge ${challengeId}`);
+          logger.info(`No submitted solutions found for challenge`, { challengeId });
         }
   
         // Log success with detailed information
-        logger.info(`Challenge ${challengeId} successfully claimed by architect ${architectId}`, {
+        logger.info(`Challenge successfully claimed by architect`, {
           challengeId,
           architectId,
           title: updatedChallenge.title,
-          submittedSolutionsCount,
-          timestamp: new Date().toISOString()
+          submittedSolutionsCount
         });
   
         // Return the populated challenge with efficient projection
@@ -651,23 +732,19 @@ export class ArchitectService extends BaseService {
             challengeId,
             architectId
           });
-          throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Challenge not found after claiming');
+          throw ApiError.notFound('Challenge not found after claiming');
         }
   
         return populatedChallenge as IChallenge;
       });
     } catch (error) {
       // Comprehensive error logging with context
-      logger.error(
-        `Error claiming challenge: ${error instanceof Error ? error.message : String(error)}`,
-        {
-          challengeId,
-          architectId,
-          errorStack: error instanceof Error ? error.stack : undefined,
-          errorName: error instanceof Error ? error.name : 'Unknown',
-          timestamp: new Date().toISOString()
-        }
-      );
+      logger.error(`Error claiming challenge`, {
+        challengeId,
+        architectId,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
   
       // Error propagation with proper classification
       if (error instanceof ApiError) {
@@ -675,29 +752,25 @@ export class ArchitectService extends BaseService {
       }
   
       if (error instanceof mongoose.Error) {
-        throw new ApiError(
-          HTTP_STATUS.INTERNAL_SERVER_ERROR,
+        throw ApiError.internal(
           `Database error: ${error.message}`,
-          true,
           'DATABASE_ERROR'
         );
       }
   
-      throw new ApiError(
-        HTTP_STATUS.INTERNAL_SERVER_ERROR,
+      throw ApiError.internal(
         'Failed to claim challenge for review',
-        true,
         'CLAIM_CHALLENGE_ERROR'
       );
     }
   }
 
   /**
- * Get all challenges claimed by an architect
- * @param architectId - Architect profile ID
- * @param options - Pagination and filtering options
- * @returns List of claimed challenges with their solutions stats
- */
+   * Get all challenges claimed by an architect
+   * @param architectId - Architect profile ID
+   * @param options - Pagination and filtering options
+   * @returns List of claimed challenges with their solutions stats
+   */
   async getClaimedChallenges(
     architectId: string,
     options: {
@@ -711,12 +784,15 @@ export class ArchitectService extends BaseService {
     page: number;
     limit: number;
   }> {
-    try {
-      // Validate architect ID
-      if (!Types.ObjectId.isValid(architectId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid architect ID format');
-      }
+    if (!architectId) {
+      throw ApiError.badRequest('Architect ID is required');
+    }
 
+    if (!Types.ObjectId.isValid(architectId)) {
+      throw ApiError.badRequest('Invalid architect ID format');
+    }
+
+    try {
       // Parse options with default values
       const {
         status,
@@ -779,9 +855,8 @@ export class ArchitectService extends BaseService {
         ]);
 
         // Transform aggregation results to a more usable format
-        // challengeId -> { status: count, status2: count }
         solutionStats = solutionAggregation.reduce((acc, curr) => {
-          const challengeId = curr._id.challenge.toString();
+          const challengeId = (curr._id.challenge as any).toString();
           const status = curr._id.status;
 
           if (!acc[challengeId]) {
@@ -805,9 +880,10 @@ export class ArchitectService extends BaseService {
         };
       });
 
-      logger.debug(`Retrieved ${enhancedChallenges.length} claimed challenges for architect ${architectId}`, {
+      logger.debug(`Retrieved claimed challenges`, {
         architectId,
         totalChallenges: total,
+        retrievedChallenges: enhancedChallenges.length,
         currentPage: page
       });
 
@@ -818,29 +894,22 @@ export class ArchitectService extends BaseService {
         limit: Number(limit)
       };
     } catch (error) {
-      logger.error(
-        `Error getting claimed challenges: ${error instanceof Error ? error.message : String(error)}`,
-        {
-          architectId,
-          options: JSON.stringify(options),
-          error: error instanceof Error ? {
-            name: error.name,
-            message: error.message,
-            stack: error.stack
-          } : String(error)
-        }
-      );
+      logger.error(`Error getting claimed challenges`, {
+        architectId,
+        options: JSON.stringify(options),
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
 
       if (error instanceof ApiError) throw error;
 
-      throw new ApiError(
-        HTTP_STATUS.INTERNAL_SERVER_ERROR,
+      throw ApiError.internal(
         'Failed to retrieve claimed challenges',
-        true,
         'CLAIMED_CHALLENGES_RETRIEVAL_ERROR'
       );
     }
   }
+
   /**
    * Validate if an architect can review a solution
    * @param solutionId - The ID of the solution
@@ -848,22 +917,31 @@ export class ArchitectService extends BaseService {
    * @throws ApiError if validation fails
    */
   async validateSolutionForReview(solutionId: string, architectId: string): Promise<ISolution> {
+    if (!solutionId || !architectId) {
+      throw ApiError.badRequest('Solution ID and architect ID are required');
+    }
+
     try {
       if (!Types.ObjectId.isValid(solutionId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid solution ID format');
+        throw ApiError.badRequest('Invalid solution ID format');
       }
 
       if (!Types.ObjectId.isValid(architectId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid architect ID format');
+        throw ApiError.badRequest('Invalid architect ID format');
       }
 
       const solution = await Solution.findById(solutionId);
 
       if (!solution) {
+        logger.warn(`Solution not found during review validation`, { solutionId });
         throw ApiError.notFound('Solution not found');
       }
 
       if (solution.status !== SolutionStatus.SUBMITTED && solution.status !== SolutionStatus.UNDER_REVIEW) {
+        logger.warn(`Solution in invalid status for review`, {
+          solutionId,
+          currentStatus: solution.status
+        });
         throw ApiError.badRequest('Solution has already been reviewed');
       }
 
@@ -871,31 +949,73 @@ export class ArchitectService extends BaseService {
       if (solution.status === SolutionStatus.UNDER_REVIEW &&
         solution.reviewedBy &&
         solution.reviewedBy.toString() !== architectId) {
+        logger.warn(`Unauthorized review attempt`, {
+          solutionId,
+          attemptingArchitectId: architectId,
+          assignedArchitectId: solution.reviewedBy.toString()
+        });
         throw ApiError.forbidden('This solution is being reviewed by another architect');
       }
 
       return solution;
     } catch (error) {
-      logger.error(`Error validating solution ${solutionId} for review:`, error);
+      logger.error(`Solution review validation failed`, {
+        solutionId,
+        architectId,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to validate solution for review');
+      
+      throw ApiError.internal('Failed to validate solution for review');
     }
   }
+
+  /**
+   * Claim a challenge by ID for the authenticated architect user
+   * @param userId - The ID of the authenticated user
+   * @param challengeId - The ID of the challenge to claim
+   * @returns The claimed challenge
+   */
   async claimChallengeById(userId: string, challengeId: string): Promise<IChallenge> {
-    // Validate challenge ID
-    if (!Types.ObjectId.isValid(challengeId)) {
-      throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid challenge ID format');
+    if (!userId || !challengeId) {
+      throw ApiError.badRequest('User ID and challenge ID are required');
     }
 
-    // Get architect profile ID
-    const architectId = await profileService.getArchitectProfileId(userId);
+    try {
+      // Validate challenge ID
+      if (!Types.ObjectId.isValid(challengeId)) {
+        throw ApiError.badRequest('Invalid challenge ID format');
+      }
 
-    // Claim the challenge
-    const challenge = await this.claimChallengeForReview(challengeId, architectId);
+      // Get architect profile ID
+      const architectId = await profileService.getArchitectProfileId(userId);
 
-    return challenge;
+      // Claim the challenge
+      const challenge = await this.claimChallengeForReview(challengeId, architectId);
+
+      return challenge;
+    } catch (error) {
+      logger.error(`Error claiming challenge by ID`, {
+        userId,
+        challengeId,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      
+      if (error instanceof ApiError) throw error;
+      
+      throw ApiError.internal('Failed to claim challenge');
+    }
   }
 
+  /**
+   * Get challenges claimed by the authenticated architect user
+   * @param userId - The ID of the authenticated user
+   * @param queryParams - Query parameters for filtering and pagination
+   * @returns Paginated list of claimed challenges with solution stats
+   */
   async getArchitectClaimedChallenges(
     userId: string,
     queryParams: any
@@ -905,54 +1025,112 @@ export class ArchitectService extends BaseService {
     page: number;
     limit: number;
   }> {
-    // Get architect profile ID
-    const architectId = await profileService.getArchitectProfileId(userId);
+    if (!userId) {
+      throw ApiError.badRequest('User ID is required');
+    }
 
-    // Parse query parameters
-    const status = queryParams.status as ChallengeStatus | undefined;
-    const page = queryParams.page ? parseInt(queryParams.page as string) : 1;
-    const limit = queryParams.limit ? parseInt(queryParams.limit as string) : 10;
+    try {
+      // Get architect profile ID
+      const architectId = await profileService.getArchitectProfileId(userId);
 
-    // Get claimed challenges
-    return this.getClaimedChallenges(architectId, { status, page, limit });
+      // Parse query parameters with defaults and validation
+      const status = queryParams.status as ChallengeStatus | undefined;
+      if (status && !Object.values(ChallengeStatus).includes(status)) {
+        throw ApiError.badRequest('Invalid status value');
+      }
+
+      const page = queryParams.page ? parseInt(queryParams.page as string) : 1;
+      if (isNaN(page) || page < 1) {
+        throw ApiError.badRequest('Page must be a positive integer');
+      }
+
+      const limit = queryParams.limit ? parseInt(queryParams.limit as string) : 10;
+      if (isNaN(limit) || limit < 1 || limit > 100) {
+        throw ApiError.badRequest('Limit must be between 1 and 100');
+      }
+
+      // Get claimed challenges
+      return this.getClaimedChallenges(architectId, { status, page, limit });
+    } catch (error) {
+      logger.error(`Error getting architect claimed challenges`, {
+        userId,
+        queryParams: JSON.stringify(queryParams),
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      
+      if (error instanceof ApiError) throw error;
+      
+      throw ApiError.internal('Failed to retrieve claimed challenges');
+    }
   }
 
+  /**
+   * Claim a solution by first claiming its parent challenge
+   * @param userId - The ID of the authenticated user
+   * @param solutionId - The ID of the solution to claim
+   * @returns The claimed solution
+   */
   async claimSolutionViaChallenge(
     userId: string,
     solutionId: string
   ): Promise<ISolution> {
-    // Validate IDs
-    if (!Types.ObjectId.isValid(solutionId)) {
-      throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid solution ID format');
+    if (!userId || !solutionId) {
+      throw ApiError.badRequest('User ID and solution ID are required');
     }
 
-    // Get architect profile ID
-    const architectId = await profileService.getArchitectProfileId(userId);
+    try {
+      // Validate solution ID
+      if (!Types.ObjectId.isValid(solutionId)) {
+        throw ApiError.badRequest('Invalid solution ID format');
+      }
 
-    // Get the solution to find its challenge
-    const solution = await Solution.findById(solutionId).select('challenge');
+      // Get architect profile ID
+      const architectId = await profileService.getArchitectProfileId(userId);
 
-    if (!solution) {
-      throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Solution not found');
+      // Get the solution to find its challenge
+      const solution = await Solution.findById(solutionId).select('challenge');
+
+      if (!solution) {
+        logger.warn(`Solution not found during claim attempt`, { solutionId });
+        throw ApiError.notFound('Solution not found');
+      }
+
+      // Extract the challenge ID
+      const challengeId = solution.challenge?.toString();
+
+      if (!challengeId) {
+        logger.warn(`Solution has no associated challenge`, { solutionId });
+        throw ApiError.badRequest('Solution has no associated challenge');
+      }
+
+      logger.info(`Claiming solution via parent challenge`, {
+        userId,
+        solutionId,
+        challengeId,
+        architectId
+      });
+
+      // Claim the entire challenge
+      await this.claimChallengeForReview(challengeId, architectId);
+
+      // Get the updated solution
+      const updatedSolution = await solutionService.getSolutionById(solutionId, userId, UserRole.ARCHITECT);
+
+      return updatedSolution;
+    } catch (error) {
+      logger.error(`Error claiming solution via challenge`, {
+        userId,
+        solutionId,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      
+      if (error instanceof ApiError) throw error;
+      
+      throw ApiError.internal('Failed to claim solution');
     }
-
-    // Extract the challenge ID
-    const challengeId = solution.challenge?.toString();
-
-    if (!challengeId) {
-      throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Solution has no associated challenge');
-    }
-
-    // Claim the entire challenge
-    await this.claimChallengeForReview(challengeId, architectId);
-
-    // Get the updated solution
-    const updatedSolution = await solutionService.getSolutionById(solutionId, userId, UserRole.ARCHITECT);
-
-    return updatedSolution;
   }
-
-
 
   /**
    * Process review data and validate it
@@ -960,27 +1138,31 @@ export class ArchitectService extends BaseService {
    * @returns Validated review data
    */
   validateReviewData(reviewData: any): { status: SolutionStatus; feedback: string; score?: number } {
+    if (!reviewData) {
+      throw ApiError.badRequest('Review data is required');
+    }
+
     try {
       // Validate status
       if (!reviewData.status || !Object.values(SolutionStatus).includes(reviewData.status)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid status value');
+        throw ApiError.badRequest('Invalid status value');
       }
 
       // Only allow specific statuses for reviews
       if (reviewData.status !== SolutionStatus.APPROVED && reviewData.status !== SolutionStatus.REJECTED) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Review status must be either APPROVED or REJECTED');
+        throw ApiError.badRequest('Review status must be either APPROVED or REJECTED');
       }
 
       // Validate feedback
       if (!reviewData.feedback || typeof reviewData.feedback !== 'string' || reviewData.feedback.length < 10) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Feedback must be at least 10 characters');
+        throw ApiError.badRequest('Feedback must be at least 10 characters');
       }
 
       // Validate score if provided
       if (reviewData.score !== undefined) {
         const score = Number(reviewData.score);
         if (isNaN(score) || score < 0 || score > 100) {
-          throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Score must be a number between 0 and 100');
+          throw ApiError.badRequest('Score must be a number between 0 and 100');
         }
 
         return {
@@ -995,9 +1177,14 @@ export class ArchitectService extends BaseService {
         feedback: reviewData.feedback
       };
     } catch (error) {
-      logger.error('Error validating review data:', error);
+      logger.error('Error validating review data', {
+        reviewData: JSON.stringify(reviewData),
+        error: error instanceof Error ? error.message : String(error)
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid review data');
+      
+      throw ApiError.badRequest('Invalid review data');
     }
   }
 
@@ -1013,6 +1200,10 @@ export class ArchitectService extends BaseService {
     architectId: string,
     reviewData: { status: SolutionStatus; feedback: string; score?: number }
   ): Promise<ISolution> {
+    if (!solutionId || !architectId || !reviewData) {
+      throw ApiError.badRequest('Solution ID, architect ID, and review data are required');
+    }
+
     try {
       return await this.withTransaction(async (session) => {
         // Validate solution for review
@@ -1022,10 +1213,19 @@ export class ArchitectService extends BaseService {
         if (reviewData.status === SolutionStatus.APPROVED) {
           const challenge = await Challenge.findById(solution.challenge).session(session);
           if (!challenge) {
+            logger.warn(`Challenge not found during solution approval`, {
+              solutionId,
+              challengeId: solution.challenge?.toString()
+            });
             throw ApiError.notFound('Challenge not found');
           }
   
           if (challenge.isApprovalLimitReached()) {
+            logger.warn(`Maximum approved solutions limit reached`, {
+              challengeId: challenge._id ? challenge._id.toString() : 'unknown',
+              maxLimit: challenge.maxApprovedSolutions,
+              currentCount: challenge.approvedSolutionsCount
+            });
             throw ApiError.badRequest('Maximum number of approved solutions reached for this challenge');
           }
   
@@ -1046,7 +1246,12 @@ export class ArchitectService extends BaseService {
   
         await solution.save({ session });
   
-        logger.info(`Solution ${solutionId} reviewed by architect ${architectId} with status ${reviewData.status}`);
+        logger.info(`Solution reviewed successfully`, {
+          solutionId,
+          architectId,
+          status: reviewData.status,
+          hasScore: reviewData.score !== undefined
+        });
   
         // Return populated solution
         const updatedSolution = await Solution.findById(solutionId)
@@ -1058,24 +1263,25 @@ export class ArchitectService extends BaseService {
           .session(session);
   
         if (!updatedSolution) {
+          logger.error(`Solution not found after review`, { solutionId });
           throw ApiError.notFound('Solution not found after review');
         }
   
         return updatedSolution;
       });
     } catch (error) {
-      logger.error(`Error reviewing solution ${solutionId}:`, {
-        error: error instanceof Error ? error.message : String(error),
-        stack: error instanceof Error ? error.stack : undefined,
+      logger.error(`Error reviewing solution`, {
         solutionId,
-        architectId
+        architectId,
+        reviewStatus: reviewData?.status,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
       });
       
       if (error instanceof ApiError) throw error;
-      throw new ApiError(
-        HTTP_STATUS.INTERNAL_SERVER_ERROR, 
+      
+      throw ApiError.internal(
         'Failed to review solution',
-        true,
         'SOLUTION_REVIEW_ERROR'
       );
     }
@@ -1093,9 +1299,13 @@ export class ArchitectService extends BaseService {
     pendingReview: number;
     recentActivity: ISolution[];
   }> {
+    if (!architectId) {
+      throw ApiError.badRequest('Architect ID is required');
+    }
+
     try {
       if (!Types.ObjectId.isValid(architectId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid architect ID format');
+        throw ApiError.badRequest('Invalid architect ID format');
       }
 
       const architectObjectId = new Types.ObjectId(architectId);
@@ -1189,44 +1399,73 @@ export class ArchitectService extends BaseService {
         return acc;
       }, {});
 
-      return {
-        totalReviewed: statusCountsMap[SolutionStatus.APPROVED] + statusCountsMap[SolutionStatus.REJECTED] || 0,
+      const stats = {
+        totalReviewed: (statusCountsMap[SolutionStatus.APPROVED] || 0) + (statusCountsMap[SolutionStatus.REJECTED] || 0),
         approved: statusCountsMap[SolutionStatus.APPROVED] || 0,
         rejected: statusCountsMap[SolutionStatus.REJECTED] || 0,
         pendingReview: results.pendingCount[0]?.count || 0,
         recentActivity: results.recentActivity
       };
+
+      logger.debug(`Retrieved dashboard stats for architect`, {
+        architectId,
+        totalReviewed: stats.totalReviewed,
+        approved: stats.approved,
+        rejected: stats.rejected,
+        pendingReview: stats.pendingReview,
+        recentActivityCount: stats.recentActivity.length
+      });
+
+      return stats;
     } catch (error) {
-      logger.error(`Error fetching dashboard statistics for architect ${architectId}:`, error);
+      logger.error(`Error fetching dashboard statistics`, {
+        architectId,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to retrieve dashboard statistics');
+      
+      throw ApiError.internal('Failed to retrieve dashboard statistics');
     }
   }
 
   /**
-   * Claim a solution for review -> Architect should claim a challenge instead, this method exists for backward compatibility
+   * Claim a solution for review
+   * Note: Architect should claim a challenge instead, this method exists for backward compatibility
+   * 
    * @param solutionId - The ID of the solution
    * @param architectId - The ID of the architect
    * @returns The updated solution
    */
   async claimSolutionForReview(solutionId: string, architectId: string): Promise<ISolution> {
+    if (!solutionId || !architectId) {
+      throw ApiError.badRequest('Solution ID and architect ID are required');
+    }
+
     try {
       return await this.withTransaction(async (session) => {
         if (!Types.ObjectId.isValid(solutionId)) {
-          throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid solution ID format');
+          throw ApiError.badRequest('Invalid solution ID format');
         }
   
         if (!Types.ObjectId.isValid(architectId)) {
-          throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid architect ID format');
+          throw ApiError.badRequest('Invalid architect ID format');
         }
   
         const solution = await Solution.findById(solutionId).session(session);
   
         if (!solution) {
+          logger.warn(`Solution not found during claim attempt`, { solutionId });
           throw ApiError.notFound('Solution not found');
         }
   
         if (solution.status !== SolutionStatus.SUBMITTED) {
+          logger.warn(`Solution in invalid status for claiming`, {
+            solutionId,
+            currentStatus: solution.status,
+            requiredStatus: SolutionStatus.SUBMITTED
+          });
           throw ApiError.badRequest('Solution is not available for review');
         }
   
@@ -1235,24 +1474,28 @@ export class ArchitectService extends BaseService {
         solution.reviewedBy = new Types.ObjectId(architectId);
         await solution.save({ session });
   
+        logger.info(`Solution claimed for review`, {
+          solutionId,
+          architectId
+        });
+
         return solution.populate([
           { path: 'challenge' },
           { path: 'student' }
         ]);
       });
     } catch (error) {
-      logger.error(`Error claiming solution ${solutionId} for review:`, {
-        error: error instanceof Error ? error.message : String(error),
-        stack: error instanceof Error ? error.stack : undefined,
+      logger.error(`Error claiming solution for review`, {
         solutionId,
-        architectId
+        architectId,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
       });
       
       if (error instanceof ApiError) throw error;
-      throw new ApiError(
-        HTTP_STATUS.INTERNAL_SERVER_ERROR, 
+      
+      throw ApiError.internal(
         'Failed to claim solution for review',
-        true,
         'CLAIM_SOLUTION_ERROR'
       );
     }
@@ -1265,58 +1508,72 @@ export class ArchitectService extends BaseService {
    * @returns Validated solution IDs array
    */
   validateSolutionSelectionData(challengeId: string, solutionIds: any): string[] {
+    if (!challengeId || !solutionIds) {
+      throw ApiError.badRequest('Challenge ID and solution IDs are required');
+    }
+
     try {
       // Validate challenge ID
       if (!Types.ObjectId.isValid(challengeId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid challenge ID format');
+        throw ApiError.badRequest('Invalid challenge ID format');
       }
 
       // Validate solution IDs array
       if (!Array.isArray(solutionIds) || solutionIds.length === 0) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'At least one solution ID must be provided');
+        throw ApiError.badRequest('At least one solution ID must be provided');
       }
 
       // Validate each solution ID
       const validatedIds = solutionIds.map(id => {
         if (!Types.ObjectId.isValid(id)) {
-          throw new ApiError(HTTP_STATUS.BAD_REQUEST, `Invalid solution ID format: ${id}`);
+          throw ApiError.badRequest(`Invalid solution ID format: ${id}`);
         }
         return id;
       });
 
       return validatedIds;
     } catch (error) {
-      logger.error('Error validating solution selection data:', error);
+      logger.error('Error validating solution selection data', {
+        challengeId,
+        solutionCount: Array.isArray(solutionIds) ? solutionIds.length : 'not an array',
+        error: error instanceof Error ? error.message : String(error)
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid solution selection data');
+      
+      throw ApiError.badRequest('Invalid solution selection data');
     }
   }
 
   /**
- * Validate solutions for company selection
- * @param challengeId - The ID of the challenge
- * @param solutionIds - Array of solution IDs to validate
- * @param architectId - The ID of the architect
- * @returns The solutions and challenge
- */
+   * Validate solutions for company selection
+   * @param challengeId - The ID of the challenge
+   * @param solutionIds - Array of solution IDs to validate
+   * @param architectId - The ID of the architect
+   * @returns The solutions and challenge
+   */
   async validateSolutionsForSelection(
     challengeId: string,
     solutionIds: string[],
     architectId: string,
     session?: ClientSession
-  ): Promise<{ solutions: ISolution[]; challenge: any }> {
+  ): Promise<{ solutions: ISolution[]; challenge: IChallenge & Document }> {
+    if (!challengeId || !solutionIds || !architectId) {
+      throw ApiError.badRequest('Challenge ID, solution IDs, and architect ID are required');
+    }
+
     try {
       if (!Types.ObjectId.isValid(challengeId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid challenge ID format');
+        throw ApiError.badRequest('Invalid challenge ID format');
       }
 
       if (!Types.ObjectId.isValid(architectId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid architect ID format');
+        throw ApiError.badRequest('Invalid architect ID format');
       }
 
       const validatedSolutionIds = solutionIds.map(id => {
         if (!Types.ObjectId.isValid(id)) {
-          throw new ApiError(HTTP_STATUS.BAD_REQUEST, `Invalid solution ID format: ${id}`);
+          throw ApiError.badRequest(`Invalid solution ID format: ${id}`);
         }
         return new Types.ObjectId(id);
       });
@@ -1336,38 +1593,61 @@ export class ArchitectService extends BaseService {
       ]);
 
       if (!challenge) {
+        logger.warn(`Challenge not found during solution selection validation`, { challengeId });
         throw ApiError.notFound('Challenge not found');
       }
 
       // Check if the architect is authorized to select solutions
       if (!hasReviewed) {
+        logger.warn(`Unauthorized selection attempt`, {
+          challengeId,
+          architectId
+        });
         throw ApiError.forbidden('You are not authorized to select solutions for this challenge');
       }
 
       // Check if the number of solutions doesn't exceed the maximum allowed
       if (challenge.maxApprovedSolutions && solutionIds.length > challenge.maxApprovedSolutions) {
+        logger.warn(`Solution selection exceeds maximum limit`, {
+          challengeId,
+          maxAllowed: challenge.maxApprovedSolutions,
+          attempted: solutionIds.length
+        });
         throw ApiError.badRequest(`Cannot select more than ${challenge.maxApprovedSolutions} solutions for this challenge`);
       }
 
       // Validate all required solutions are found with correct status
       if (solutions.length !== solutionIds.length) {
+        logger.warn(`Some solutions are invalid or not approved`, {
+          challengeId,
+          requestedCount: solutionIds.length,
+          foundCount: solutions.length
+        });
         throw ApiError.badRequest('One or more solution IDs are invalid, not approved, or not part of this challenge');
       }
 
       return { solutions, challenge };
     } catch (error) {
-      logger.error(`Error validating solutions for selection:`, error);
+      logger.error(`Error validating solutions for selection`, {
+        challengeId,
+        solutionIds: JSON.stringify(solutionIds),
+        architectId,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to validate solutions for selection');
+      
+      throw ApiError.internal('Failed to validate solutions for selection');
     }
   }
 
   /**
- * Get pending challenges available for review
- * @param userId - The ID of the architect user
- * @param queryParams - Query parameters for filtering and pagination
- * @returns Paginated list of pending challenges
- */
+   * Get pending challenges available for review
+   * @param userId - The ID of the architect user
+   * @param queryParams - Query parameters for filtering and pagination
+   * @returns Paginated list of pending challenges
+   */
   async getPendingChallenges(
     userId: string,
     queryParams: any
@@ -1377,17 +1657,38 @@ export class ArchitectService extends BaseService {
     page: number;
     limit: number;
   }> {
+    if (!userId) {
+      throw ApiError.badRequest('User ID is required');
+    }
+
     try {
-      // Parse query parameters
-      const status = queryParams.status as ChallengeStatus || ChallengeStatus.CLOSED;
+      // Parse query parameters with validation
+      let status = queryParams.status as ChallengeStatus || ChallengeStatus.CLOSED;
+      if (status && !Object.values(ChallengeStatus).includes(status)) {
+        logger.warn(`Invalid challenge status in query`, {
+          userId,
+          providedStatus: status
+        });
+        status = ChallengeStatus.CLOSED; // Default to CLOSED if invalid
+      }
+
+      // Parse and validate pagination parameters
       const page = queryParams.page ? parseInt(queryParams.page as string) : 1;
+      if (isNaN(page) || page < 1) {
+        throw ApiError.badRequest('Page must be a positive integer');
+      }
+
       const limit = queryParams.limit ? parseInt(queryParams.limit as string) : 10;
+      if (isNaN(limit) || limit < 1 || limit > 100) {
+        throw ApiError.badRequest('Limit must be between 1 and 100');
+      }
+
       const skip = (page - 1) * limit;
 
       // Get architect profile ID for filtering out already claimed challenges
       const architectId = await profileService.getArchitectProfileId(userId);
 
-      // Build query - looking for challenges in CLOSED status without a claimedBy field
+      // Build query - looking for challenges in specified status without a claimedBy field
       // or not claimed by this architect
       const query: FilterQuery<IChallenge> = {
         status: status,
@@ -1481,10 +1782,13 @@ export class ArchitectService extends BaseService {
       const total = results[0].totalCount[0]?.count || 0;
       const challenges = results[0].paginatedResults;
 
-      logger.info(`Retrieved ${challenges.length} pending challenges for architect ${userId}`, {
+      logger.info(`Retrieved pending challenges`, {
+        userId,
         architectId,
+        status,
         totalChallenges: total,
-        currentPage: page
+        retrievedChallenges: challenges.length,
+        page
       });
 
       return {
@@ -1494,43 +1798,38 @@ export class ArchitectService extends BaseService {
         limit
       };
     } catch (error) {
-      logger.error(
-        `Error getting pending challenges: ${error instanceof Error ? error.message : String(error)}`,
-        {
-          userId,
-          queryParams: JSON.stringify(queryParams),
-          error: error instanceof Error ? {
-            name: error.name,
-            message: error.message,
-            stack: error.stack
-          } : String(error)
-        }
-      );
+      logger.error(`Error getting pending challenges`, {
+        userId,
+        queryParams: JSON.stringify(queryParams),
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
 
       if (error instanceof ApiError) throw error;
 
-      throw new ApiError(
-        HTTP_STATUS.INTERNAL_SERVER_ERROR,
+      throw ApiError.internal(
         'Failed to retrieve pending challenges',
-        true,
         'PENDING_CHALLENGES_RETRIEVAL_ERROR'
       );
     }
   }
 
-
   /**
- * Select solutions to forward to the company
- * @param challengeId - The ID of the challenge
- * @param solutionIds - Array of solution IDs to select
- * @param architectId - The ID of the architect making the selection
- * @returns The selected solutions
- */
+   * Select solutions to forward to the company
+   * @param challengeId - The ID of the challenge
+   * @param solutionIds - Array of solution IDs to select
+   * @param architectId - The ID of the architect making the selection
+   * @returns The selected solutions
+   */
   async selectSolutionsForCompany(
     challengeId: string,
     solutionIds: string[],
     architectId: string
   ): Promise<ISolution[]> {
+    if (!challengeId || !solutionIds || !architectId) {
+      throw ApiError.badRequest('Challenge ID, solution IDs, and architect ID are required');
+    }
+
     try {
       return await this.withTransaction(async (session) => {
         // Use the validation method to verify all selections are valid
@@ -1562,20 +1861,25 @@ export class ArchitectService extends BaseService {
       
         // Verify that all documents were updated as expected
         if (bulkWriteResult.modifiedCount !== validatedSolutionIds.length) {
-          throw new ApiError(
-            HTTP_STATUS.INTERNAL_SERVER_ERROR, 
-            'Not all solutions could be updated to SELECTED status'
-          );
+          logger.error(`Solution update discrepancy during selection`, {
+            challengeId,
+            architectId,
+            expectedUpdates: validatedSolutionIds.length,
+            actualUpdates: bulkWriteResult.modifiedCount
+          });
+          
+          throw ApiError.internal('Not all solutions could be updated to SELECTED status');
         }
       
         // Update challenge status
         challenge.status = ChallengeStatus.COMPLETED;
         await challenge.save({ session });
       
-        logger.info(`${validatedSolutionIds.length} solutions selected for challenge ${challengeId} by architect ${architectId}`, {
+        logger.info(`Solutions selected for company`, {
           challengeId,
           architectId,
-          solutionCount: validatedSolutionIds.length
+          solutionCount: validatedSolutionIds.length,
+          challengeStatus: ChallengeStatus.COMPLETED
         });
       
         // Return the updated solutions with optimized population
@@ -1588,21 +1892,19 @@ export class ArchitectService extends BaseService {
           .session(session);
       });
     } catch (error) {
-      // Improved error handling with more context
-      logger.error(`Error selecting solutions for company:`, {
-        error: error instanceof Error ? error.message : String(error),
-        stack: error instanceof Error ? error.stack : undefined,
+      logger.error(`Error selecting solutions for company`, {
         challengeId,
+        solutionIds,
         architectId,
-        solutionCount: solutionIds.length
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
       });
-      
+
       if (error instanceof ApiError) throw error;
-      throw new ApiError(
-        HTTP_STATUS.INTERNAL_SERVER_ERROR, 
+
+      throw ApiError.internal(
         'Failed to select solutions for company',
-        true,
-        'SOLUTION_SELECTION_ERROR'
+        'SELECT_SOLUTIONS_ERROR'
       );
     }
   }

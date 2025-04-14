@@ -164,14 +164,14 @@ export class ChallengeController extends BaseController {
       }, req.user?.userId, userRole, studentProfile);
 
       this.logAction('challenges-list', req.user!.userId, {
-        count: result.challenges.length,
+        count: result.data.length,
         filters: { status, difficulty, category }
       });
 
       this.sendPaginatedSuccess(
         res,
         {
-          data: result.challenges,
+          data: result.data,
           total: result.total,
           page: result.page,
           limit: result.limit,
@@ -359,14 +359,14 @@ export class ChallengeController extends BaseController {
       });
 
       this.logAction('company-challenges-list', req.user!.userId, {
-        count: result.challenges.length,
+        count: result.data.length,
         filters: { status }
       });
 
       this.sendPaginatedSuccess(
         res,
         {
-          data: result.challenges,
+          data: result.data,
           total: result.total,
           page: result.page,
           limit: result.limit,

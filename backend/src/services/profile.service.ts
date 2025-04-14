@@ -1,9 +1,7 @@
 import { Types } from 'mongoose';
 import { StudentProfile, CompanyProfile, IStudentProfile, ICompanyProfile, UserRole, ArchitectProfile } from '../models';
 import { ApiError } from '../utils/api.error';
-import { HTTP_STATUS } from '../constants';
 import { UserService } from './user.service';
-import mongoose from 'mongoose';
 import { logger } from '../utils/logger';
 import { BaseService } from './BaseService';
 
@@ -58,18 +56,18 @@ export class ProfileService extends BaseService {
         try {
             // Validate both IDs
             if (!requestUserId || !targetUserId) {
-                throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'User IDs are required');
+                throw ApiError.badRequest('User IDs are required', 'MISSING_USER_IDS');
             }
 
             if (!Types.ObjectId.isValid(targetUserId)) {
-                throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid target user ID format');
+                throw ApiError.badRequest('Invalid target user ID format', 'INVALID_USER_ID');
             }
 
             // Verify self-operation
             if (requestUserId !== targetUserId) {
-                throw new ApiError(
-                    HTTP_STATUS.FORBIDDEN,
-                    'You can only manage your own profile'
+                throw ApiError.forbidden(
+                    'You can only manage your own profile',
+                    'SELF_OPERATION_REQUIRED'
                 );
             }
 
@@ -77,7 +75,7 @@ export class ProfileService extends BaseService {
         } catch (error) {
             logger.error(`Self-operation authorization failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             if (error instanceof ApiError) throw error;
-            throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Authorization check failed');
+            throw ApiError.internal('Authorization check failed', 'AUTH_CHECK_ERROR');
         }
     }
 
@@ -100,7 +98,7 @@ export class ProfileService extends BaseService {
         try {
             // Validate IDs
             if (!Types.ObjectId.isValid(targetUserId)) {
-                throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid target user ID format');
+                throw ApiError.badRequest('Invalid target user ID format', 'INVALID_USER_ID');
             }
 
             // Self access is always allowed
@@ -116,9 +114,9 @@ export class ProfileService extends BaseService {
 
             // Check access
             if (!isSelfAccess && !hasRoleAccess) {
-                throw new ApiError(
-                    HTTP_STATUS.FORBIDDEN,
-                    `You do not have permission to view this ${profileType} profile`
+                throw ApiError.forbidden(
+                    `You do not have permission to view this ${profileType} profile`,
+                    'PROFILE_ACCESS_DENIED'
                 );
             }
 
@@ -126,7 +124,7 @@ export class ProfileService extends BaseService {
         } catch (error) {
             logger.error(`Profile view authorization failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             if (error instanceof ApiError) throw error;
-            throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Authorization check failed');
+            throw ApiError.internal('Authorization check failed', 'AUTH_CHECK_ERROR');
         }
     }
 
@@ -136,15 +134,15 @@ export class ProfileService extends BaseService {
     public async validateUserRole(userId: string, expectedRole: UserRole): Promise<void> {
         try {
             if (!Types.ObjectId.isValid(userId)) {
-                throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid user ID format');
+                throw ApiError.badRequest('Invalid user ID format', 'INVALID_USER_ID');
             }
 
             const user = await userService.getUserById(userId);
 
             if (user.role !== expectedRole) {
-                throw new ApiError(
-                    HTTP_STATUS.BAD_REQUEST,
-                    `User is not a ${expectedRole.toLowerCase()}`
+                throw ApiError.badRequest(
+                    `User is not a ${expectedRole.toLowerCase()}`,
+                    'INVALID_ROLE'
                 );
             }
 
@@ -152,7 +150,7 @@ export class ProfileService extends BaseService {
         } catch (error) {
             logger.error(`User role validation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             if (error instanceof ApiError) throw error;
-            throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'User role validation failed');
+            throw ApiError.internal('User role validation failed', 'ROLE_VALIDATION_ERROR');
         }
     }
 
@@ -165,7 +163,7 @@ export class ProfileService extends BaseService {
     public async profileExists(userId: string, profileType: 'student' | 'company'): Promise<boolean> {
         try {
             if (!Types.ObjectId.isValid(userId)) {
-                throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid user ID format');
+                throw ApiError.badRequest('Invalid user ID format', 'INVALID_USER_ID');
             }
 
             let exists = false;
@@ -180,7 +178,7 @@ export class ProfileService extends BaseService {
         } catch (error) {
             logger.error(`Error checking if profile exists: ${error instanceof Error ? error.message : 'Unknown error'}`);
             if (error instanceof ApiError) throw error;
-            throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to check if profile exists');
+            throw ApiError.internal('Failed to check if profile exists', 'PROFILE_CHECK_ERROR');
         }
     }
 
@@ -198,7 +196,7 @@ export class ProfileService extends BaseService {
                 // Check if profile already exists
                 const profileExists = await this.profileExists(profileData.userId, 'student');
                 if (profileExists) {
-                    throw new ApiError(HTTP_STATUS.CONFLICT, 'Student profile already exists', true, 'PROFILE_ALREADY_EXISTS');
+                    throw ApiError.conflict('Student profile already exists', 'PROFILE_ALREADY_EXISTS');
                 }
 
                 // Create profile with session for transaction
@@ -228,10 +226,8 @@ export class ProfileService extends BaseService {
             );
 
             if (error instanceof ApiError) throw error;
-            throw new ApiError(
-                HTTP_STATUS.INTERNAL_SERVER_ERROR,
+            throw ApiError.internal(
                 'Failed to create student profile',
-                true,
                 'STUDENT_PROFILE_CREATION_ERROR'
             );
         }
@@ -245,7 +241,7 @@ export class ProfileService extends BaseService {
     public async getStudentProfileByUserId(userId: string): Promise<IStudentProfile> {
         try {
             if (!Types.ObjectId.isValid(userId)) {
-                throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid user ID format');
+                throw ApiError.badRequest('Invalid user ID format', 'INVALID_USER_ID');
             }
 
             // OPTIMIZED: Limited fields in populated user document
@@ -254,14 +250,14 @@ export class ProfileService extends BaseService {
                 .lean(); // OPTIMIZED: Added lean() for better performance
 
             if (!profile) {
-                throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Student profile not found');
+                throw ApiError.notFound('Student profile not found', 'PROFILE_NOT_FOUND');
             }
 
             return profile;
         } catch (error) {
             logger.error(`Error fetching student profile: ${error instanceof Error ? error.message : 'Unknown error'}`);
             if (error instanceof ApiError) throw error;
-            throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to retrieve student profile');
+            throw ApiError.internal('Failed to retrieve student profile', 'STUDENT_PROFILE_RETRIEVAL_ERROR');
         }
     }
 
@@ -278,7 +274,7 @@ export class ProfileService extends BaseService {
         try {
             return await this.withTransaction(async (session) => {
                 if (!Types.ObjectId.isValid(userId)) {
-                    throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid user ID format', true, 'INVALID_USER_ID');
+                    throw ApiError.badRequest('Invalid user ID format', 'INVALID_USER_ID');
                 }
 
                 const profile = await StudentProfile.findOneAndUpdate(
@@ -288,7 +284,7 @@ export class ProfileService extends BaseService {
                 );
 
                 if (!profile) {
-                    throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Student profile not found', true, 'PROFILE_NOT_FOUND');
+                    throw ApiError.notFound('Student profile not found', 'PROFILE_NOT_FOUND');
                 }
 
                 logger.info(`Student profile updated for user ${userId}`);
@@ -302,10 +298,8 @@ export class ProfileService extends BaseService {
             );
 
             if (error instanceof ApiError) throw error;
-            throw new ApiError(
-                HTTP_STATUS.INTERNAL_SERVER_ERROR,
+            throw ApiError.internal(
                 'Failed to update student profile',
-                true,
                 'STUDENT_PROFILE_UPDATE_ERROR'
             );
         }
@@ -317,53 +311,41 @@ export class ProfileService extends BaseService {
      * @returns Created company profile
      */
     public async createCompanyProfile(profileData: CreateCompanyProfileDTO): Promise<ICompanyProfile> {
-        // Start a MongoDB session for transaction support
-        const session = await mongoose.startSession();
-
         try {
-            session.startTransaction();
+            return await this.withTransaction(async (session) => {
+                // Validate user exists and has correct role
+                await this.validateUserRole(profileData.userId, UserRole.COMPANY);
 
-            // Validate user exists and has correct role
-            await this.validateUserRole(profileData.userId, UserRole.COMPANY);
+                // Check if profile already exists
+                const profileExists = await this.profileExists(profileData.userId, 'company');
+                if (profileExists) {
+                    throw ApiError.conflict('Company profile already exists', 'PROFILE_ALREADY_EXISTS');
+                }
 
-            // Check if profile already exists
-            const profileExists = await this.profileExists(profileData.userId, 'company');
-            if (profileExists) {
-                throw new ApiError(HTTP_STATUS.CONFLICT, 'Company profile already exists');
-            }
+                // Create profile with session for transaction
+                const profile = await CompanyProfile.create([{
+                    user: profileData.userId,
+                    companyName: profileData.companyName,
+                    website: profileData.website,
+                    contactNumber: profileData.contactNumber,
+                    industry: profileData.industry,
+                    description: profileData.description,
+                    address: profileData.address
+                }], { session });
 
-            // Create profile with session for transaction
-            const profile = await CompanyProfile.create([{
-                user: profileData.userId,
-                companyName: profileData.companyName,
-                website: profileData.website,
-                contactNumber: profileData.contactNumber,
-                industry: profileData.industry,
-                description: profileData.description,
-                address: profileData.address
-            }], { session });
+                logger.info(`Company profile created for user ${profileData.userId}`);
 
-            // Commit the transaction
-            await session.commitTransaction();
-
-            logger.info(`Company profile created for user ${profileData.userId}`);
-
-            // Return the created profile
-            return profile[0];
+                // Return the created profile
+                return profile[0];
+            });
         } catch (error) {
-            // Abort transaction on error
-            await session.abortTransaction();
-
             logger.error(
                 `Error creating company profile: ${error instanceof Error ? error.message : String(error)}`,
                 { userId: profileData.userId, error }
             );
 
             if (error instanceof ApiError) throw error;
-            throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to create company profile');
-        } finally {
-            // Always end the session
-            session.endSession();
+            throw ApiError.internal('Failed to create company profile', 'COMPANY_PROFILE_CREATION_ERROR');
         }
     }
 
@@ -375,21 +357,22 @@ export class ProfileService extends BaseService {
     public async getCompanyProfileByUserId(userId: string): Promise<ICompanyProfile> {
         try {
             if (!Types.ObjectId.isValid(userId)) {
-                throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid user ID format');
+                throw ApiError.badRequest('Invalid user ID format', 'INVALID_USER_ID');
             }
 
             const profile = await CompanyProfile.findOne({ user: userId })
                 .populate('user', 'email role createdAt')
                 .lean(); // OPTIMIZED: Added lean() for better performance
+                
             if (!profile) {
-                throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Company profile not found');
+                throw ApiError.notFound('Company profile not found', 'PROFILE_NOT_FOUND');
             }
 
             return profile;
         } catch (error) {
             logger.error(`Error fetching company profile: ${error instanceof Error ? error.message : 'Unknown error'}`);
             if (error instanceof ApiError) throw error;
-            throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to retrieve company profile');
+            throw ApiError.internal('Failed to retrieve company profile', 'COMPANY_PROFILE_RETRIEVAL_ERROR');
         }
     }
 
@@ -404,27 +387,33 @@ export class ProfileService extends BaseService {
         updateData: UpdateCompanyProfileDTO
     ): Promise<ICompanyProfile> {
         try {
-            if (!Types.ObjectId.isValid(userId)) {
-                throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid user ID format');
-            }
+            return await this.withTransaction(async (session) => {
+                if (!Types.ObjectId.isValid(userId)) {
+                    throw ApiError.badRequest('Invalid user ID format', 'INVALID_USER_ID');
+                }
 
-            const profile = await CompanyProfile.findOneAndUpdate(
-                { user: userId },
-                updateData,
-                { new: true, runValidators: true }
+                const profile = await CompanyProfile.findOneAndUpdate(
+                    { user: userId },
+                    updateData,
+                    { new: true, runValidators: true, session }
+                );
+
+                if (!profile) {
+                    throw ApiError.notFound('Company profile not found', 'PROFILE_NOT_FOUND');
+                }
+
+                logger.info(`Company profile updated for user ${userId}`);
+
+                return profile;
+            });
+        } catch (error) {
+            logger.error(
+                `Error updating company profile: ${error instanceof Error ? error.message : String(error)}`,
+                { userId, updateFields: Object.keys(updateData).join(','), error }
             );
 
-            if (!profile) {
-                throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Company profile not found');
-            }
-
-            logger.info(`Company profile updated for user ${userId}`);
-
-            return profile;
-        } catch (error) {
-            logger.error(`Error updating company profile: ${error instanceof Error ? error.message : 'Unknown error'}`);
             if (error instanceof ApiError) throw error;
-            throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to update company profile');
+            throw ApiError.internal('Failed to update company profile', 'COMPANY_PROFILE_UPDATE_ERROR');
         }
     }
 
@@ -436,7 +425,7 @@ export class ProfileService extends BaseService {
         try {
             await this.withTransaction(async (session) => {
                 if (!Types.ObjectId.isValid(userId)) {
-                    throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid user ID format', true, 'INVALID_USER_ID');
+                    throw ApiError.badRequest('Invalid user ID format', 'INVALID_USER_ID');
                 }
 
                 const result = await StudentProfile.findOneAndDelete(
@@ -445,7 +434,7 @@ export class ProfileService extends BaseService {
                 );
 
                 if (!result) {
-                    throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Student profile not found', true, 'PROFILE_NOT_FOUND');
+                    throw ApiError.notFound('Student profile not found', 'PROFILE_NOT_FOUND');
                 }
 
                 logger.info(`Student profile deleted for user ${userId}`);
@@ -457,10 +446,8 @@ export class ProfileService extends BaseService {
             );
 
             if (error instanceof ApiError) throw error;
-            throw new ApiError(
-                HTTP_STATUS.INTERNAL_SERVER_ERROR,
+            throw ApiError.internal(
                 'Failed to delete student profile',
-                true,
                 'STUDENT_PROFILE_DELETION_ERROR'
             );
         }
@@ -472,44 +459,55 @@ export class ProfileService extends BaseService {
      */
     public async deleteCompanyProfile(userId: string): Promise<void> {
         try {
-            if (!Types.ObjectId.isValid(userId)) {
-                throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid user ID format');
-            }
+            await this.withTransaction(async (session) => {
+                if (!Types.ObjectId.isValid(userId)) {
+                    throw ApiError.badRequest('Invalid user ID format', 'INVALID_USER_ID');
+                }
 
-            const result = await CompanyProfile.findOneAndDelete({ user: userId });
-            if (!result) {
-                throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Company profile not found');
-            }
+                const result = await CompanyProfile.findOneAndDelete(
+                    { user: userId },
+                    { session }
+                );
+                
+                if (!result) {
+                    throw ApiError.notFound('Company profile not found', 'PROFILE_NOT_FOUND');
+                }
 
-            logger.info(`Company profile deleted for user ${userId}`);
+                logger.info(`Company profile deleted for user ${userId}`);
+            });
         } catch (error) {
-            logger.error(`Error deleting company profile: ${error instanceof Error ? error.message : 'Unknown error'}`);
+            logger.error(
+                `Error deleting company profile: ${error instanceof Error ? error.message : String(error)}`,
+                { userId, error }
+            );
+
             if (error instanceof ApiError) throw error;
-            throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to delete company profile');
+            throw ApiError.internal('Failed to delete company profile', 'COMPANY_PROFILE_DELETION_ERROR');
         }
     }
+
     /**
- * Get student profile ID by user ID
- * @param userId - ID of the user
- * @returns Student profile ID
- */
+     * Get student profile ID by user ID
+     * @param userId - ID of the user
+     * @returns Student profile ID
+     */
     public async getStudentProfileId(userId: string): Promise<string> {
         try {
             if (!Types.ObjectId.isValid(userId)) {
-                throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid user ID format');
+                throw ApiError.badRequest('Invalid user ID format', 'INVALID_USER_ID');
             }
 
             const profile = await StudentProfile.findOne({ user: userId }, '_id').lean();
 
             if (!profile) {
-                throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Student profile not found');
+                throw ApiError.notFound('Student profile not found', 'PROFILE_NOT_FOUND');
             }
 
             return profile._id.toString();
         } catch (error) {
             logger.error(`Error fetching student profile ID: ${error instanceof Error ? error.message : 'Unknown error'}`);
             if (error instanceof ApiError) throw error;
-            throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to retrieve student profile ID');
+            throw ApiError.internal('Failed to retrieve student profile ID', 'STUDENT_PROFILE_ID_RETRIEVAL_ERROR');
         }
     }
 
@@ -521,20 +519,20 @@ export class ProfileService extends BaseService {
     public async getCompanyProfileId(userId: string): Promise<string> {
         try {
             if (!Types.ObjectId.isValid(userId)) {
-                throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid user ID format');
+                throw ApiError.badRequest('Invalid user ID format', 'INVALID_USER_ID');
             }
 
             const profile = await CompanyProfile.findOne({ user: userId }, '_id').lean();
 
             if (!profile) {
-                throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Company profile not found');
+                throw ApiError.notFound('Company profile not found', 'PROFILE_NOT_FOUND');
             }
 
             return profile._id.toString();
         } catch (error) {
             logger.error(`Error fetching company profile ID: ${error instanceof Error ? error.message : 'Unknown error'}`);
             if (error instanceof ApiError) throw error;
-            throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to retrieve company profile ID');
+            throw ApiError.internal('Failed to retrieve company profile ID', 'COMPANY_PROFILE_ID_RETRIEVAL_ERROR');
         }
     }
 
@@ -546,13 +544,13 @@ export class ProfileService extends BaseService {
     public async getArchitectProfileId(userId: string): Promise<string> {
         try {
             if (!Types.ObjectId.isValid(userId)) {
-                throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid user ID format', true, 'INVALID_USER_ID');
+                throw ApiError.badRequest('Invalid user ID format', 'INVALID_USER_ID');
             }
 
             const profile = await ArchitectProfile.findOne({ user: userId }, '_id').lean();
 
             if (!profile) {
-                throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Architect profile not found', true, 'PROFILE_NOT_FOUND');
+                throw ApiError.notFound('Architect profile not found', 'PROFILE_NOT_FOUND');
             }
 
             return profile._id.toString();
@@ -563,15 +561,12 @@ export class ProfileService extends BaseService {
             );
 
             if (error instanceof ApiError) throw error;
-            throw new ApiError(
-                HTTP_STATUS.INTERNAL_SERVER_ERROR,
+            throw ApiError.internal(
                 'Failed to retrieve architect profile ID',
-                true,
                 'ARCHITECT_PROFILE_RETRIEVAL_ERROR'
             );
         }
     }
-
 }
 
 // Create and export singleton instance

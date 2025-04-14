@@ -1,24 +1,26 @@
-import mongoose, { Types } from 'mongoose';
-import { Challenge, Solution } from '../models';
+import { Types } from 'mongoose';
+import Challenge from '../models/Challenge';
+import Solution from '../models/Solution';
+import { BaseService } from './BaseService';
+import { logger } from '../utils/logger';
+import { ApiError } from '../utils/api.error';
+import { HTTP_STATUS } from '../models/interfaces';
 import {
   IChallenge,
-  ISolution,
   ChallengeStatus,
   ChallengeDifficulty,
   ChallengeVisibility,
-  SolutionStatus,
-  HTTP_STATUS,
-  UserRole
+  UserRole,
+  ISolution,
+  SolutionStatus
 } from '../models/interfaces';
-import { ApiError } from '../utils/api.error';
-import { logger } from '../utils/logger';
-import { BaseService } from './BaseService';
+import {
+  PaginationResult,
+  executePaginatedQuery,
+  createPaginationResult
+} from '../utils/paginationUtils';
 
-/**
- * Service for challenge-related operations
- */
 export class ChallengeService extends BaseService {
-
   /**
    * Create a new challenge
    * @param companyId - The ID of the company creating the challenge
@@ -26,32 +28,44 @@ export class ChallengeService extends BaseService {
    * @returns The created challenge
    */
   async createChallenge(companyId: string, challengeData: Partial<IChallenge>): Promise<IChallenge> {
+    logger.info('[createChallenge] Creating new challenge', { companyId });
+    
     try {
       // Validate company ID
       if (!Types.ObjectId.isValid(companyId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid company ID format');
+        throw ApiError.badRequest('Invalid company ID format', 'INVALID_ID_FORMAT');
       }
 
-      // Create new challenge with initial values
-      const challenge = new Challenge({
-        ...challengeData,
-        company: companyId,
-        status: ChallengeStatus.DRAFT,
-        currentParticipants: 0,
-        approvedSolutionsCount: 0
+      return await this.withTransaction(async (session) => {
+        // Create new challenge with initial values
+        const challenge = new Challenge({
+          ...challengeData,
+          company: companyId,
+          status: ChallengeStatus.DRAFT,
+          currentParticipants: 0,
+          approvedSolutionsCount: 0
+        });
+
+        await challenge.save({ session });
+        
+        logger.info('[createChallenge] Challenge created successfully', {
+          challengeId: challenge._id,
+          companyId
+        });
+
+        return challenge;
       });
-
-      await challenge.save();
-      logger.info(`Challenge created with ID: ${challenge._id} by company: ${companyId}`);
-
-      return challenge;
     } catch (error) {
-      logger.error('Error creating challenge:', error);
+      logger.error('[createChallenge] Failed to create challenge', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        companyId
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to create challenge');
+      throw ApiError.internal('Failed to create challenge', 'CHALLENGE_CREATION_ERROR');
     }
   }
-
 
   /**
    * Get a challenge by ID
@@ -59,25 +73,34 @@ export class ChallengeService extends BaseService {
    * @returns The challenge
    */
   async getChallengeById(challengeId: string): Promise<IChallenge> {
+    logger.info('[getChallengeById] Fetching challenge', { challengeId });
+    
     try {
       // Validate challenge ID
       if (!Types.ObjectId.isValid(challengeId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid challenge ID format');
+        throw ApiError.badRequest('Invalid challenge ID format', 'INVALID_ID_FORMAT');
       }
 
-      // OPTIMIZED: Limited fields in populated company
+      // Limited fields in populated company for optimization
       const challenge = await Challenge.findById(challengeId)
         .populate('company', 'companyName industry location')
-        .lean(); // OPTIMIZED: Added lean() for better performance
-
+        .lean();
+      
       if (!challenge) {
-        throw ApiError.notFound('Challenge not found');
+        throw ApiError.notFound('Challenge not found', 'CHALLENGE_NOT_FOUND');
       }
+      
+      logger.info('[getChallengeById] Challenge retrieved successfully', { challengeId });
       return challenge;
     } catch (error) {
-      logger.error(`Error fetching challenge ${challengeId}:`, error);
+      logger.error('[getChallengeById] Failed to retrieve challenge', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        challengeId
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to retrieve challenge');
+      throw ApiError.internal('Failed to retrieve challenge', 'CHALLENGE_RETRIEVAL_ERROR');
     }
   }
 
@@ -93,60 +116,94 @@ export class ChallengeService extends BaseService {
     companyId: string,
     updateData: Partial<IChallenge>
   ): Promise<IChallenge> {
+    logger.info('[updateChallenge] Updating challenge', { 
+      challengeId, 
+      companyId,
+      updateFields: Object.keys(updateData)
+    });
+    
     try {
       // Validate IDs
       if (!Types.ObjectId.isValid(challengeId) || !Types.ObjectId.isValid(companyId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid ID format');
+        throw ApiError.badRequest('Invalid ID format', 'INVALID_ID_FORMAT');
       }
 
-      // Find challenge with company verification (security check)
-      const challenge = await Challenge.findOne({
-        _id: challengeId,
-        company: companyId
+      return await this.withTransaction(async (session) => {
+        // Find challenge with company verification (security check)
+        const challenge = await Challenge.findOne({
+          _id: challengeId,
+          company: companyId
+        }).session(session);
+
+        if (!challenge) {
+          throw ApiError.notFound(
+            'Challenge not found or you do not have permission to update it', 
+            'CHALLENGE_NOT_FOUND_OR_FORBIDDEN'
+          );
+        }
+
+        // Prevent status changes through this endpoint
+        if (updateData.status && updateData.status !== challenge.status) {
+          throw ApiError.badRequest(
+            'Status changes must be done through specific endpoints', 
+            'STATUS_CHANGE_NOT_ALLOWED'
+          );
+        }
+
+        // Prevent updating a challenge that's already closed or completed
+        if ([ChallengeStatus.COMPLETED, ChallengeStatus.CLOSED].includes(challenge.status as ChallengeStatus)) {
+          throw ApiError.badRequest(
+            'Cannot update a closed or completed challenge', 
+            'CHALLENGE_UPDATE_NOT_ALLOWED'
+          );
+        }
+
+        // Validate deadline if provided
+        if (updateData.deadline && new Date(updateData.deadline) <= new Date()) {
+          throw ApiError.badRequest(
+            'Deadline must be in the future', 
+            'INVALID_DEADLINE'
+          );
+        }
+
+        // List of allowed fields that can be updated
+        const allowedFields = [
+          'title', 'description', 'requirements', 'resources', 'rewards',
+          'deadline', 'difficulty', 'category', 'maxParticipants', 
+          'tags', 'maxApprovedSolutions', 'visibility', 'allowedInstitutions', 
+          'isCompanyVisible'
+        ];
+
+        // Filter out fields that aren't allowed to be updated
+        const filteredUpdateData = Object.fromEntries(
+          Object.entries(updateData).filter(([key]) => allowedFields.includes(key))
+        );
+
+        // Update fields with validated data
+        Object.assign(challenge, filteredUpdateData);
+
+        await challenge.save({ session });
+        
+        logger.info('[updateChallenge] Challenge updated successfully', { 
+          challengeId, 
+          companyId 
+        });
+
+        return challenge;
       });
-
-      if (!challenge) {
-        throw ApiError.notFound('Challenge not found or you do not have permission to update it');
-      }
-
-      // Prevent status changes through this endpoint
-      if (updateData.status && updateData.status !== challenge.status) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Challenge status cannot be updated through this endpoint');
-      }
-
-      // Prevent updating a challenge that's already closed or completed
-      if ([ChallengeStatus.COMPLETED, ChallengeStatus.CLOSED].includes(challenge.status as ChallengeStatus)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Cannot update a completed or cancelled challenge');
-      }
-
-      // Validate deadline if provided
-      if (updateData.deadline && new Date(updateData.deadline) <= new Date()) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Deadline must be in the future');
-      }
-
-      // List of allowed fields that can be updated
-      const allowedFields = [
-        'title', 'description', 'requirements', 'resources', 'rewards',
-        'deadline', 'difficulty', 'category', 'maxParticipants', 'tags',
-        'maxApprovedSolutions', 'visibility', 'allowedInstitutions', 'isCompanyVisible'
-      ];
-
-      // Filter out fields that aren't allowed to be updated
-      const filteredUpdateData = Object.fromEntries(
-        Object.entries(updateData).filter(([key]) => allowedFields.includes(key))
-      );
-
-      // Update fields with validated data
-      Object.assign(challenge, filteredUpdateData);
-
-      await challenge.save();
-      logger.info(`Challenge ${challengeId} updated by company ${companyId}`);
-
-      return challenge;
     } catch (error) {
-      logger.error(`Error updating challenge ${challengeId}:`, error);
+      logger.error('[updateChallenge] Failed to update challenge', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        challengeId,
+        companyId
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to update challenge');
+      throw ApiError.internal(
+        'Failed to update challenge', 
+        'CHALLENGE_UPDATE_ERROR'
+      );
     }
   }
 
@@ -159,9 +216,9 @@ export class ChallengeService extends BaseService {
     errors: number;
     details: Array<{ id: string; status: string }>;
   }> {
+    logger.info('[updateChallengeStatuses] Starting automatic challenge status update job');
+    
     try {
-      logger.info('Starting automatic challenge status update job');
-
       return await this.withTransaction(async (session) => {
         const results = {
           updated: 0,
@@ -173,80 +230,48 @@ export class ChallengeService extends BaseService {
         const expiredSubmissionChallenges = await Challenge.find({
           status: ChallengeStatus.ACTIVE,
           deadline: { $lt: new Date() }
-        });
+        }).session(session);
 
-        logger.info(`Found ${expiredSubmissionChallenges.length} expired submission challenges to update`);
+        logger.info('[updateChallengeStatuses] Found expired submission challenges', { 
+          count: expiredSubmissionChallenges.length 
+        });
 
         // Update submission deadline expired challenges
         for (const challenge of expiredSubmissionChallenges) {
           try {
             challenge.status = ChallengeStatus.CLOSED;
             await challenge.save({ session });
-
+            
             results.updated++;
-            results.details.push({
-              id: challenge._id instanceof Types.ObjectId ? challenge._id.toString() : String(challenge._id),
-              status: 'success'
+            results.details.push({ 
+              id: (challenge as IChallenge & { _id: Types.ObjectId })._id.toString(), 
+              status: ChallengeStatus.CLOSED 
             });
-
-            logger.info(`Challenge ${challenge._id} automatically closed due to passed submission deadline`);
           } catch (err) {
             results.errors++;
-            results.details.push({
-              id: challenge._id instanceof Types.ObjectId ? challenge._id.toString() : String(challenge._id),
-              status: 'error'
+            logger.error('[updateChallengeStatuses] Failed to update challenge status', {
+              error: err instanceof Error ? err.message : String(err),
+              challengeId: challenge._id
             });
-
-            logger.error(`Failed to update status for challenge ${challenge._id}:`, err);
-            throw err; // Rethrow to trigger transaction rollback
           }
         }
 
-        // Find closed challenges with passed review deadlines
-        const expiredReviewChallenges = await Challenge.find({
-          status: ChallengeStatus.CLOSED,
-          reviewDeadline: { $lt: new Date() },
-          claimedBy: { $exists: true, $ne: null }
+        logger.info('[updateChallengeStatuses] Challenge status update job completed', { 
+          updated: results.updated, 
+          errors: results.errors 
         });
-
-        logger.info(`Found ${expiredReviewChallenges.length} expired review deadline challenges to update`);
-
-        // Auto-complete challenges with expired review deadlines
-        for (const challenge of expiredReviewChallenges) {
-          try {
-            challenge.status = ChallengeStatus.COMPLETED;
-            challenge.completedAt = new Date();
-            await challenge.save({ session });
-
-            results.updated++;
-            results.details.push({
-              id: challenge._id instanceof Types.ObjectId ? challenge._id.toString() : String(challenge._id),
-              status: 'success-review'
-            });
-
-            logger.info(`Challenge ${challenge._id} automatically completed due to passed review deadline`);
-          } catch (err) {
-            results.errors++;
-            results.details.push({
-              id: challenge._id instanceof Types.ObjectId ? challenge._id.toString() : String(challenge._id),
-              status: 'error-review'
-            });
-
-            logger.error(`Failed to auto-complete challenge ${challenge._id}:`, err);
-            throw err; // Rethrow to trigger transaction rollback
-          }
-        }
-
-        logger.info(`Challenge status update job completed: ${results.updated} updated, ${results.errors} errors`);
+        
         return results;
       });
     } catch (error) {
-      logger.error('Failed to update challenge statuses:', error);
+      logger.error('[updateChallengeStatuses] Fatal error in status update job', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(
-        HTTP_STATUS.INTERNAL_SERVER_ERROR,
+      throw ApiError.internal(
         'Failed to update challenge statuses',
-        true,
         'CHALLENGE_STATUS_UPDATE_ERROR'
       );
     }
@@ -259,10 +284,15 @@ export class ChallengeService extends BaseService {
    * @returns The published challenge
    */
   async publishChallenge(challengeId: string, companyId: string): Promise<IChallenge> {
+    logger.info('[publishChallenge] Publishing challenge', { 
+      challengeId, 
+      companyId 
+    });
+    
     try {
       // Validate IDs
       if (!Types.ObjectId.isValid(challengeId) || !Types.ObjectId.isValid(companyId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid ID format');
+        throw ApiError.badRequest('Invalid ID format', 'INVALID_ID_FORMAT');
       }
 
       return await this.withTransaction(async (session) => {
@@ -273,11 +303,17 @@ export class ChallengeService extends BaseService {
         }).session(session);
 
         if (!challenge) {
-          throw ApiError.notFound('Challenge not found or you do not have permission to publish it');
+          throw ApiError.notFound(
+            'Challenge not found or you do not have permission to publish it',
+            'CHALLENGE_NOT_FOUND_OR_FORBIDDEN'
+          );
         }
 
         if (challenge.status !== ChallengeStatus.DRAFT) {
-          throw ApiError.badRequest('Only draft challenges can be published');
+          throw ApiError.badRequest(
+            'Only draft challenges can be published',
+            'CHALLENGE_NOT_DRAFT'
+          );
         }
 
         // Validate required fields before publishing
@@ -287,16 +323,24 @@ export class ChallengeService extends BaseService {
         challenge.publishedAt = new Date();
         await challenge.save({ session });
 
-        logger.info(`Challenge ${challengeId} published by company ${companyId}`);
+        logger.info('[publishChallenge] Challenge published successfully', { 
+          challengeId, 
+          companyId 
+        });
+        
         return challenge;
       });
     } catch (error) {
-      logger.error(`Error publishing challenge ${challengeId}:`, error);
+      logger.error('[publishChallenge] Failed to publish challenge', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        challengeId,
+        companyId
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(
-        HTTP_STATUS.INTERNAL_SERVER_ERROR,
+      throw ApiError.internal(
         'Failed to publish challenge',
-        true,
         'CHALLENGE_PUBLISH_ERROR'
       );
     }
@@ -320,115 +364,90 @@ export class ChallengeService extends BaseService {
     endDate?: Date;
     sortBy?: string;
     sortOrder?: 'asc' | 'desc';
-  }): Promise<{
-    challenges: IChallenge[];
-    total: number;
-    page: number;
-    limit: number;
-    totalPages: number;
-  }> {
+  }): Promise<PaginationResult<IChallenge>> {
+    logger.info('[getChallenges] Fetching challenges with filters', { 
+      filters: { ...filters, limit: filters.limit || 10, page: filters.page || 1 } 
+    });
+    
     try {
-      const {
-        status,
-        companyId,
-        category,
-        difficulty,
-        searchTerm,
-        visibility,
-        startDate,
-        endDate,
-        sortBy = 'createdAt',
-        sortOrder = 'desc',
-        page = 1,
-        limit = 10
-      } = filters;
+      // Build query filters
+      const queryFilters: Record<string, any> = {};
 
-      const query: Record<string, any> = {};
-
-      // Add filters to query
-      if (status) {
-        query.status = status;
+      if (filters.status) {
+        queryFilters.status = filters.status;
       }
 
-      if (companyId) {
-        if (!Types.ObjectId.isValid(companyId)) {
-          throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid company ID format');
+      if (filters.companyId) {
+        if (!Types.ObjectId.isValid(filters.companyId)) {
+          throw ApiError.badRequest('Invalid company ID format', 'INVALID_ID_FORMAT');
         }
-        query.company = new Types.ObjectId(companyId);
+        queryFilters.company = new Types.ObjectId(filters.companyId);
       }
 
-      if (category) {
-        if (Array.isArray(category)) {
-          query.category = { $in: category };
+      if (filters.category) {
+        if (Array.isArray(filters.category)) {
+          queryFilters.category = { $in: filters.category };
         } else {
-          query.category = category;
+          queryFilters.category = filters.category;
         }
       }
 
-      if (difficulty) {
-        query.difficulty = difficulty;
+      if (filters.difficulty) {
+        queryFilters.difficulty = filters.difficulty;
       }
 
-      if (visibility) {
-        query.visibility = visibility;
+      if (filters.visibility) {
+        queryFilters.visibility = filters.visibility;
       }
 
       // Date range filtering
-      if (startDate || endDate) {
-        query.createdAt = {};
+      if (filters.startDate || filters.endDate) {
+        queryFilters.createdAt = {};
 
-        if (startDate) {
-          query.createdAt.$gte = new Date(startDate);
+        if (filters.startDate) {
+          queryFilters.createdAt.$gte = new Date(filters.startDate);
         }
 
-        if (endDate) {
-          query.createdAt.$lte = new Date(endDate);
+        if (filters.endDate) {
+          queryFilters.createdAt.$lte = new Date(filters.endDate);
         }
       }
 
       // Text search functionality
-      if (searchTerm) {
-        query.$or = [
-          { title: { $regex: searchTerm, $options: 'i' } },
-          { description: { $regex: searchTerm, $options: 'i' } },
-          { tags: { $in: [new RegExp(searchTerm, 'i')] } }
+      if (filters.searchTerm) {
+        queryFilters.$or = [
+          { title: { $regex: filters.searchTerm, $options: 'i' } },
+          { description: { $regex: filters.searchTerm, $options: 'i' } },
+          { tags: { $in: [new RegExp(filters.searchTerm, 'i')] } }
         ];
       }
 
-      // Pagination setup
-      const pageNum = Math.max(1, page);
-      const limitNum = Math.min(Math.max(1, limit), 50); // Cap at 50 items per page
-      const skip = (pageNum - 1) * limitNum;
-
-      // Sorting setup
-      const sortOptions: Record<string, 1 | -1> = {};
-      sortOptions[sortBy] = sortOrder === 'asc' ? 1 : -1;
-
-      // Execute queries in parallel for efficiency
-      const [challenges, total] = await Promise.all([
-        Challenge.find(query)
-          // OPTIMIZED: Limited fields in populated company
-          .populate('company', 'companyName logo')
-          .sort(sortOptions)
-          .skip(skip)
-          .limit(limitNum)
-          .lean(), // OPTIMIZED: Added lean() for better performance
-        Challenge.countDocuments(query)
-      ]);
-
-      const totalPages = Math.ceil(total / limitNum);
-
-      return {
-        challenges,
-        total,
-        page: pageNum,
-        limit: limitNum,
-        totalPages
-      };
+      // Use pagination utilities for standardized pagination
+      return await executePaginatedQuery<IChallenge>(
+        Challenge,
+        queryFilters,
+        {
+          page: filters.page || 1,
+          limit: filters.limit || 10,
+          sortBy: filters.sortBy || 'createdAt',
+          sortOrder: filters.sortOrder || 'desc',
+          maxLimit: 50 // Set max items per page
+        },
+        // Query modifier for populating relations and other operations
+        (query) => query.populate('company', 'companyName logo').lean()
+      );
     } catch (error) {
-      logger.error('Error fetching challenges:', error);
+      logger.error('[getChallenges] Failed to retrieve challenges', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        filters
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to retrieve challenges');
+      throw ApiError.internal(
+        'Failed to retrieve challenges',
+        'CHALLENGE_RETRIEVAL_ERROR'
+      );
     }
   }
 
@@ -439,10 +458,15 @@ export class ChallengeService extends BaseService {
    * @returns The closed challenge
    */
   async closeChallenge(challengeId: string, companyId: string): Promise<IChallenge> {
+    logger.info('[closeChallenge] Closing challenge manually', { 
+      challengeId, 
+      companyId 
+    });
+    
     try {
       // Validate IDs
       if (!Types.ObjectId.isValid(challengeId) || !Types.ObjectId.isValid(companyId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid ID format');
+        throw ApiError.badRequest('Invalid ID format', 'INVALID_ID_FORMAT');
       }
   
       return await this.withTransaction(async (session) => {
@@ -453,48 +477,66 @@ export class ChallengeService extends BaseService {
         }).session(session);
   
         if (!challenge) {
-          throw ApiError.notFound('Challenge not found or you do not have permission to close it');
+          throw ApiError.notFound(
+            'Challenge not found or you do not have permission to close it',
+            'CHALLENGE_NOT_FOUND_OR_FORBIDDEN'
+          );
         }
   
         if (challenge.status !== ChallengeStatus.ACTIVE) {
-          throw ApiError.badRequest('Only active challenges can be closed manually');
+          throw ApiError.badRequest(
+            'Only active challenges can be closed manually',
+            'CHALLENGE_NOT_ACTIVE'
+          );
         }
   
         challenge.status = ChallengeStatus.CLOSED;
         challenge.completedAt = new Date();
         await challenge.save({ session });
   
-        logger.info(`Challenge ${challengeId} manually closed by company ${companyId}`);
+        logger.info('[closeChallenge] Challenge closed successfully', { 
+          challengeId, 
+          companyId 
+        });
+        
         return challenge;
       });
     } catch (error) {
-      logger.error(`Error closing challenge ${challengeId}:`, error);
+      logger.error('[closeChallenge] Failed to close challenge', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        challengeId,
+        companyId
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(
-        HTTP_STATUS.INTERNAL_SERVER_ERROR, 
+      throw ApiError.internal(
         'Failed to close challenge',
-        true,
         'CHALLENGE_CLOSE_ERROR'
       );
     }
   }
 
   /**
- * Delete a challenge and its associated solutions
- * @param challengeId - The ID of the challenge to delete
- * @throws ApiError if challenge cannot be deleted
- */
+   * Delete a challenge and its associated solutions
+   * @param challengeId - The ID of the challenge to delete
+   * @throws ApiError if challenge cannot be deleted
+   */
   async deleteChallenge(challengeId: string): Promise<void> {
+    logger.info('[deleteChallenge] Deleting challenge and associated solutions', { 
+      challengeId 
+    });
+    
     try {
       // Validate challenge ID
       if (!Types.ObjectId.isValid(challengeId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid challenge ID format');
+        throw ApiError.badRequest('Invalid challenge ID format', 'INVALID_ID_FORMAT');
       }
 
       // Find the challenge first to verify it exists
       const challenge = await Challenge.findById(challengeId);
       if (!challenge) {
-        throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Challenge not found');
+        throw ApiError.notFound('Challenge not found', 'CHALLENGE_NOT_FOUND');
       }
 
       await this.withTransaction(async (session) => {
@@ -502,50 +544,79 @@ export class ChallengeService extends BaseService {
         const deleteResult = await Challenge.findByIdAndDelete(challengeId).session(session);
 
         if (!deleteResult) {
-          throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Challenge not found');
+          throw ApiError.notFound('Challenge not found', 'CHALLENGE_NOT_FOUND');
         }
 
         // Delete all solutions for this challenge
-        const solutionDeleteResult = await Solution.deleteMany({ challenge: challengeId }).session(session);
+        const solutionDeleteResult = await Solution.deleteMany({ 
+          challenge: challengeId 
+        }).session(session);
 
-        logger.info(`Challenge ${challengeId} deleted with ${solutionDeleteResult.deletedCount} associated solutions`);
+        logger.info('[deleteChallenge] Challenge and solutions deleted successfully', { 
+          challengeId, 
+          deletedSolutions: solutionDeleteResult.deletedCount 
+        });
       });
     } catch (error) {
-      logger.error(`Error deleting challenge ${challengeId}: ${error instanceof Error ? error.message : String(error)}`, { challengeId });
+      logger.error('[deleteChallenge] Failed to delete challenge', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        challengeId
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to delete challenge');
+      throw ApiError.internal(
+        'Failed to delete challenge',
+        'CHALLENGE_DELETION_ERROR'
+      );
     }
   }
 
   /**
- * Validate if a challenge can be deleted based on business rules
- * @param challengeId - The ID of the challenge to validate
- * @throws ApiError if challenge cannot be deleted
- */
+   * Validate if a challenge can be deleted based on business rules
+   * @param challengeId - The ID of the challenge to validate
+   * @throws ApiError if challenge cannot be deleted
+   */
   async validateChallengeCanBeDeleted(challengeId: string): Promise<void> {
+    logger.info('[validateChallengeCanBeDeleted] Validating if challenge can be deleted', { 
+      challengeId 
+    });
+    
     try {
       // Validate challenge ID
       if (!Types.ObjectId.isValid(challengeId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid challenge ID format');
+        throw ApiError.badRequest('Invalid challenge ID format', 'INVALID_ID_FORMAT');
       }
 
       // Find the challenge
       const challenge = await Challenge.findById(challengeId);
       if (!challenge) {
-        throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Challenge not found');
+        throw ApiError.notFound('Challenge not found', 'CHALLENGE_NOT_FOUND');
       }
 
       // Business rule: Can't delete active/completed challenges with participants
       if (challenge.status !== ChallengeStatus.DRAFT && challenge.currentParticipants > 0) {
-        throw new ApiError(
-          HTTP_STATUS.FORBIDDEN,
-          'Cannot delete an active or completed challenge with participants'
+        throw ApiError.forbidden(
+          'Cannot delete an active or completed challenge with participants',
+          'CHALLENGE_DELETION_FORBIDDEN'
         );
       }
+      
+      logger.info('[validateChallengeCanBeDeleted] Challenge can be deleted', { 
+        challengeId 
+      });
     } catch (error) {
-      logger.error(`Error validating if challenge ${challengeId} can be deleted:`, error);
+      logger.error('[validateChallengeCanBeDeleted] Failed to validate challenge deletion', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        challengeId
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to validate challenge deletion');
+      throw ApiError.internal(
+        'Failed to validate challenge deletion',
+        'CHALLENGE_VALIDATION_ERROR'
+      );
     }
   }
 
@@ -562,20 +633,28 @@ export class ChallengeService extends BaseService {
     averageRating: number;
     topTags: Array<{ tag: string; count: number }>;
   }> {
+    logger.info('[getChallengeStatistics] Fetching challenge statistics', { 
+      challengeId, 
+      companyId 
+    });
+    
     try {
       // Validate IDs
       if (!Types.ObjectId.isValid(challengeId) || (companyId !== 'admin' && !Types.ObjectId.isValid(companyId))) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid ID format');
+        throw ApiError.badRequest('Invalid ID format', 'INVALID_ID_FORMAT');
       }
 
       // Check challenge ownership
       const challenge = await Challenge.findOne({
         _id: challengeId,
-        company: companyId
+        ...(companyId !== 'admin' ? { company: companyId } : {})
       });
 
       if (!challenge) {
-        throw ApiError.notFound('Challenge not found or you do not have permission to view statistics');
+        throw ApiError.notFound(
+          'Challenge not found or you do not have permission to view statistics',
+          'CHALLENGE_NOT_FOUND_OR_FORBIDDEN'
+        );
       }
 
       // Get all solutions for this challenge
@@ -618,31 +697,52 @@ export class ChallengeService extends BaseService {
         .sort((a, b) => b.count - a.count)
         .slice(0, 5);
 
-      return {
+      const statistics = {
         totalSolutions,
         solutionsByStatus,
         participationRate,
         averageRating,
         topTags
       };
+      
+      logger.info('[getChallengeStatistics] Statistics retrieved successfully', { 
+        challengeId, 
+        totalSolutions 
+      });
+      
+      return statistics;
     } catch (error) {
-      logger.error(`Error fetching statistics for challenge ${challengeId}:`, error);
+      logger.error('[getChallengeStatistics] Failed to retrieve challenge statistics', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        challengeId,
+        companyId
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to retrieve challenge statistics');
+      throw ApiError.internal(
+        'Failed to retrieve challenge statistics',
+        'CHALLENGE_STATISTICS_ERROR'
+      );
     }
   }
 
   /**
- * Complete a challenge (final status after review phase)
- * @param challengeId - The ID of the challenge
- * @param companyId - The ID of the company completing the challenge
- * @returns The completed challenge
- */
+   * Complete a challenge (final status after review phase)
+   * @param challengeId - The ID of the challenge
+   * @param companyId - The ID of the company completing the challenge
+   * @returns The completed challenge
+   */
   async completeChallenge(challengeId: string, companyId: string): Promise<IChallenge> {
+    logger.info('[completeChallenge] Completing challenge', { 
+      challengeId, 
+      companyId 
+    });
+    
     try {
       // Validate IDs
       if (!Types.ObjectId.isValid(challengeId) || !Types.ObjectId.isValid(companyId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid ID format');
+        throw ApiError.badRequest('Invalid ID format', 'INVALID_ID_FORMAT');
       }
   
       return await this.withTransaction(async (session) => {
@@ -652,11 +752,17 @@ export class ChallengeService extends BaseService {
         }).session(session);
   
         if (!challenge) {
-          throw ApiError.notFound('Challenge not found or you do not have permission to complete it');
+          throw ApiError.notFound(
+            'Challenge not found or you do not have permission to complete it',
+            'CHALLENGE_NOT_FOUND_OR_FORBIDDEN'
+          );
         }
   
         if (challenge.status !== ChallengeStatus.CLOSED) {
-          throw ApiError.badRequest('Only closed challenges can be marked as completed');
+          throw ApiError.badRequest(
+            'Only closed challenges can be marked as completed',
+            'CHALLENGE_NOT_CLOSED'
+          );
         }
   
         // Check if all solutions have been reviewed
@@ -666,23 +772,34 @@ export class ChallengeService extends BaseService {
         }).session(session);
   
         if (pendingSolutions > 0) {
-          throw ApiError.badRequest(`There are still ${pendingSolutions} solutions pending review`);
+          throw ApiError.badRequest(
+            `There are still ${pendingSolutions} solutions pending review`,
+            'PENDING_SOLUTIONS_EXIST'
+          );
         }
   
         challenge.status = ChallengeStatus.COMPLETED;
         challenge.completedAt = new Date();
         await challenge.save({ session });
   
-        logger.info(`Challenge ${challengeId} marked as completed by company ${companyId}`);
+        logger.info('[completeChallenge] Challenge marked as completed', { 
+          challengeId, 
+          companyId 
+        });
+        
         return challenge;
       });
     } catch (error) {
-      logger.error(`Error completing challenge ${challengeId}: ${error instanceof Error ? error.message : String(error)}`, { challengeId, companyId });
+      logger.error('[completeChallenge] Failed to complete challenge', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        challengeId,
+        companyId
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(
-        HTTP_STATUS.INTERNAL_SERVER_ERROR, 
+      throw ApiError.internal(
         'Failed to complete challenge',
-        true,
         'CHALLENGE_COMPLETION_ERROR'
       );
     }
@@ -705,17 +822,17 @@ export class ChallengeService extends BaseService {
       page?: number;
       limit?: number;
     } = {}
-  ): Promise<{
-    solutions: ISolution[];
-    total: number;
-    page: number;
-    limit: number;
-    totalPages: number;
-  }> {
+  ): Promise<PaginationResult<ISolution>> {
+    logger.info('[getChallengeSolutions] Fetching solutions for challenge', { 
+      challengeId, 
+      companyId, 
+      filters 
+    });
+    
     try {
       // Validate IDs
       if (!Types.ObjectId.isValid(challengeId) || !Types.ObjectId.isValid(companyId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid ID format');
+        throw ApiError.badRequest('Invalid ID format', 'INVALID_ID_FORMAT');
       }
 
       // Verify that the company owns the challenge
@@ -725,140 +842,89 @@ export class ChallengeService extends BaseService {
       });
 
       if (!challenge) {
-        throw ApiError.notFound('Challenge not found or you do not have permission to view solutions');
+        throw ApiError.notFound(
+          'Challenge not found or you do not have permission to view solutions',
+          'CHALLENGE_NOT_FOUND_OR_FORBIDDEN'
+        );
       }
 
-      const { status, rating, search, page = 1, limit = 10 } = filters;
+      const { status, rating, search } = filters;
 
-      const query: Record<string, any> = { challenge: challengeId };
+      const queryFilters: Record<string, any> = { challenge: challengeId };
 
       if (status) {
-        query.status = status;
+        queryFilters.status = status;
       }
 
       if (rating) {
-        query.rating = { $gte: rating };
+        queryFilters.rating = { $gte: rating };
       }
 
       if (search) {
-        query.$or = [
+        queryFilters.$or = [
           { title: { $regex: search, $options: 'i' } },
           { description: { $regex: search, $options: 'i' } }
         ];
       }
 
-      // Pagination setup
-      const pageNum = Math.max(1, page);
-      const limitNum = Math.min(Math.max(1, limit), 50);
-      const skip = (pageNum - 1) * limitNum;
-
-      // Execute queries in parallel
-      const [solutions, total] = await Promise.all([
-        Solution.find(query)
+      // Use standardized pagination
+      return await executePaginatedQuery<ISolution>(
+        Solution,
+        queryFilters,
+        {
+          page: filters.page || 1,
+          limit: filters.limit || 10,
+          sortBy: 'createdAt',
+          sortOrder: 'desc',
+          maxLimit: 50
+        },
+        // Query modifier for populating relations
+        (query) => query
           .populate('student', 'firstName lastName email university')
           .populate('reviewedBy', 'firstName lastName specialization')
-          .sort({ createdAt: -1 })
-          .skip(skip)
-          .limit(limitNum),
-        Solution.countDocuments(query)
-      ]);
-
-      const totalPages = Math.ceil(total / limitNum);
-
-      return {
-        solutions,
-        total,
-        page: pageNum,
-        limit: limitNum,
-        totalPages
-      };
+      );
     } catch (error) {
-      logger.error(`Error fetching solutions for challenge ${challengeId}:`, error);
+      logger.error('[getChallengeSolutions] Failed to retrieve solutions', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        challengeId,
+        companyId
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to retrieve challenge solutions');
+      throw ApiError.internal(
+        'Failed to retrieve challenge solutions',
+        'CHALLENGE_SOLUTIONS_ERROR'
+      );
     }
   }
 
   /**
-   * Validate a challenge for publication
-   * @param challenge - The challenge to validate
-   * @throws ApiError if the challenge is invalid
+   * Get challenge by ID with visibility controls
    */
-  private validateChallengeForPublication(challenge: IChallenge): void {
-    const errors = [];
-
-    if (!challenge.title || challenge.title.trim() === '') {
-      errors.push('Challenge title is required');
-    }
-
-    if (!challenge.description || challenge.description.trim() === '') {
-      errors.push('Challenge description is required');
-    }
-
-    if (!challenge.requirements || challenge.requirements.length === 0) {
-      errors.push('At least one requirement is required');
-    }
-
-    if (!challenge.difficulty) {
-      errors.push('Challenge difficulty is required');
-    }
-
-    if (!challenge.category || challenge.category.length === 0) {
-      errors.push('At least one category is required');
-    }
-
-    if (!challenge.deadline) {
-      errors.push('Challenge deadline is required');
-    } else if (challenge.deadline <= new Date()) {
-      errors.push('Challenge deadline must be in the future');
-    }
-    if (!challenge.deadline) {
-      errors.push('Challenge deadline is required');
-    } else if (challenge.deadline <= new Date()) {
-      errors.push('Challenge deadline must be in the future');
-    }
-
-    // Validate review deadline if provided
-    if (challenge.reviewDeadline) {
-      if (challenge.reviewDeadline <= challenge.deadline) {
-        errors.push('Review deadline must be after submission deadline');
-      }
-      if (challenge.reviewDeadline <= new Date()) {
-        errors.push('Review deadline must be in the future');
-      }
-    }
-
-    // If private, must have allowed institutions
-    if (challenge.visibility === ChallengeVisibility.PRIVATE &&
-      (!challenge.allowedInstitutions || challenge.allowedInstitutions.length === 0)) {
-      errors.push('Private challenges must have at least one allowed institution');
-    }
-
-    if (errors.length > 0) {
-      throw new ApiError(HTTP_STATUS.BAD_REQUEST, `Challenge validation failed: ${errors.join(', ')}`);
-    }
-  }
-
-  /**
- * Get challenge by ID with visibility controls
- */
   async getChallengeByIdWithVisibility(
     challengeId: string,
     userRole: UserRole,
     profileId?: string,
     studentProfile?: any
   ): Promise<any> {
+    logger.info('[getChallengeByIdWithVisibility] Fetching challenge with visibility controls', { 
+      challengeId, 
+      userRole,
+      profileId: profileId || 'undefined'
+    });
+    
     try {
       // Validate challenge ID
       if (!Types.ObjectId.isValid(challengeId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid challenge ID format');
+        throw ApiError.badRequest('Invalid challenge ID format', 'INVALID_ID_FORMAT');
       }
 
       const challenge = await Challenge.findById(challengeId)
         .populate('company', '-user -__v');
 
       if (!challenge) {
-        throw ApiError.notFound('Challenge not found');
+        throw ApiError.notFound('Challenge not found', 'CHALLENGE_NOT_FOUND');
       }
 
       // Check company ownership for company users
@@ -873,9 +939,15 @@ export class ChallengeService extends BaseService {
       if (challenge.visibility === 'private' && userRole === UserRole.STUDENT) {
         if (!studentProfile?.university ||
           !challenge.allowedInstitutions?.includes(studentProfile.university)) {
-          throw new ApiError(
-            HTTP_STATUS.FORBIDDEN,
-            'You do not have permission to view this private challenge'
+          logger.warn('[getChallengeByIdWithVisibility] Student access denied to private challenge', {
+            challengeId,
+            studentUniversity: studentProfile?.university,
+            allowedInstitutions: challenge.allowedInstitutions
+          });
+          
+          throw ApiError.forbidden(
+            'You do not have permission to view this private challenge',
+            'PRIVATE_CHALLENGE_ACCESS_DENIED'
           );
         }
       }
@@ -888,19 +960,45 @@ export class ChallengeService extends BaseService {
         (!isCompanyOwner && userRole !== UserRole.ADMIN)) {
         if (challengeObj.company) {
           const { company, ...restChallenge } = challengeObj;
+          
+          logger.info('[getChallengeByIdWithVisibility] Removed company data for anonymous challenge', { 
+            challengeId 
+          });
+          
           return restChallenge;
         }
       }
 
+      logger.info('[getChallengeByIdWithVisibility] Challenge retrieved successfully', { 
+        challengeId 
+      });
+      
       return challengeObj;
     } catch (error) {
-      logger.error(`Error fetching challenge ${challengeId} with visibility controls:`, error);
+      logger.error('[getChallengeByIdWithVisibility] Failed to retrieve challenge with visibility controls', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        challengeId,
+        userRole
+      });
+      
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to retrieve challenge');
+      throw ApiError.internal(
+        'Failed to retrieve challenge',
+        'CHALLENGE_RETRIEVAL_ERROR'
+      );
     }
   }
 
+  /**
+   * Get the company profile associated with a user ID
+   * @private
+   */
   private async getCompanyProfileForUser(userId: string): Promise<any> {
+    logger.info('[getCompanyProfileForUser] Fetching company profile for user', { 
+      userId 
+    });
+    
     try {
       // Import models here to avoid circular dependencies
       const { default: User } = await import('../models/User');
@@ -908,12 +1006,26 @@ export class ChallengeService extends BaseService {
 
       const user = await User.findById(userId);
       if (!user || user.role !== UserRole.COMPANY) {
+        logger.info('[getCompanyProfileForUser] User is not a company user', { 
+          userId, 
+          userRole: user?.role 
+        });
         return null;
       }
 
-      return await CompanyProfile.findOne({ user: userId });
+      const profile = await CompanyProfile.findOne({ user: userId });
+      logger.info('[getCompanyProfileForUser] Company profile fetched', { 
+        userId, 
+        profileFound: !!profile 
+      });
+      
+      return profile;
     } catch (error) {
-      logger.error(`Error getting company profile for user ${userId}:`, error);
+      logger.error('[getCompanyProfileForUser] Failed to get company profile', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        userId
+      });
       return null;
     }
   }
@@ -933,14 +1045,14 @@ export class ChallengeService extends BaseService {
     userId?: string,
     userRole?: UserRole,
     studentProfile?: any
-  ): Promise<{
-    challenges: any[];
-    total: number;
-    page: number;
-    limit: number;
-    totalPages: number;
-  }> {
+  ): Promise<PaginationResult<any>> {
     try {
+      logger.info('[getChallengesForUser] Fetching challenges with user-specific visibility', { 
+        userId, 
+        userRole,
+        filters 
+      });
+
       // Build query filters
       const queryFilters: Record<string, any> = {};
 
@@ -972,26 +1084,14 @@ export class ChallengeService extends BaseService {
             queryFilters.company = companyProfile._id;
           } else {
             // If company profile not found, return empty result
-            return {
-              challenges: [],
-              total: 0,
-              page: filters.page || 1,
-              limit: filters.limit || 10,
-              totalPages: 0
-            };
+            return createPaginationResult([], 0, filters.page || 1, filters.limit || 10);
           }
         } else if (userRole === UserRole.ADMIN) {
           // Admins can see all draft challenges
           queryFilters.status = ChallengeStatus.DRAFT;
         } else {
           // Non-company/admin users can't see draft challenges
-          return {
-            challenges: [],
-            total: 0,
-            page: filters.page || 1,
-            limit: filters.limit || 10,
-            totalPages: 0
-          };
+          return createPaginationResult([], 0, filters.page || 1, filters.limit || 10);
         }
       } else if (filters.status === 'all') {
         // For 'all' status requests:
@@ -1047,52 +1147,121 @@ export class ChallengeService extends BaseService {
         queryFilters.$and.push(visibilityFilter);
       }
 
-      // Pagination setup
-      const page = Math.max(1, filters.page || 1);
-      const limit = Math.min(Math.max(1, filters.limit || 10), 50);
-      const skip = (page - 1) * limit;
-
-      // Execute queries
-      const [challenges, total] = await Promise.all([
-        Challenge.find(queryFilters)
-          .populate('company', '-user -__v')
-          .select('-__v')
-          .sort({ createdAt: -1 })
-          .skip(skip)
-          .limit(limit),
-        Challenge.countDocuments(queryFilters)
-      ]);
-
-      // Process challenges for visibility
-      const processedChallenges = challenges.map(challenge => {
-        const challengeObj = challenge.toObject();
-
-        // For anonymous challenges, remove company data for non-company users
-        if (challenge.visibility === 'anonymous' &&
-          (userRole !== UserRole.COMPANY && userRole !== UserRole.ADMIN)) {
-          if (challengeObj.company) {
-            const { company, ...rest } = challengeObj;
-            return rest;
-          }
-        }
-        return challengeObj;
-      });
-
-      const totalPages = Math.ceil(total / limit);
-
-      return {
-        challenges: processedChallenges,
-        total,
-        page,
-        limit,
-        totalPages
-      };
+      // Use pagination utilities for standardized handling
+      const result = await executePaginatedQuery(
+        Challenge,
+        queryFilters,
+        {
+          page: filters.page || 1,
+          limit: filters.limit || 10,
+          sortBy: 'createdAt',
+          sortOrder: 'desc'
+        },
+        (query) => query.populate('company', '-user -__v').lean()
+      );
+      
+      // Process visibility after query execution
+      result.data = this.processVisibility(userRole, result.data);
+      return result;
     } catch (error) {
-      logger.error('Error fetching challenges with visibility filters:', error);
+      logger.error('[getChallengesForUser] Failed to retrieve challenges with visibility filters', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        userId,
+        userRole
+      });
       if (error instanceof ApiError) throw error;
-      throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to retrieve challenges');
+      throw ApiError.internal(
+        'Failed to retrieve challenges',
+        'CHALLENGE_RETRIEVAL_ERROR'
+      );
     }
   }
+
+  /**
+   * Process visibility settings for challenge data
+   * @private
+   */
+  private processVisibility(userRole: UserRole | undefined, challenges: any[]): any[] {
+    if (!challenges) return [];
+    
+    return challenges.map(challenge => {
+      const challengeObj = typeof challenge.toObject === 'function' 
+        ? challenge.toObject() 
+        : challenge;
+
+      // For anonymous challenges, remove company data for non-company/admin users
+      if (challengeObj.visibility === 'anonymous' &&
+        (userRole !== UserRole.COMPANY && userRole !== UserRole.ADMIN)) {
+        if (challengeObj.company) {
+          const { company, ...rest } = challengeObj;
+          return rest;
+        }
+      }
+      return challengeObj;
+    });
+  }
+
+  /**
+   * Validate a challenge for publication
+   * @param challenge - The challenge to validate
+   * @throws ApiError if the challenge is invalid
+   */
+  private validateChallengeForPublication(challenge: IChallenge): void {
+    logger.info('[validateChallengeForPublication] Validating challenge for publication', { 
+      challengeId: challenge._id 
+    });
+    
+    const errors = [];
+
+    if (!challenge.title || challenge.title.trim() === '') {
+      errors.push('Challenge title is required');
+    }
+
+    if (!challenge.description || challenge.description.trim() === '') {
+      errors.push('Challenge description is required');
+    }
+
+    if (!challenge.requirements || challenge.requirements.length === 0) {
+      errors.push('At least one requirement is required');
+    }
+
+    if (!challenge.difficulty) {
+      errors.push('Challenge difficulty is required');
+    }
+
+    if (!challenge.category || challenge.category.length === 0) {
+      errors.push('At least one category is required');
+    }
+
+    if (!challenge.deadline) {
+      errors.push('Challenge deadline is required');
+    } else if (challenge.deadline <= new Date()) {
+      errors.push('Challenge deadline must be in the future');
+    }
+
+    // If private, must have allowed institutions
+    if (challenge.visibility === ChallengeVisibility.PRIVATE &&
+      (!challenge.allowedInstitutions || challenge.allowedInstitutions.length === 0)) {
+      errors.push('Private challenges must have at least one allowed institution');
+    }
+
+    if (errors.length > 0) {
+      logger.warn('[validateChallengeForPublication] Challenge validation failed', {
+        challengeId: challenge._id,
+        errors
+      });
+      
+      throw ApiError.badRequest(
+        `Challenge validation failed: ${errors.join(', ')}`,
+        'CHALLENGE_VALIDATION_FAILED'
+      );
+    }
+    
+    logger.info('[validateChallengeForPublication] Challenge passed validation', { 
+      challengeId: challenge._id 
+    });
+  }
 }
-// Create and export singleton instance
+
 export const challengeService = new ChallengeService();
