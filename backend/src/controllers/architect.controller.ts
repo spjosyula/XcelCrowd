@@ -109,14 +109,19 @@ export class ArchitectController extends BaseController {
    */
   public getPendingSolutions = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
-      // Authorization via service
-      await this.architectService.authorizeArchitect(req.user!.userId, 'list-solutions');
+      // Use BaseController authorization
+      this.verifyAuthorization(req, [UserRole.ARCHITECT], 'viewing pending solutions');
 
       // Filter parsing and validation via service
       const filters = this.architectService.parseSolutionFilters(req.query);
 
       // Get solutions via service
       const result = await this.architectService.getPendingSolutions(filters);
+
+      // Log the action
+      this.logAction('view-pending-solutions', req.user!.userId, { 
+        filterCount: Object.keys(filters).length 
+      });
 
       // Respond with paginated result - transform to expected PaginationResult format
       this.sendPaginatedSuccess(
@@ -141,11 +146,16 @@ export class ArchitectController extends BaseController {
    */
   public getSolution = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
-      // Authorization via service
-      await this.architectService.authorizeArchitect(req.user!.userId, 'view-solution');
+      // Use BaseController authorization
+      this.verifyAuthorization(req, [UserRole.ARCHITECT], 'viewing solution details');
 
       // Get solution via service (includes ID validation)
       const solution = await this.architectService.getSolutionById(req.params.id);
+
+      // Log the action
+      this.logAction('view-solution-details', req.user!.userId, { 
+        solutionId: req.params.id 
+      });
 
       // Respond
       this.sendSuccess(res, solution, 'Solution retrieved successfully');
@@ -158,26 +168,27 @@ export class ArchitectController extends BaseController {
    */
   public reviewSolution = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
-      // Authorization via service
-      const { architectId } = await this.architectService.authorizeArchitectForSolution(
-        req.user!.userId,
-        req.params.id,
-        'review'
-      );
+      // Verify user has architect role
+      this.verifyAuthorization(req, [UserRole.ARCHITECT], 'reviewing solutions');
+      
+      const { id } = req.params;
+
+      // Get architect profile ID
+      const architectId = await this.getUserProfileId(req, UserRole.ARCHITECT);
 
       // Validate review data via service
       const reviewData = this.architectService.validateReviewData(req.body);
 
       // Submit review via service
       const updatedSolution = await this.architectService.reviewSolution(
-        req.params.id,
+        id,
         architectId,
         reviewData
       );
 
       // Log and respond
       this.logAction('review-solution', req.user!.userId, {
-        solutionId: req.params.id,
+        solutionId: id,
         status: reviewData.status
       });
 
@@ -198,8 +209,11 @@ export class ArchitectController extends BaseController {
   public claimSolution = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
       // Verify user has architect role
-      this.verifyAuthorization(req, [UserRole.ARCHITECT]);
+      this.verifyAuthorization(req, [UserRole.ARCHITECT], 'claiming solutions for review');
 
+      // Get architect profile ID
+      const architectId = await this.getUserProfileId(req, UserRole.ARCHITECT);
+      
       const { id } = req.params;
 
       // Business logic moved to service
@@ -348,14 +362,17 @@ export class ArchitectController extends BaseController {
    */
   public getDashboardStats = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
-      // Authorization via service
-      const architectId = await this.architectService.authorizeArchitect(
-        req.user!.userId,
-        'dashboard'
-      );
+      // Use BaseController authorization
+      this.verifyAuthorization(req, [UserRole.ARCHITECT], 'accessing dashboard statistics');
+      
+      // Get architect profile ID
+      const architectId = await this.getUserProfileId(req, UserRole.ARCHITECT);
 
       // Get stats via service
-      const stats = await this.architectService.getDashboardStats(architectId);
+      const stats = await this.architectService.getDashboardStats(req.user!.userId);
+
+      // Log the action
+      this.logAction('view-dashboard-stats', req.user!.userId);
 
       // Respond
       this.sendSuccess(res, stats, 'Dashboard statistics retrieved successfully');
@@ -368,11 +385,11 @@ export class ArchitectController extends BaseController {
    */
   public selectSolutionsForCompany = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
-      // Authorization via service
-      const architectId = await this.architectService.authorizeArchitect(
-        req.user!.userId,
-        'select-solutions'
-      );
+      // Use BaseController authorization
+      this.verifyAuthorization(req, [UserRole.ARCHITECT], 'selecting solutions for company');
+      
+      // Get architect profile ID
+      const architectId = await this.getUserProfileId(req, UserRole.ARCHITECT);
 
       // Validate input data via service
       const validatedSolutionIds = this.architectService.validateSolutionSelectionData(

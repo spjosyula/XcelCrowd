@@ -7,6 +7,7 @@ import { AuthorizationService, OwnershipCheck, RelationshipCheck } from '../util
 import { Types } from 'mongoose';
 import { logger } from '../utils/logger';
 import { PaginationResult } from '../utils/paginationUtils';
+import { validateObjectId as validateMongoId } from '../utils/mongoUtils';
 
 /**
  * Base controller with standardized responses and authorization methods
@@ -194,16 +195,11 @@ export class BaseController {
 
   /**
    * Validate that a string is a valid MongoDB ObjectId
+   * @deprecated Use validateObjectId from mongoUtils instead
    */
   protected validateObjectId(id: string, resourceName: string): void {
-    if (!Types.ObjectId.isValid(id)) {
-      throw new ApiError(
-        HTTP_STATUS.BAD_REQUEST,
-        `Invalid ${resourceName} ID format`,
-        true,
-        'INVALID_ID_FORMAT'
-      );
-    }
+    // Delegate to the centralized implementation
+    validateMongoId(id, resourceName);
   }
 
   /**

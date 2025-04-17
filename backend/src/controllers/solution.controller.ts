@@ -30,8 +30,11 @@ export class SolutionController extends BaseController {
    */
   public submitSolution = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
-      // Get the student profile ID
-      const studentId = await this.profileService.getStudentProfileId(req.user!.userId);
+      // Verify user has student role
+      this.verifyAuthorization(req, [UserRole.STUDENT], 'submitting solutions');
+      
+      // Get the student profile ID using base controller method
+      const studentId = await this.getUserProfileId(req, UserRole.STUDENT);
       
       // Extract and normalize challenge ID (support both field names)
       const { challenge, challengeId, title, description, submissionUrl, tags } = req.body;
@@ -87,7 +90,7 @@ export class SolutionController extends BaseController {
       this.verifyAuthorization(req, [UserRole.STUDENT]);
       
       // Get student profile ID
-      const studentId = await this.profileService.getStudentProfileId(req.user!.userId);
+      const studentId = await this.getUserProfileId(req, UserRole.STUDENT);
       
       // Extract and parse query parameters
       const { status, page, limit, sortBy, sortOrder } = req.query;
@@ -203,8 +206,8 @@ export class SolutionController extends BaseController {
       // Verify user has student role
       this.verifyAuthorization(req, [UserRole.STUDENT]);
       
-      // Get student profile ID
-      const studentId = await profileService.getStudentProfileId(req.user!.userId);
+      // Get student profile ID using base controller method
+      const studentId = await this.getUserProfileId(req, UserRole.STUDENT);
       
       const { id } = req.params;
       const { title, description, submissionUrl } = req.body;
@@ -233,8 +236,8 @@ export class SolutionController extends BaseController {
       // Verify user has architect role
       this.verifyAuthorization(req, [UserRole.ARCHITECT]);
       
-      // Get architect profile ID
-      const architectId = await this.profileService.getArchitectProfileId(req.user!.userId);
+      // Get architect profile ID using base controller method
+      const architectId = await this.getUserProfileId(req, UserRole.ARCHITECT);
       
       const { id } = req.params;
       
@@ -261,8 +264,8 @@ export class SolutionController extends BaseController {
       // Verify user has architect role
       this.verifyAuthorization(req, [UserRole.ARCHITECT]);
       
-      // Get architect profile ID
-      const architectId = await this.profileService.getArchitectProfileId(req.user!.userId);
+      // Get architect profile ID using base controller method
+      const architectId = await this.getUserProfileId(req, UserRole.ARCHITECT);
       
       const { id } = req.params;
       const { status, feedback, score } = req.body;
@@ -299,8 +302,8 @@ export class SolutionController extends BaseController {
       // Verify user has company role
       this.verifyAuthorization(req, [UserRole.COMPANY]);
       
-      // Get company profile ID
-      const companyId = await this.profileService.getCompanyProfileId(req.user!.userId);
+      // Get company profile ID using base controller method
+      const companyId = await this.getUserProfileId(req, UserRole.COMPANY);
       
       const { id } = req.params;
       
@@ -327,8 +330,8 @@ export class SolutionController extends BaseController {
       // Verify user has architect role
       this.verifyAuthorization(req, [UserRole.ARCHITECT]);
       
-      // Get architect profile ID
-      const architectId = await this.profileService.getArchitectProfileId(req.user!.userId);
+      // Get architect profile ID using base controller method
+      const architectId = await this.getUserProfileId(req, UserRole.ARCHITECT);
       
       // Extract query parameters
       const { status, page, limit, sortBy, sortOrder } = req.query;

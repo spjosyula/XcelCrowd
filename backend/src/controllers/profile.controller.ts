@@ -12,6 +12,7 @@ import { catchAsync } from '../utils/catch.async';
 import { BaseController } from './BaseController';
 import { AuthRequest } from '../types/request.types';
 import { UserRole } from '../models/interfaces';
+import { validateObjectId } from '../utils/mongoUtils';
 
 /**
  * Profile controller for handling profile-related HTTP requests
@@ -43,8 +44,8 @@ export class ProfileController extends BaseController {
         'create-student-profile'
       );
       
-      // Validate userId format (already done in service, but keeping for clarity)
-      this.validateObjectId(userId, 'user');
+      // Validate userId format using the centralized utility
+      validateObjectId(userId, 'user');
       
       // Prepare data and delegate to service
       const profileData: CreateStudentProfileDTO = {
@@ -76,11 +77,11 @@ export class ProfileController extends BaseController {
       this.verifyAuthorization(req);
       const { userId } = req.params;
       
-      // Validate userId format
-      this.validateObjectId(userId, 'user');
+      // Validate userId format using the centralized utility
+      validateObjectId(userId, 'user');
       
       // Authorization: check if user can access this profile
-      await profileService.authorizeProfileReadAccess(
+      await this.profileService.authorizeProfileReadAccess(
         req.user!.userId,
         req.user!.role as UserRole,
         userId,
@@ -182,8 +183,8 @@ export class ProfileController extends BaseController {
       this.verifyAuthorization(req);
       const { userId } = req.params;
       
-      // Validate userId format
-      this.validateObjectId(userId, 'user');
+      // Validate userId format using the centralized utility
+      validateObjectId(userId, 'user');
       
       // Authorization: check if user can access this profile
       await this.profileService.authorizeProfileReadAccess(

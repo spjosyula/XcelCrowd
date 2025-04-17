@@ -6,6 +6,7 @@ import { BaseController } from './BaseController';
 import { AuthRequest } from '../types/request.types';
 import { ApiError } from '../utils/api.error';
 import { UserRole } from '../models/interfaces';
+import { validateObjectId } from '../utils/mongoUtils';
 
 /**
  * User controller for handling user-related HTTP requests
@@ -58,8 +59,8 @@ export class UserController extends BaseController {
 
       const { id } = req.params;
 
-      // Validate ObjectId format
-      this.validateObjectId(id, 'user');
+      // Validate ObjectId format using centralized utility
+      validateObjectId(id, 'user');
 
       // Ensure user can only access their own record, unless they're an admin
       const isSelfAccess = req.user!.userId === id;
@@ -96,8 +97,8 @@ export class UserController extends BaseController {
 
       const { id } = req.params;
 
-      // Validate ObjectId format
-      this.validateObjectId(id, 'user');
+      // Validate ObjectId format using centralized utility
+      validateObjectId(id, 'user');
 
       // Ensure user can only update their own record, unless they're an admin
       const isSelfUpdate = req.user!.userId === id;
@@ -149,8 +150,8 @@ export class UserController extends BaseController {
 
       const { id } = req.params;
 
-      // Validate ObjectId format
-      this.validateObjectId(id, 'user');
+      // Validate ObjectId format using centralized utility
+      validateObjectId(id, 'user');
 
       // Prevent deletion of own account
       if (req.user!.userId === id) {

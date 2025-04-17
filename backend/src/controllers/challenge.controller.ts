@@ -7,6 +7,7 @@ import { catchAsync } from '../utils/catch.async';
 import { BaseController } from './BaseController';
 import { AuthRequest } from '../types/request.types';
 import { HTTP_STATUS } from '../constants';
+import { validateObjectId } from '../utils/mongoUtils';
 
 /**
  * Controller for challenge-related operations
@@ -33,8 +34,8 @@ export class ChallengeController extends BaseController {
     // Verify user has appropriate role
     this.verifyAuthorization(req, [UserRole.COMPANY, UserRole.ADMIN]);
 
-    // Validate challenge ID
-    this.validateObjectId(challengeId, 'challenge');
+    // Validate challenge ID using mongoUtils utility
+    validateObjectId(challengeId, 'challenge');
 
     // Get the challenge
     const challenge = await this.challengeService.getChallengeById(challengeId);
@@ -195,7 +196,7 @@ export class ChallengeController extends BaseController {
       this.verifyAuthorization(req);
 
       const { id } = req.params;
-      this.validateObjectId(id, 'challenge');
+      validateObjectId(id, 'challenge');
 
       // Get user role and profile information for visibility checks
       const userRole = req.user!.role as UserRole;
