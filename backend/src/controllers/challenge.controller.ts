@@ -8,6 +8,7 @@ import { BaseController } from './BaseController';
 import { AuthRequest } from '../types/request.types';
 import { HTTP_STATUS } from '../constants';
 import { validateObjectId } from '../utils/mongoUtils';
+import { logger } from '../utils/logger';
 
 /**
  * Controller for challenge-related operations
@@ -31,25 +32,53 @@ export class ChallengeController extends BaseController {
     challengeId: string,
     action: string
   ) {
-    // Verify user has appropriate role
-    this.verifyAuthorization(req, [UserRole.COMPANY, UserRole.ADMIN]);
+    try {
+      // Verify user has appropriate role
+      this.verifyAuthorization(req, [UserRole.COMPANY, UserRole.ADMIN], `${action} a challenge`);
 
-    // Validate challenge ID using mongoUtils utility
-    validateObjectId(challengeId, 'challenge');
+      // Validate challenge ID using mongoUtils utility
+      validateObjectId(challengeId, 'challenge');
 
-    // Get the challenge
-    const challenge = await this.challengeService.getChallengeById(challengeId);
+      // Get the challenge
+      const challenge = await this.challengeService.getChallengeById(challengeId);
+      
+      if (!challenge) {
+        throw ApiError.notFound(
+          `Challenge not found with id: ${challengeId}`,
+          'CHALLENGE_NOT_FOUND'
+        );
+      }
 
-    // Verify ownership (except for admin)
-    await this.authorize(req, {
-      allowedRoles: [UserRole.COMPANY, UserRole.ADMIN],
-      resource: challenge,
-      ownerIdField: 'company',
-      ownerRole: UserRole.COMPANY,
-      failureMessage: `You do not have permission to ${action} this challenge`
-    });
+      // Verify ownership (except for admin)
+      await this.authorize(req, {
+        allowedRoles: [UserRole.COMPANY, UserRole.ADMIN],
+        resource: challenge,
+        ownerIdField: 'company',
+        ownerRole: UserRole.COMPANY,
+        failureMessage: `You do not have permission to ${action} this challenge`
+      });
 
-    return challenge;
+      // Log successful authorization
+      this.logAction('challenge-access-authorized', req.user!.userId, {
+        challengeId,
+        action,
+        role: req.user!.role
+      });
+
+      return challenge;
+    } catch (error) {
+      // Re-throw API errors
+      if (error instanceof ApiError) {
+        throw error;
+      }
+      
+      // Convert and log other errors
+      logger.error(`Error in authorizeChallengeOwner: ${error instanceof Error ? error.message : String(error)}`);
+      throw ApiError.internal(
+        'Error while authorizing access to challenge',
+        'CHALLENGE_AUTH_ERROR'
+      );
+    }
   }
 
   /**
@@ -60,7 +89,7 @@ export class ChallengeController extends BaseController {
   createChallenge = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
       // Authorize: Company role only
-      this.verifyAuthorization(req, [UserRole.COMPANY]);
+      this.verifyAuthorization(req, [UserRole.COMPANY], 'creating a challenge');
 
       // Get company profile ID
       const companyId = await this.getUserProfileId(req, UserRole.COMPANY);
@@ -76,11 +105,14 @@ export class ChallengeController extends BaseController {
       };
       delete challengeData.autoPublish; // Remove the flag before saving
 
-      const challenge = await this.challengeService.createChallenge(companyId, challengeData) as { _id: string };
+      const challenge = await this.challengeService.createChallenge(companyId, challengeData) as { _id: string, title: string };
 
       this.logAction('challenge-create', req.user!.userId, {
         challengeId: challenge._id.toString(),
-        status: initialStatus
+        companyId: companyId,
+        title: challenge.title,
+        status: initialStatus,
+        autoPublish: req.body.autoPublish === true
       });
 
       this.sendSuccess(
@@ -106,9 +138,9 @@ export class ChallengeController extends BaseController {
 
       // Verify business rules
       if (challenge.status !== ChallengeStatus.DRAFT) {
-        throw new ApiError(
-          HTTP_STATUS.BAD_REQUEST,
-          `Cannot publish a challenge that is ${challenge.status}. Only draft challenges can be published.`
+        throw ApiError.badRequest(
+          `Cannot publish a challenge that is ${challenge.status}. Only draft challenges can be published.`,
+          'INVALID_CHALLENGE_STATUS'
         );
       }
 
@@ -149,6 +181,11 @@ export class ChallengeController extends BaseController {
           studentProfile = await this.profileService.getStudentProfileByUserId(req.user.userId);
         } catch (error) {
           // If profile can't be found, continue without it (public visibility only)
+          logger.warn(`Student profile not found for user ${req.user.userId} when fetching challenges`, {
+            userId: req.user.userId,
+            error: error instanceof Error ? error.message : String(error)
+          });
+          // No need to rethrow - continue with null profile
         }
       }
 
@@ -166,7 +203,8 @@ export class ChallengeController extends BaseController {
 
       this.logAction('challenges-list', req.user!.userId, {
         count: result.data.length,
-        filters: { status, difficulty, category }
+        total: result.total,
+        filters: { status, difficulty, category, searchTerm }
       });
 
       this.sendPaginatedSuccess(
@@ -204,7 +242,16 @@ export class ChallengeController extends BaseController {
       let studentProfile = null;
 
       if (userRole === UserRole.STUDENT) {
-        studentProfile = await this.profileService.getStudentProfileByUserId(req.user!.userId);
+        try {
+          studentProfile = await this.profileService.getStudentProfileByUserId(req.user!.userId);
+        } catch (error) {
+          logger.warn(`Student profile not found for user ${req.user!.userId} when viewing challenge`, {
+            userId: req.user!.userId,
+            challengeId: id,
+            error: error instanceof Error ? error.message : String(error)
+          });
+          // Continue with null profile (will default to public visibility)
+        }
       }
 
       // Use service to get challenge with visibility controls
@@ -215,9 +262,18 @@ export class ChallengeController extends BaseController {
         studentProfile
       );
 
+      if (!challenge) {
+        throw ApiError.notFound(
+          `Challenge not found with id: ${id}`,
+          'CHALLENGE_NOT_FOUND'
+        );
+      }
+
       this.logAction('challenge-view', req.user!.userId, {
         challengeId: id,
-        anonymous: challenge.visibility === 'anonymous'
+        challengeTitle: challenge.title,
+        visibility: challenge.visibility || 'public',
+        userRole
       });
 
       this.sendSuccess(res, challenge, 'Challenge retrieved successfully');
@@ -247,7 +303,14 @@ export class ChallengeController extends BaseController {
         req.body
       );
 
-      this.logAction('challenge-update', req.user!.userId, { challengeId: id });
+      this.logAction('challenge-update', req.user!.userId, { 
+        challengeId: id,
+        title: updatedChallenge.title,
+        previousStatus: challenge.status,
+        newStatus: updatedChallenge.status,
+        updatedFields: Object.keys(req.body)
+      });
+      
       this.sendSuccess(res, updatedChallenge, 'Challenge updated successfully');
     }
   );
@@ -270,7 +333,12 @@ export class ChallengeController extends BaseController {
       // Delete via service
       await this.challengeService.deleteChallenge(id);
 
-      this.logAction('challenge-delete', req.user!.userId, { challengeId: id });
+      this.logAction('challenge-delete', req.user!.userId, { 
+        challengeId: id, 
+        status: challenge.status,
+        title: challenge.title
+      });
+      
       this.sendSuccess(res, null, 'Challenge deleted successfully');
     }
   );
@@ -289,9 +357,9 @@ export class ChallengeController extends BaseController {
 
       // Verify business rules
       if (challenge.status !== ChallengeStatus.ACTIVE) {
-        throw new ApiError(
-          HTTP_STATUS.BAD_REQUEST,
-          `Cannot close a challenge that is ${challenge.status}`
+        throw ApiError.badRequest(
+          `Cannot close a challenge that is ${challenge.status}`,
+          'INVALID_CHALLENGE_STATUS'
         );
       }
 
@@ -302,7 +370,12 @@ export class ChallengeController extends BaseController {
       // Close via service
       const updatedChallenge = await this.challengeService.closeChallenge(id, companyId);
 
-      this.logAction('challenge-close', req.user!.userId, { challengeId: id });
+      this.logAction('challenge-close', req.user!.userId, { 
+        challengeId: id,
+        previousStatus: challenge.status,
+        newStatus: ChallengeStatus.CLOSED
+      });
+      
       this.sendSuccess(res, updatedChallenge, 'Challenge closed successfully');
     }
   );
@@ -321,9 +394,9 @@ export class ChallengeController extends BaseController {
 
       // Verify business rules
       if (challenge.status !== ChallengeStatus.CLOSED) {
-        throw new ApiError(
-          HTTP_STATUS.BAD_REQUEST,
-          `Cannot complete a challenge that is ${challenge.status}. Challenge must be closed first.`
+        throw ApiError.badRequest(
+          `Cannot complete a challenge that is ${challenge.status}. Challenge must be closed first.`,
+          'INVALID_CHALLENGE_STATUS'
         );
       }
 
@@ -334,7 +407,12 @@ export class ChallengeController extends BaseController {
       // Complete via service
       const updatedChallenge = await this.challengeService.completeChallenge(id, companyId);
 
-      this.logAction('challenge-complete', req.user!.userId, { challengeId: id });
+      this.logAction('challenge-complete', req.user!.userId, { 
+        challengeId: id,
+        previousStatus: challenge.status,
+        newStatus: ChallengeStatus.COMPLETED
+      });
+      
       this.sendSuccess(res, updatedChallenge, 'Challenge marked as completed successfully');
     }
   );
@@ -347,36 +425,51 @@ export class ChallengeController extends BaseController {
   getCompanyChallenges = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
       // Verify user has company role and get company profile ID
-      const companyId = await this.getUserProfileId(req, UserRole.COMPANY);
+      try {
+        const companyId = await this.getUserProfileId(req, UserRole.COMPANY);
+        const { status, page, limit } = req.query;
 
-      const { status, page, limit } = req.query;
+        // Get challenges via service
+        const result = await this.challengeService.getChallenges({
+          companyId,
+          status: status && Object.values(ChallengeStatus).includes(status as ChallengeStatus) ? status as ChallengeStatus : undefined,
+          page: page ? parseInt(page as string) : 1,
+          limit: limit ? parseInt(limit as string) : 10
+        });
 
-      // Get challenges via service
-      const result = await this.challengeService.getChallenges({
-        companyId,
-        status: status && Object.values(ChallengeStatus).includes(status as ChallengeStatus) ? status as ChallengeStatus : undefined,
-        page: page ? parseInt(page as string) : 1,
-        limit: limit ? parseInt(limit as string) : 10
-      });
-
-      this.logAction('company-challenges-list', req.user!.userId, {
-        count: result.data.length,
-        filters: { status }
-      });
-
-      this.sendPaginatedSuccess(
-        res,
-        {
-          data: result.data,
+        this.logAction('company-challenges-list', req.user!.userId, {
+          companyId,
+          count: result.data.length,
           total: result.total,
-          page: result.page,
-          limit: result.limit,
-          totalPages: Math.ceil(result.total / result.limit),
-          hasNextPage: result.page * result.limit < result.total,
-          hasPrevPage: result.page > 1
-        },
-        'Challenges retrieved successfully'
-      );
+          filters: { 
+            status, 
+            page: page ? parseInt(page as string) : 1,
+            limit: limit ? parseInt(limit as string) : 10
+          }
+        });
+
+        this.sendPaginatedSuccess(
+          res,
+          {
+            data: result.data,
+            total: result.total,
+            page: result.page,
+            limit: result.limit,
+            totalPages: Math.ceil(result.total / result.limit),
+            hasNextPage: result.page * result.limit < result.total,
+            hasPrevPage: result.page > 1
+          },
+          'Challenges retrieved successfully'
+        );
+      } catch (error) {
+        // Re-throw ApiError instances
+        if (error instanceof ApiError) {
+          throw error;
+        }
+        
+        logger.error(`Error retrieving company challenges: ${error instanceof Error ? error.message : String(error)}`);
+        throw ApiError.internal('Failed to retrieve company challenges', 'COMPANY_CHALLENGES_ERROR');
+      }
     }
   );
 
@@ -390,7 +483,7 @@ export class ChallengeController extends BaseController {
       const { id } = req.params;
 
       // Use helper for standard owner authorization
-      await this.authorizeChallengeOwner(req, id, 'view statistics for');
+      const challenge = await this.authorizeChallengeOwner(req, id, 'view statistics for');
 
       // Get company profile ID
       const companyId = req.user!.role === UserRole.COMPANY ?
@@ -402,7 +495,11 @@ export class ChallengeController extends BaseController {
         companyId || 'admin' // Handle admin case
       );
 
-      this.logAction('challenge-statistics', req.user!.userId, { challengeId: id });
+      this.logAction('challenge-statistics', req.user!.userId, { 
+        challengeId: id,
+        challengeTitle: challenge.title
+      });
+      
       this.sendSuccess(res, statistics, 'Challenge statistics retrieved successfully');
     }
   );
