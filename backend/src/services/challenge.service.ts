@@ -37,11 +37,19 @@ export class ChallengeService extends BaseService {
       }
 
       return await this.withTransaction(async (session) => {
+        // Process autoPublish flag and set initial status
+        const status = (challengeData as any).autoPublish === true ? 
+          ChallengeStatus.ACTIVE : 
+          ChallengeStatus.DRAFT;
+          
+        // Remove autoPublish flag from challenge data
+        const { autoPublish, ...filteredData } = challengeData as any;
+
         // Create new challenge with initial values
         const challenge = new Challenge({
-          ...challengeData,
+          ...filteredData,
           company: companyId,
-          status: ChallengeStatus.DRAFT,
+          status,
           currentParticipants: 0,
           approvedSolutionsCount: 0
         });
@@ -50,7 +58,8 @@ export class ChallengeService extends BaseService {
         
         logger.info('[createChallenge] Challenge created successfully', {
           challengeId: challenge._id,
-          companyId
+          companyId,
+          status
         });
 
         return challenge;
@@ -1261,6 +1270,83 @@ export class ChallengeService extends BaseService {
     logger.info('[validateChallengeForPublication] Challenge passed validation', { 
       challengeId: challenge._id 
     });
+  }
+
+  /**
+   * Helper method for challenge owner authorization
+   * @param userIdOrProfileId - The ID of the user or profile performing the action
+   * @param userRole - The role of the user
+   * @param challengeId - The ID of the challenge
+   * @param action - The action being performed
+   * @returns The challenge if authorization succeeds
+   */
+  async authorizeChallengeOwner(
+    userIdOrProfileId: string,
+    userRole: UserRole,
+    challengeId: string,
+    action: string
+  ): Promise<IChallenge> {
+    try {
+      // Validate challenge ID
+      if (!Types.ObjectId.isValid(challengeId)) {
+        throw ApiError.badRequest(`Invalid challenge ID format: ${challengeId}`, 'INVALID_ID_FORMAT');
+      }
+
+      // Get the challenge
+      const challenge = await this.getChallengeById(challengeId);
+      
+      if (!challenge) {
+        throw ApiError.notFound(
+          `Challenge not found with id: ${challengeId}`,
+          'CHALLENGE_NOT_FOUND'
+        );
+      }
+
+      // Verify ownership (except for admin)
+      if (userRole !== UserRole.ADMIN) {
+        if (userRole !== UserRole.COMPANY) {
+          throw ApiError.forbidden(
+            `Only companies and admins can ${action} challenges`,
+            'INSUFFICIENT_ROLE'
+          );
+        }
+
+        // For company users, verify they own the challenge
+        if (challenge.company.toString() !== userIdOrProfileId) {
+          throw ApiError.forbidden(
+            `You do not have permission to ${action} this challenge`,
+            'NOT_CHALLENGE_OWNER'
+          );
+        }
+      }
+
+      // Log successful authorization
+      logger.info('[authorizeChallengeOwner] Challenge access authorized', {
+        challengeId,
+        action,
+        userIdOrProfileId,
+        role: userRole
+      });
+
+      return challenge;
+    } catch (error) {
+      // Re-throw API errors
+      if (error instanceof ApiError) throw error;
+      
+      // Convert and log other errors
+      logger.error('[authorizeChallengeOwner] Error', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        challengeId,
+        userIdOrProfileId,
+        userRole
+      });
+      
+      throw ApiError.internal(
+        'Error while authorizing access to challenge',
+        'CHALLENGE_AUTH_ERROR'
+      );
+    }
   }
 }
 
