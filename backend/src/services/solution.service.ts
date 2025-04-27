@@ -50,7 +50,8 @@ export class SolutionService extends BaseService {
   async submitSolution(
     studentId: string,
     challengeId: string,
-    solutionData: SolutionSubmissionData
+    solutionData: SolutionSubmissionData,
+    idempotencyKey?: string // Optional idempotency key for deduplication
   ): Promise<ISolution> {
     try {
       // Validate IDs to fail fast
@@ -74,6 +75,22 @@ export class SolutionService extends BaseService {
 
       // Log submission attempt
       logger.info(`Student ${studentId} attempting to submit solution for challenge ${challengeId}`);
+
+      // If idempotencyKey provided, check for existing submission with this key
+      if (idempotencyKey) {
+        const existingSolutionWithKey = await Solution.findOne({
+          idempotencyKey,
+          student: studentId
+        }).populate('challenge').populate('student');
+        
+        if (existingSolutionWithKey) {
+          logger.info(`Found existing solution with idempotency key ${idempotencyKey}`, {
+            studentId,
+            solutionId: existingSolutionWithKey._id
+          });
+          return existingSolutionWithKey;
+        }
+      }
 
       return await this.withTransaction(async (session) => {
         // Increment the current participants count atomically with transaction support
@@ -102,7 +119,7 @@ export class SolutionService extends BaseService {
             throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Student profile not found');
           }
 
-          const isEligible = student.university && 
+          const isEligible = student.university &&
             updatedChallenge.allowedInstitutions.includes(student.university);
 
           if (!isEligible) {
@@ -136,7 +153,8 @@ export class SolutionService extends BaseService {
           description: solutionData.description,
           submissionUrl: solutionData.submissionUrl,
           status: SolutionStatus.SUBMITTED,
-          ...(solutionData.tags && { tags: solutionData.tags })
+          ...(solutionData.tags && { tags: solutionData.tags }),
+          ...(idempotencyKey && { idempotencyKey })
         });
 
         await solution.save({ session });
@@ -209,40 +227,45 @@ export class SolutionService extends BaseService {
 
       logger.debug(`Retrieving solutions for student ${studentId} with filters`, { filters });
 
-      const { status, page = 1, limit = 10, sortBy = 'updatedAt', sortOrder = 'desc' } = filters;
+      const session = await mongoose.startSession();
+      session.startTransaction({ readConcern: { level: 'snapshot' } });
+      
+      try {
+        const { status, page = 1, limit = 10, sortBy = 'updatedAt', sortOrder = 'desc' } = filters;
+        const query: Record<string, any> = { student: new Types.ObjectId(studentId) };
+        if (status) query.status = status;
+        
+        const skip = (Number(page) - 1) * Number(limit);
+        const sort: Record<string, 1 | -1> = {};
+        sort[sortBy] = sortOrder === 'asc' ? 1 : -1;
 
-      const query: Record<string, any> = { student: new Types.ObjectId(studentId) };
+        const [solutions, total] = await Promise.all([
+          Solution.find(query)
+            .populate('challenge', 'title description difficulty status deadline')
+            .populate('reviewedBy', 'firstName lastName specialization')
+            .populate('selectedBy', 'firstName lastName')
+            .sort(sort)
+            .skip(skip)
+            .limit(Number(limit))
+            .lean({ virtuals: true })
+            .session(session),
+          Solution.countDocuments(query).session(session)
+        ]);
 
-      if (status) {
-        query.status = status;
+        await session.commitTransaction();
+        session.endSession();
+        
+        return {
+          solutions,
+          total,
+          page: Number(page),
+          limit: Number(limit)
+        };
+      } catch (error) {
+        await session.abortTransaction();
+        session.endSession();
+        throw error;
       }
-
-      const skip = (Number(page) - 1) * Number(limit);
-
-      // Create sort object for MongoDB
-      const sort: Record<string, 1 | -1> = {};
-      sort[sortBy] = sortOrder === 'asc' ? 1 : -1;
-
-      const [solutions, total] = await Promise.all([
-        Solution.find(query)
-          .populate('challenge', 'title description difficulty status deadline')
-          .populate('reviewedBy', 'firstName lastName specialization')
-          .populate('selectedBy', 'firstName lastName')
-          .sort(sort)
-          .skip(skip)
-          .limit(Number(limit))
-          .lean({ virtuals: true }),
-        Solution.countDocuments(query)
-      ]);
-
-      logger.debug(`Retrieved ${solutions.length} solutions for student ${studentId}`);
-
-      return {
-        solutions,
-        total,
-        page: Number(page),
-        limit: Number(limit)
-      };
     } catch (error) {
       logger.error(
         `Error retrieving student solutions: ${error instanceof Error ? error.message : String(error)}`,
@@ -288,10 +311,10 @@ export class SolutionService extends BaseService {
         throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid challenge ID format');
       }
 
-      logger.debug(`Retrieving solutions for challenge ${challengeId}`, { 
-        userId, 
-        userRole, 
-        filters 
+      logger.debug(`Retrieving solutions for challenge ${challengeId}`, {
+        userId,
+        userRole,
+        filters
       });
 
       // Check if challenge exists with optimized query that includes needed fields
@@ -379,7 +402,7 @@ export class SolutionService extends BaseService {
             throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Student profile not found');
           }
 
-          const isEligible = student.university && 
+          const isEligible = student.university &&
             challenge.allowedInstitutions.includes(student.university);
 
           if (!isEligible) {
@@ -519,7 +542,7 @@ export class SolutionService extends BaseService {
       );
     }
   }
-  
+
   /**
    * Get a solution by ID with enhanced security checks
    * @param solutionId - The ID of the solution
@@ -536,7 +559,12 @@ export class SolutionService extends BaseService {
     try {
       // Validate solution ID
       if (!Types.ObjectId.isValid(solutionId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid solution ID format');
+        throw new ApiError(
+          HTTP_STATUS.BAD_REQUEST,
+          'Invalid solution ID format',
+          true,
+          'INVALID_ID_FORMAT'
+        );
       }
 
       logger.debug(`Getting solution ${solutionId} for user ${userId} with role ${userRole}`);
@@ -573,15 +601,20 @@ export class SolutionService extends BaseService {
             : (solution.student as any)?._id?.toString();
 
           if (!solutionStudentId || solutionStudentId !== studentId) {
-            logger.warn(`Student ${studentId} attempted to access solution ${solutionId} they do not own`);
+            logger.warn(`Student ${studentId} attempted to access solution ${solutionId} they don't own`, {
+              attemptedAccessBy: studentId,
+              actualOwner: solutionStudentId,
+              requestedSolution: solutionId
+            });
+
             throw new ApiError(
               HTTP_STATUS.FORBIDDEN,
-              'You do not have permission to view this solution'
+              'You do not have permission to view this solution',
+              true,
+              'UNAUTHORIZED_SOLUTION_ACCESS'
             );
           }
-          break;
         }
-
         case 'company': {
           // Companies can only view solutions for challenges they own
           if (!solution.challenge) {
@@ -609,10 +642,12 @@ export class SolutionService extends BaseService {
           const companyProfileId = await profileService.getCompanyProfileId(userId);
 
           if (companyId !== companyProfileId) {
-            logger.warn(`Company ${companyProfileId} attempted to access solution for challenge owned by ${companyId}`);
+            logger.warn(`Company ${companyProfileId} attempted to access solution ${solutionId} for challenge owned by ${companyId}`);
             throw new ApiError(
               HTTP_STATUS.FORBIDDEN,
-              'You do not have permission to view this solution'
+              'You do not have permission to view this solution',
+              true,
+              'UNAUTHORIZED_SOLUTION_ACCESS'
             );
           }
           break;
@@ -727,11 +762,11 @@ export class SolutionService extends BaseService {
       return await this.withTransaction(async (session) => {
         // Get the solution
         const solution = await Solution.findById(solutionId).session(session);
-  
+
         if (!solution) {
           throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Solution not found');
         }
-  
+
         // Verify ownership
         if (solution.student.toString() !== studentId) {
           logger.warn(`Student ${studentId} attempted to update solution ${solutionId} they don't own`);
@@ -740,7 +775,7 @@ export class SolutionService extends BaseService {
             'You do not have permission to update this solution'
           );
         }
-  
+
         // Check if solution can be updated (only if in SUBMITTED status)
         if (solution.status !== SolutionStatus.SUBMITTED) {
           throw new ApiError(
@@ -748,14 +783,14 @@ export class SolutionService extends BaseService {
             `Cannot update solution with status: ${solution.status}. Only solutions in SUBMITTED status can be updated.`
           );
         }
-  
+
         // Get the associated challenge to check deadline
         const challenge = await Challenge.findById(solution.challenge).session(session);
-  
+
         if (!challenge) {
           throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Associated challenge not found');
         }
-  
+
         // Check if challenge deadline has passed
         if (challenge.isDeadlinePassed()) {
           throw new ApiError(
@@ -763,31 +798,31 @@ export class SolutionService extends BaseService {
             'Challenge deadline has passed, solutions cannot be updated'
           );
         }
-  
+
         // Validate update data
         if (Object.keys(updateData).length === 0) {
           throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'No update data provided');
         }
-  
+
         const allowedFields = ['title', 'description', 'submissionUrl', 'tags'];
         const updates: Record<string, any> = {};
-  
+
         // Filter updates to only allowed fields
         for (const field of allowedFields) {
           if (field in updateData && updateData[field as keyof typeof updateData] !== undefined) {
             updates[field] = updateData[field as keyof typeof updateData];
           }
         }
-  
+
         // Validate required fields if they are being updated
         if ('title' in updates && (!updates.title || typeof updates.title !== 'string')) {
           throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Title is required and must be a string');
         }
-  
+
         if ('description' in updates && (!updates.description || typeof updates.description !== 'string')) {
           throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Description is required and must be a string');
         }
-  
+
         if ('submissionUrl' in updates && (!updates.submissionUrl || typeof updates.submissionUrl !== 'string')) {
           throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Submission URL is required and must be a string');
         }
@@ -795,11 +830,11 @@ export class SolutionService extends BaseService {
         if ('tags' in updates && !Array.isArray(updates.tags)) {
           throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Tags must be an array of strings');
         }
-  
+
         // Update the solution with transaction support
         solution.set(updates);
         await solution.save({ session });
-  
+
         logger.info(
           `Student ${studentId} successfully updated solution ${solutionId}`,
           {
@@ -808,13 +843,13 @@ export class SolutionService extends BaseService {
             updatedFields: Object.keys(updates)
           }
         );
-  
+
         // Return the updated solution (populated within transaction)
         const populatedSolution = await Solution.findById(solutionId)
           .populate('challenge')
           .populate('student')
           .session(session);
-  
+
         if (!populatedSolution) {
           throw new ApiError(
             HTTP_STATUS.INTERNAL_SERVER_ERROR,
@@ -823,7 +858,7 @@ export class SolutionService extends BaseService {
             'SOLUTION_RETRIEVAL_ERROR'
           );
         }
-  
+
         return populatedSolution;
       });
     } catch (error) {
@@ -831,9 +866,9 @@ export class SolutionService extends BaseService {
         `Error updating solution: ${error instanceof Error ? error.message : String(error)}`,
         { solutionId, studentId, updateData, error }
       );
-  
+
       if (error instanceof ApiError) throw error;
-  
+
       throw new ApiError(
         HTTP_STATUS.INTERNAL_SERVER_ERROR,
         'Failed to update solution due to an unexpected error',
@@ -928,28 +963,31 @@ export class SolutionService extends BaseService {
       logger.debug(`Architect ${architectId} attempting to claim solution ${solutionId} for review`);
 
       return await this.withTransaction(async (session) => {
-        // Find the solution
-        const solution = await Solution.findById(solutionId)
-          .populate('challenge')
-          .session(session);
-  
+        // Find the solution without populating challenge first
+        const solution = await Solution.findById(solutionId).session(session);
+
         if (!solution) {
           throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Solution not found');
         }
-  
-        // Check if the challenge is closed (only closed challenges can be reviewed)
-        if (solution.challenge && typeof solution.challenge !== 'string') {
-          if (typeof solution.challenge !== 'string' && 
-              !(solution.challenge instanceof mongoose.Types.ObjectId) && 
-              solution.challenge.status !== ChallengeStatus.CLOSED) {
-            throw new ApiError(
-              HTTP_STATUS.BAD_REQUEST,
-              `Solutions can only be claimed for challenges with status 'closed'. ` +
-              `Current challenge status: ${solution.challenge.status}.`
-            );
-          }
+
+        // Separately fetch the latest challenge data to ensure it's current
+        const challenge = await Challenge.findById(solution.challenge).session(session);
+
+        if (!challenge) {
+          throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Associated challenge not found');
         }
-  
+
+        // Check if the challenge is closed (only closed challenges can be reviewed)
+        if (challenge.status !== ChallengeStatus.CLOSED) {
+          throw new ApiError(
+            HTTP_STATUS.BAD_REQUEST,
+            `Solutions can only be claimed for challenges with status 'closed'. ` +
+            `Current challenge status: ${challenge.status}.`,
+            true,
+            'INVALID_CHALLENGE_STATUS'
+          );
+        }
+
         // Check if solution is already claimed by another architect
         if (solution.reviewedBy && solution.reviewedBy.toString() !== architectId) {
           throw new ApiError(
@@ -959,7 +997,17 @@ export class SolutionService extends BaseService {
             'SOLUTION_ALREADY_CLAIMED'
           );
         }
-  
+
+        // Check if solution is already claimed by another architect
+        if (solution.reviewedBy && solution.reviewedBy.toString() !== architectId) {
+          throw new ApiError(
+            HTTP_STATUS.CONFLICT,
+            'This solution has already been claimed by another architect',
+            true,
+            'SOLUTION_ALREADY_CLAIMED'
+          );
+        }
+
         // Use the state transition manager to validate and apply the transition
         if (solution.status !== SolutionStatus.SUBMITTED) {
           throw new ApiError(
@@ -967,23 +1015,23 @@ export class SolutionService extends BaseService {
             `Invalid state transition from ${solution.status} to ${SolutionStatus.UNDER_REVIEW}. Only 'submitted' solutions can be claimed.`
           );
         }
-  
+
         // Apply the state transition
         solution.status = SolutionStatus.UNDER_REVIEW;
         solution.reviewedBy = new Types.ObjectId(architectId);
         solution.updatedAt = new Date();
-  
+
         await solution.save({ session });
-  
+
         logger.info(`Solution ${solutionId} claimed for review by architect ${architectId}`);
-  
+
         // Populate within transaction
         const populatedSolution = await Solution.findById(solution._id)
           .populate('challenge')
           .populate('student')
           .populate('reviewedBy')
           .session(session);
-  
+
         if (!populatedSolution) {
           throw new ApiError(
             HTTP_STATUS.INTERNAL_SERVER_ERROR,
@@ -992,7 +1040,7 @@ export class SolutionService extends BaseService {
             'SOLUTION_RETRIEVAL_ERROR'
           );
         }
-  
+
         return populatedSolution;
       });
     } catch (error) {
@@ -1000,9 +1048,9 @@ export class SolutionService extends BaseService {
         `Error claiming solution: ${error instanceof Error ? error.message : String(error)}`,
         { solutionId, architectId, error }
       );
-  
+
       if (error instanceof ApiError) throw error;
-  
+
       throw new ApiError(
         HTTP_STATUS.INTERNAL_SERVER_ERROR,
         'Failed to claim solution for review',
@@ -1050,7 +1098,7 @@ export class SolutionService extends BaseService {
         const solution = await Solution.findById(solutionId)
           .populate('challenge')
           .session(session);
-  
+
         if (!solution) {
           throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Solution not found');
         }
@@ -1061,6 +1109,36 @@ export class SolutionService extends BaseService {
             HTTP_STATUS.FORBIDDEN,
             'Only the architect who claimed this solution can review it'
           );
+        }
+
+        // For approvals, check if challenge has reached approval limit
+        if (validatedData.status === SolutionStatus.APPROVED && solution.challenge) {
+          const challengeId = typeof solution.challenge === 'string' || solution.challenge instanceof mongoose.Types.ObjectId
+            ? solution.challenge
+            : solution.challenge._id;
+
+          // Use findOneAndUpdate with conditional update instead of separate operations
+          const challengeUpdate = await Challenge.findOneAndUpdate(
+            {
+              _id: challengeId,
+              $or: [
+                { maxApprovedSolutions: { $exists: false } },
+                { maxApprovedSolutions: null },
+                { approvedSolutionsCount: { $lt: "$maxApprovedSolutions" } }
+              ]
+            },
+            { $inc: { approvedSolutionsCount: 1 } },
+            { session, new: true, runValidators: true }
+          );
+
+          if (!challengeUpdate) {
+            throw new ApiError(
+              HTTP_STATUS.BAD_REQUEST,
+              'Maximum number of approved solutions has been reached for this challenge',
+              true,
+              'MAX_APPROVALS_REACHED'
+            );
+          }
         }
 
         // Check if the challenge's review deadline has passed
@@ -1187,11 +1265,11 @@ export class SolutionService extends BaseService {
             }
           })
           .session(session);
-  
+
         if (!solution) {
           throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Solution not found');
         }
-  
+
         // Verify solution is in APPROVED state
         if (solution.status !== SolutionStatus.APPROVED) {
           throw new ApiError(
@@ -1204,20 +1282,20 @@ export class SolutionService extends BaseService {
         if (!solution.challenge || typeof solution.challenge === 'string') {
           throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Challenge data not available');
         }
-  
+
         // Handle both ObjectId and IChallenge types for challenge
         const challenge = solution.challenge instanceof mongoose.Types.ObjectId
           ? await Challenge.findById(solution.challenge).session(session)
           : solution.challenge;
-  
+
         if (!challenge || !challenge.company) {
           throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Challenge company data not available');
         }
-  
+
         const challengeCompanyId = typeof challenge.company === 'string'
           ? challenge.company
           : (challenge.company as any)._id?.toString();
-  
+
         if (challengeCompanyId !== companyId) {
           logger.warn(`Company ${companyId} attempted to select a solution for challenge owned by ${challengeCompanyId}`);
           throw new ApiError(
@@ -1225,7 +1303,7 @@ export class SolutionService extends BaseService {
             'You do not have permission to select a solution for this challenge'
           );
         }
-  
+
         // Verify challenge is in appropriate status for selection
         if (typeof solution.challenge === 'string' || solution.challenge instanceof mongoose.Types.ObjectId) {
           // If challenge is just an ID, we need to fetch it
@@ -1251,23 +1329,23 @@ export class SolutionService extends BaseService {
             );
           }
         }
-  
+
         // Apply the status change
         solution.status = SolutionStatus.SELECTED;
         solution.selectedAt = new Date();
         solution.selectedBy = new Types.ObjectId(companyId);
-  
+
         await solution.save({ session });
-  
+
         // Update challenge status to COMPLETED if not already
         const challengeId = typeof solution.challenge === 'string' || solution.challenge instanceof mongoose.Types.ObjectId
           ? solution.challenge
           : solution.challenge._id;
-  
+
         const challengeStatus = typeof solution.challenge === 'string' || solution.challenge instanceof mongoose.Types.ObjectId
           ? undefined  // We don't know the status if it's just an ID
           : solution.challenge.status;
-  
+
         if (challengeStatus !== ChallengeStatus.COMPLETED) {
           await Challenge.findByIdAndUpdate(
             challengeId,
@@ -1280,9 +1358,9 @@ export class SolutionService extends BaseService {
             { session, new: true }
           );
         }
-  
+
         logger.info(`Solution ${solutionId} selected as winner by company ${companyId}`);
-  
+
         // Populate within transaction
         const populatedSolution = await Solution.findById(solution._id)
           .populate('challenge')
@@ -1290,7 +1368,7 @@ export class SolutionService extends BaseService {
           .populate('reviewedBy')
           .populate('selectedBy')
           .session(session);
-  
+
         if (!populatedSolution) {
           throw new ApiError(
             HTTP_STATUS.INTERNAL_SERVER_ERROR,
@@ -1299,7 +1377,7 @@ export class SolutionService extends BaseService {
             'SOLUTION_RETRIEVAL_ERROR'
           );
         }
-  
+
         return populatedSolution;
       });
     } catch (error) {
@@ -1307,9 +1385,9 @@ export class SolutionService extends BaseService {
         `Error selecting solution as winner: ${error instanceof Error ? error.message : String(error)}`,
         { solutionId, companyId, error }
       );
-  
+
       if (error instanceof ApiError) throw error;
-  
+
       throw new ApiError(
         HTTP_STATUS.INTERNAL_SERVER_ERROR,
         'Failed to select solution as winner',

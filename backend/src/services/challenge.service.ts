@@ -29,7 +29,7 @@ export class ChallengeService extends BaseService {
    */
   async createChallenge(companyId: string, challengeData: Partial<IChallenge>): Promise<IChallenge> {
     logger.info('[createChallenge] Creating new challenge', { companyId });
-    
+
     try {
       // Validate company ID
       if (!Types.ObjectId.isValid(companyId)) {
@@ -38,10 +38,10 @@ export class ChallengeService extends BaseService {
 
       return await this.withTransaction(async (session) => {
         // Process autoPublish flag and set initial status
-        const status = (challengeData as any).autoPublish === true ? 
-          ChallengeStatus.ACTIVE : 
+        const status = (challengeData as any).autoPublish === true ?
+          ChallengeStatus.ACTIVE :
           ChallengeStatus.DRAFT;
-          
+
         // Remove autoPublish flag from challenge data
         const { autoPublish, ...filteredData } = challengeData as any;
 
@@ -55,7 +55,7 @@ export class ChallengeService extends BaseService {
         });
 
         await challenge.save({ session });
-        
+
         logger.info('[createChallenge] Challenge created successfully', {
           challengeId: challenge._id,
           companyId,
@@ -70,7 +70,7 @@ export class ChallengeService extends BaseService {
         stack: error instanceof Error ? error.stack : undefined,
         companyId
       });
-      
+
       if (error instanceof ApiError) throw error;
       throw ApiError.internal('Failed to create challenge', 'CHALLENGE_CREATION_ERROR');
     }
@@ -83,7 +83,7 @@ export class ChallengeService extends BaseService {
    */
   async getChallengeById(challengeId: string): Promise<IChallenge> {
     logger.info('[getChallengeById] Fetching challenge', { challengeId });
-    
+
     try {
       // Validate challenge ID
       if (!Types.ObjectId.isValid(challengeId)) {
@@ -94,11 +94,11 @@ export class ChallengeService extends BaseService {
       const challenge = await Challenge.findById(challengeId)
         .populate('company', 'companyName industry location')
         .lean();
-      
+
       if (!challenge) {
         throw ApiError.notFound('Challenge not found', 'CHALLENGE_NOT_FOUND');
       }
-      
+
       logger.info('[getChallengeById] Challenge retrieved successfully', { challengeId });
       return challenge;
     } catch (error) {
@@ -107,7 +107,7 @@ export class ChallengeService extends BaseService {
         stack: error instanceof Error ? error.stack : undefined,
         challengeId
       });
-      
+
       if (error instanceof ApiError) throw error;
       throw ApiError.internal('Failed to retrieve challenge', 'CHALLENGE_RETRIEVAL_ERROR');
     }
@@ -125,12 +125,18 @@ export class ChallengeService extends BaseService {
     companyId: string,
     updateData: Partial<IChallenge>
   ): Promise<IChallenge> {
-    logger.info('[updateChallenge] Updating challenge', { 
-      challengeId, 
+    if (!updateData || Object.keys(updateData).length === 0) {
+      throw ApiError.badRequest(
+        'No update data provided', 
+        'EMPTY_UPDATE_DATA'
+      );
+    }
+    logger.info('[updateChallenge] Updating challenge', {
+      challengeId,
       companyId,
       updateFields: Object.keys(updateData)
     });
-    
+
     try {
       // Validate IDs
       if (!Types.ObjectId.isValid(challengeId) || !Types.ObjectId.isValid(companyId)) {
@@ -146,7 +152,7 @@ export class ChallengeService extends BaseService {
 
         if (!challenge) {
           throw ApiError.notFound(
-            'Challenge not found or you do not have permission to update it', 
+            'Challenge not found or you do not have permission to update it',
             'CHALLENGE_NOT_FOUND_OR_FORBIDDEN'
           );
         }
@@ -154,7 +160,7 @@ export class ChallengeService extends BaseService {
         // Prevent status changes through this endpoint
         if (updateData.status && updateData.status !== challenge.status) {
           throw ApiError.badRequest(
-            'Status changes must be done through specific endpoints', 
+            'Status changes must be done through specific endpoints',
             'STATUS_CHANGE_NOT_ALLOWED'
           );
         }
@@ -162,15 +168,27 @@ export class ChallengeService extends BaseService {
         // Prevent updating a challenge that's already closed or completed
         if ([ChallengeStatus.COMPLETED, ChallengeStatus.CLOSED].includes(challenge.status as ChallengeStatus)) {
           throw ApiError.badRequest(
-            'Cannot update a closed or completed challenge', 
+            'Cannot update a closed or completed challenge',
             'CHALLENGE_UPDATE_NOT_ALLOWED'
           );
+        }
+
+        // Add this validation block
+        if (updateData.visibility === ChallengeVisibility.PRIVATE &&
+          (!updateData.allowedInstitutions || updateData.allowedInstitutions.length === 0)) {
+          // If challenge was already private, keep its existing institutions
+          if (challenge.visibility !== ChallengeVisibility.PRIVATE) {
+            throw ApiError.badRequest(
+              'Private challenges must have at least one allowed institution',
+              'INVALID_VISIBILITY_SETTINGS'
+            );
+          }
         }
 
         // Validate deadline if provided
         if (updateData.deadline && new Date(updateData.deadline) <= new Date()) {
           throw ApiError.badRequest(
-            'Deadline must be in the future', 
+            'Deadline must be in the future',
             'INVALID_DEADLINE'
           );
         }
@@ -178,8 +196,8 @@ export class ChallengeService extends BaseService {
         // List of allowed fields that can be updated
         const allowedFields = [
           'title', 'description', 'requirements', 'resources', 'rewards',
-          'deadline', 'difficulty', 'category', 'maxParticipants', 
-          'tags', 'maxApprovedSolutions', 'visibility', 'allowedInstitutions', 
+          'deadline', 'difficulty', 'category', 'maxParticipants',
+          'tags', 'maxApprovedSolutions', 'visibility', 'allowedInstitutions',
           'isCompanyVisible'
         ];
 
@@ -192,10 +210,10 @@ export class ChallengeService extends BaseService {
         Object.assign(challenge, filteredUpdateData);
 
         await challenge.save({ session });
-        
-        logger.info('[updateChallenge] Challenge updated successfully', { 
-          challengeId, 
-          companyId 
+
+        logger.info('[updateChallenge] Challenge updated successfully', {
+          challengeId,
+          companyId
         });
 
         return challenge;
@@ -207,10 +225,10 @@ export class ChallengeService extends BaseService {
         challengeId,
         companyId
       });
-      
+
       if (error instanceof ApiError) throw error;
       throw ApiError.internal(
-        'Failed to update challenge', 
+        'Failed to update challenge',
         'CHALLENGE_UPDATE_ERROR'
       );
     }
@@ -226,7 +244,7 @@ export class ChallengeService extends BaseService {
     details: Array<{ id: string; status: string }>;
   }> {
     logger.info('[updateChallengeStatuses] Starting automatic challenge status update job');
-    
+
     try {
       return await this.withTransaction(async (session) => {
         const results = {
@@ -241,8 +259,8 @@ export class ChallengeService extends BaseService {
           deadline: { $lt: new Date() }
         }).session(session);
 
-        logger.info('[updateChallengeStatuses] Found expired submission challenges', { 
-          count: expiredSubmissionChallenges.length 
+        logger.info('[updateChallengeStatuses] Found expired submission challenges', {
+          count: expiredSubmissionChallenges.length
         });
 
         // Update submission deadline expired challenges
@@ -250,11 +268,11 @@ export class ChallengeService extends BaseService {
           try {
             challenge.status = ChallengeStatus.CLOSED;
             await challenge.save({ session });
-            
+
             results.updated++;
-            results.details.push({ 
-              id: (challenge as IChallenge & { _id: Types.ObjectId })._id.toString(), 
-              status: ChallengeStatus.CLOSED 
+            results.details.push({
+              id: (challenge as IChallenge & { _id: Types.ObjectId })._id.toString(),
+              status: ChallengeStatus.CLOSED
             });
           } catch (err) {
             results.errors++;
@@ -265,11 +283,11 @@ export class ChallengeService extends BaseService {
           }
         }
 
-        logger.info('[updateChallengeStatuses] Challenge status update job completed', { 
-          updated: results.updated, 
-          errors: results.errors 
+        logger.info('[updateChallengeStatuses] Challenge status update job completed', {
+          updated: results.updated,
+          errors: results.errors
         });
-        
+
         return results;
       });
     } catch (error) {
@@ -277,7 +295,7 @@ export class ChallengeService extends BaseService {
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined
       });
-      
+
       if (error instanceof ApiError) throw error;
       throw ApiError.internal(
         'Failed to update challenge statuses',
@@ -293,11 +311,11 @@ export class ChallengeService extends BaseService {
    * @returns The published challenge
    */
   async publishChallenge(challengeId: string, companyId: string): Promise<IChallenge> {
-    logger.info('[publishChallenge] Publishing challenge', { 
-      challengeId, 
-      companyId 
+    logger.info('[publishChallenge] Publishing challenge', {
+      challengeId,
+      companyId
     });
-    
+
     try {
       // Validate IDs
       if (!Types.ObjectId.isValid(challengeId) || !Types.ObjectId.isValid(companyId)) {
@@ -332,11 +350,11 @@ export class ChallengeService extends BaseService {
         challenge.publishedAt = new Date();
         await challenge.save({ session });
 
-        logger.info('[publishChallenge] Challenge published successfully', { 
-          challengeId, 
-          companyId 
+        logger.info('[publishChallenge] Challenge published successfully', {
+          challengeId,
+          companyId
         });
-        
+
         return challenge;
       });
     } catch (error) {
@@ -346,7 +364,7 @@ export class ChallengeService extends BaseService {
         challengeId,
         companyId
       });
-      
+
       if (error instanceof ApiError) throw error;
       throw ApiError.internal(
         'Failed to publish challenge',
@@ -374,10 +392,10 @@ export class ChallengeService extends BaseService {
     sortBy?: string;
     sortOrder?: 'asc' | 'desc';
   }): Promise<PaginationResult<IChallenge>> {
-    logger.info('[getChallenges] Fetching challenges with filters', { 
-      filters: { ...filters, limit: filters.limit || 10, page: filters.page || 1 } 
+    logger.info('[getChallenges] Fetching challenges with filters', {
+      filters: { ...filters, limit: filters.limit || 10, page: filters.page || 1 }
     });
-    
+
     try {
       // Build query filters
       const queryFilters: Record<string, any> = {};
@@ -451,7 +469,7 @@ export class ChallengeService extends BaseService {
         stack: error instanceof Error ? error.stack : undefined,
         filters
       });
-      
+
       if (error instanceof ApiError) throw error;
       throw ApiError.internal(
         'Failed to retrieve challenges',
@@ -467,47 +485,47 @@ export class ChallengeService extends BaseService {
    * @returns The closed challenge
    */
   async closeChallenge(challengeId: string, companyId: string): Promise<IChallenge> {
-    logger.info('[closeChallenge] Closing challenge manually', { 
-      challengeId, 
-      companyId 
+    logger.info('[closeChallenge] Closing challenge manually', {
+      challengeId,
+      companyId
     });
-    
+
     try {
       // Validate IDs
       if (!Types.ObjectId.isValid(challengeId) || !Types.ObjectId.isValid(companyId)) {
         throw ApiError.badRequest('Invalid ID format', 'INVALID_ID_FORMAT');
       }
-  
+
       return await this.withTransaction(async (session) => {
         // Find challenge with company verification (security check)
         const challenge = await Challenge.findOne({
           _id: challengeId,
           company: companyId
         }).session(session);
-  
+
         if (!challenge) {
           throw ApiError.notFound(
             'Challenge not found or you do not have permission to close it',
             'CHALLENGE_NOT_FOUND_OR_FORBIDDEN'
           );
         }
-  
+
         if (challenge.status !== ChallengeStatus.ACTIVE) {
           throw ApiError.badRequest(
             'Only active challenges can be closed manually',
             'CHALLENGE_NOT_ACTIVE'
           );
         }
-  
+
         challenge.status = ChallengeStatus.CLOSED;
         challenge.completedAt = new Date();
         await challenge.save({ session });
-  
-        logger.info('[closeChallenge] Challenge closed successfully', { 
-          challengeId, 
-          companyId 
+
+        logger.info('[closeChallenge] Challenge closed successfully', {
+          challengeId,
+          companyId
         });
-        
+
         return challenge;
       });
     } catch (error) {
@@ -517,7 +535,7 @@ export class ChallengeService extends BaseService {
         challengeId,
         companyId
       });
-      
+
       if (error instanceof ApiError) throw error;
       throw ApiError.internal(
         'Failed to close challenge',
@@ -532,35 +550,43 @@ export class ChallengeService extends BaseService {
    * @throws ApiError if challenge cannot be deleted
    */
   async deleteChallenge(challengeId: string): Promise<void> {
-    logger.info('[deleteChallenge] Deleting challenge and associated solutions', { 
-      challengeId 
+    logger.info('[deleteChallenge] Deleting challenge and associated solutions', {
+      challengeId
     });
-    
+
     try {
       // Validate challenge ID
       if (!Types.ObjectId.isValid(challengeId)) {
         throw ApiError.badRequest('Invalid challenge ID format', 'INVALID_ID_FORMAT');
       }
-
-      // Find the challenge first to verify it exists
-      const challenge = await Challenge.findById(challengeId);
-      if (!challenge) {
-        throw ApiError.notFound('Challenge not found', 'CHALLENGE_NOT_FOUND');
-      }
-
+  
       await this.withTransaction(async (session) => {
+        // Find the challenge first to verify it exists
+        const challenge = await Challenge.findById(challengeId).session(session);
+        if (!challenge) {
+          throw ApiError.notFound('Challenge not found', 'CHALLENGE_NOT_FOUND');
+        }
+  
+        // Business validation - moved from validateChallengeCanBeDeleted
+        if (challenge.status !== ChallengeStatus.DRAFT && challenge.currentParticipants > 0) {
+          throw ApiError.forbidden(
+            'Cannot delete an active or completed challenge with participants',
+            'CHALLENGE_DELETION_FORBIDDEN'
+          );
+        }
+        
         // Delete the challenge
         const deleteResult = await Challenge.findByIdAndDelete(challengeId).session(session);
-
+  
         if (!deleteResult) {
           throw ApiError.notFound('Challenge not found', 'CHALLENGE_NOT_FOUND');
         }
-
+  
         // Delete all solutions for this challenge
         const solutionDeleteResult = await Solution.deleteMany({ 
           challenge: challengeId 
         }).session(session);
-
+  
         logger.info('[deleteChallenge] Challenge and solutions deleted successfully', { 
           challengeId, 
           deletedSolutions: solutionDeleteResult.deletedCount 
@@ -587,10 +613,10 @@ export class ChallengeService extends BaseService {
    * @throws ApiError if challenge cannot be deleted
    */
   async validateChallengeCanBeDeleted(challengeId: string): Promise<void> {
-    logger.info('[validateChallengeCanBeDeleted] Validating if challenge can be deleted', { 
-      challengeId 
+    logger.info('[validateChallengeCanBeDeleted] Validating if challenge can be deleted', {
+      challengeId
     });
-    
+
     try {
       // Validate challenge ID
       if (!Types.ObjectId.isValid(challengeId)) {
@@ -610,9 +636,9 @@ export class ChallengeService extends BaseService {
           'CHALLENGE_DELETION_FORBIDDEN'
         );
       }
-      
-      logger.info('[validateChallengeCanBeDeleted] Challenge can be deleted', { 
-        challengeId 
+
+      logger.info('[validateChallengeCanBeDeleted] Challenge can be deleted', {
+        challengeId
       });
     } catch (error) {
       logger.error('[validateChallengeCanBeDeleted] Failed to validate challenge deletion', {
@@ -620,7 +646,7 @@ export class ChallengeService extends BaseService {
         stack: error instanceof Error ? error.stack : undefined,
         challengeId
       });
-      
+
       if (error instanceof ApiError) throw error;
       throw ApiError.internal(
         'Failed to validate challenge deletion',
@@ -642,11 +668,11 @@ export class ChallengeService extends BaseService {
     averageRating: number;
     topTags: Array<{ tag: string; count: number }>;
   }> {
-    logger.info('[getChallengeStatistics] Fetching challenge statistics', { 
-      challengeId, 
-      companyId 
+    logger.info('[getChallengeStatistics] Fetching challenge statistics', {
+      challengeId,
+      companyId
     });
-    
+
     try {
       // Validate IDs
       if (!Types.ObjectId.isValid(challengeId) || (companyId !== 'admin' && !Types.ObjectId.isValid(companyId))) {
@@ -713,12 +739,12 @@ export class ChallengeService extends BaseService {
         averageRating,
         topTags
       };
-      
-      logger.info('[getChallengeStatistics] Statistics retrieved successfully', { 
-        challengeId, 
-        totalSolutions 
+
+      logger.info('[getChallengeStatistics] Statistics retrieved successfully', {
+        challengeId,
+        totalSolutions
       });
-      
+
       return statistics;
     } catch (error) {
       logger.error('[getChallengeStatistics] Failed to retrieve challenge statistics', {
@@ -727,7 +753,7 @@ export class ChallengeService extends BaseService {
         challengeId,
         companyId
       });
-      
+
       if (error instanceof ApiError) throw error;
       throw ApiError.internal(
         'Failed to retrieve challenge statistics',
@@ -743,59 +769,59 @@ export class ChallengeService extends BaseService {
    * @returns The completed challenge
    */
   async completeChallenge(challengeId: string, companyId: string): Promise<IChallenge> {
-    logger.info('[completeChallenge] Completing challenge', { 
-      challengeId, 
-      companyId 
+    logger.info('[completeChallenge] Completing challenge', {
+      challengeId,
+      companyId
     });
-    
+
     try {
       // Validate IDs
       if (!Types.ObjectId.isValid(challengeId) || !Types.ObjectId.isValid(companyId)) {
         throw ApiError.badRequest('Invalid ID format', 'INVALID_ID_FORMAT');
       }
-  
+
       return await this.withTransaction(async (session) => {
         const challenge = await Challenge.findOne({
           _id: challengeId,
           company: companyId
         }).session(session);
-  
+
         if (!challenge) {
           throw ApiError.notFound(
             'Challenge not found or you do not have permission to complete it',
             'CHALLENGE_NOT_FOUND_OR_FORBIDDEN'
           );
         }
-  
+
         if (challenge.status !== ChallengeStatus.CLOSED) {
           throw ApiError.badRequest(
             'Only closed challenges can be marked as completed',
             'CHALLENGE_NOT_CLOSED'
           );
         }
-  
+
         // Check if all solutions have been reviewed
         const pendingSolutions = await Solution.countDocuments({
           challenge: challengeId,
           status: SolutionStatus.SUBMITTED
         }).session(session);
-  
+
         if (pendingSolutions > 0) {
           throw ApiError.badRequest(
             `There are still ${pendingSolutions} solutions pending review`,
             'PENDING_SOLUTIONS_EXIST'
           );
         }
-  
+
         challenge.status = ChallengeStatus.COMPLETED;
         challenge.completedAt = new Date();
         await challenge.save({ session });
-  
-        logger.info('[completeChallenge] Challenge marked as completed', { 
-          challengeId, 
-          companyId 
+
+        logger.info('[completeChallenge] Challenge marked as completed', {
+          challengeId,
+          companyId
         });
-        
+
         return challenge;
       });
     } catch (error) {
@@ -805,7 +831,7 @@ export class ChallengeService extends BaseService {
         challengeId,
         companyId
       });
-      
+
       if (error instanceof ApiError) throw error;
       throw ApiError.internal(
         'Failed to complete challenge',
@@ -832,12 +858,12 @@ export class ChallengeService extends BaseService {
       limit?: number;
     } = {}
   ): Promise<PaginationResult<ISolution>> {
-    logger.info('[getChallengeSolutions] Fetching solutions for challenge', { 
-      challengeId, 
-      companyId, 
-      filters 
+    logger.info('[getChallengeSolutions] Fetching solutions for challenge', {
+      challengeId,
+      companyId,
+      filters
     });
-    
+
     try {
       // Validate IDs
       if (!Types.ObjectId.isValid(challengeId) || !Types.ObjectId.isValid(companyId)) {
@@ -899,7 +925,7 @@ export class ChallengeService extends BaseService {
         challengeId,
         companyId
       });
-      
+
       if (error instanceof ApiError) throw error;
       throw ApiError.internal(
         'Failed to retrieve challenge solutions',
@@ -917,12 +943,12 @@ export class ChallengeService extends BaseService {
     profileId?: string,
     studentProfile?: any
   ): Promise<any> {
-    logger.info('[getChallengeByIdWithVisibility] Fetching challenge with visibility controls', { 
-      challengeId, 
+    logger.info('[getChallengeByIdWithVisibility] Fetching challenge with visibility controls', {
+      challengeId,
       userRole,
       profileId: profileId || 'undefined'
     });
-    
+
     try {
       // Validate challenge ID
       if (!Types.ObjectId.isValid(challengeId)) {
@@ -953,7 +979,7 @@ export class ChallengeService extends BaseService {
             studentUniversity: studentProfile?.university,
             allowedInstitutions: challenge.allowedInstitutions
           });
-          
+
           throw ApiError.forbidden(
             'You do not have permission to view this private challenge',
             'PRIVATE_CHALLENGE_ACCESS_DENIED'
@@ -969,19 +995,19 @@ export class ChallengeService extends BaseService {
         (!isCompanyOwner && userRole !== UserRole.ADMIN)) {
         if (challengeObj.company) {
           const { company, ...restChallenge } = challengeObj;
-          
-          logger.info('[getChallengeByIdWithVisibility] Removed company data for anonymous challenge', { 
-            challengeId 
+
+          logger.info('[getChallengeByIdWithVisibility] Removed company data for anonymous challenge', {
+            challengeId
           });
-          
+
           return restChallenge;
         }
       }
 
-      logger.info('[getChallengeByIdWithVisibility] Challenge retrieved successfully', { 
-        challengeId 
+      logger.info('[getChallengeByIdWithVisibility] Challenge retrieved successfully', {
+        challengeId
       });
-      
+
       return challengeObj;
     } catch (error) {
       logger.error('[getChallengeByIdWithVisibility] Failed to retrieve challenge with visibility controls', {
@@ -990,7 +1016,7 @@ export class ChallengeService extends BaseService {
         challengeId,
         userRole
       });
-      
+
       if (error instanceof ApiError) throw error;
       throw ApiError.internal(
         'Failed to retrieve challenge',
@@ -1004,10 +1030,10 @@ export class ChallengeService extends BaseService {
    * @private
    */
   private async getCompanyProfileForUser(userId: string): Promise<any> {
-    logger.info('[getCompanyProfileForUser] Fetching company profile for user', { 
-      userId 
+    logger.info('[getCompanyProfileForUser] Fetching company profile for user', {
+      userId
     });
-    
+
     try {
       // Import models here to avoid circular dependencies
       const { default: User } = await import('../models/User');
@@ -1015,19 +1041,19 @@ export class ChallengeService extends BaseService {
 
       const user = await User.findById(userId);
       if (!user || user.role !== UserRole.COMPANY) {
-        logger.info('[getCompanyProfileForUser] User is not a company user', { 
-          userId, 
-          userRole: user?.role 
+        logger.info('[getCompanyProfileForUser] User is not a company user', {
+          userId,
+          userRole: user?.role
         });
         return null;
       }
 
       const profile = await CompanyProfile.findOne({ user: userId });
-      logger.info('[getCompanyProfileForUser] Company profile fetched', { 
-        userId, 
-        profileFound: !!profile 
+      logger.info('[getCompanyProfileForUser] Company profile fetched', {
+        userId,
+        profileFound: !!profile
       });
-      
+
       return profile;
     } catch (error) {
       logger.error('[getCompanyProfileForUser] Failed to get company profile', {
@@ -1056,10 +1082,10 @@ export class ChallengeService extends BaseService {
     studentProfile?: any
   ): Promise<PaginationResult<any>> {
     try {
-      logger.info('[getChallengesForUser] Fetching challenges with user-specific visibility', { 
-        userId, 
+      logger.info('[getChallengesForUser] Fetching challenges with user-specific visibility', {
+        userId,
         userRole,
-        filters 
+        filters
       });
 
       // Build query filters
@@ -1168,7 +1194,7 @@ export class ChallengeService extends BaseService {
         },
         (query) => query.populate('company', '-user -__v').lean()
       );
-      
+
       // Process visibility after query execution
       result.data = this.processVisibility(userRole, result.data);
       return result;
@@ -1193,10 +1219,10 @@ export class ChallengeService extends BaseService {
    */
   private processVisibility(userRole: UserRole | undefined, challenges: any[]): any[] {
     if (!challenges) return [];
-    
+
     return challenges.map(challenge => {
-      const challengeObj = typeof challenge.toObject === 'function' 
-        ? challenge.toObject() 
+      const challengeObj = typeof challenge.toObject === 'function'
+        ? challenge.toObject()
         : challenge;
 
       // For anonymous challenges, remove company data for non-company/admin users
@@ -1217,10 +1243,10 @@ export class ChallengeService extends BaseService {
    * @throws ApiError if the challenge is invalid
    */
   private validateChallengeForPublication(challenge: IChallenge): void {
-    logger.info('[validateChallengeForPublication] Validating challenge for publication', { 
-      challengeId: challenge._id 
+    logger.info('[validateChallengeForPublication] Validating challenge for publication', {
+      challengeId: challenge._id
     });
-    
+
     const errors = [];
 
     if (!challenge.title || challenge.title.trim() === '') {
@@ -1260,15 +1286,15 @@ export class ChallengeService extends BaseService {
         challengeId: challenge._id,
         errors
       });
-      
+
       throw ApiError.badRequest(
         `Challenge validation failed: ${errors.join(', ')}`,
         'CHALLENGE_VALIDATION_FAILED'
       );
     }
-    
-    logger.info('[validateChallengeForPublication] Challenge passed validation', { 
-      challengeId: challenge._id 
+
+    logger.info('[validateChallengeForPublication] Challenge passed validation', {
+      challengeId: challenge._id
     });
   }
 
@@ -1294,7 +1320,7 @@ export class ChallengeService extends BaseService {
 
       // Get the challenge
       const challenge = await this.getChallengeById(challengeId);
-      
+
       if (!challenge) {
         throw ApiError.notFound(
           `Challenge not found with id: ${challengeId}`,
@@ -1332,7 +1358,7 @@ export class ChallengeService extends BaseService {
     } catch (error) {
       // Re-throw API errors
       if (error instanceof ApiError) throw error;
-      
+
       // Convert and log other errors
       logger.error('[authorizeChallengeOwner] Error', {
         error: error instanceof Error ? error.message : String(error),
@@ -1341,7 +1367,7 @@ export class ChallengeService extends BaseService {
         userIdOrProfileId,
         userRole
       });
-      
+
       throw ApiError.internal(
         'Error while authorizing access to challenge',
         'CHALLENGE_AUTH_ERROR'

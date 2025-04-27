@@ -440,23 +440,62 @@ export class AuthController extends BaseController {
    * @private
    */
   private validatePasswordStrength(password: string): void {
-    if (!password || password.length < 8) {
+    const errors = [];
+  
+    if (!password || typeof password !== 'string') {
       throw new ApiError(
         HTTP_STATUS.BAD_REQUEST,
-        'Password must be at least 8 characters',
+        'Password must be provided',
         true,
         'VALIDATION_ERROR'
       );
     }
-
-    // Check for at least: 1 uppercase, 1 lowercase, 1 number, 1 special character
-    const regex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/;
-    if (!regex.test(password)) {
+  
+    // Length check
+    if (password.length < 8) {
+      errors.push('Password must be at least 8 characters long');
+    }
+    
+    if (password.length > 128) {
+      errors.push('Password exceeds maximum length of 128 characters');
+    }
+  
+    // Character type checks
+    if (!/[a-z]/.test(password)) {
+      errors.push('Password must contain at least one lowercase letter');
+    }
+    
+    if (!/[A-Z]/.test(password)) {
+      errors.push('Password must contain at least one uppercase letter');
+    }
+    
+    if (!/\d/.test(password)) {
+      errors.push('Password must contain at least one number');
+    }
+    
+    if (!/[@$!%*?&#^()_+\-=\[\]{};':"\\|,.<>\/]/.test(password)) {
+      errors.push('Password must contain at least one special character');
+    }
+    
+    // Common patterns/dictionary check
+    const commonPatterns = ['password', '12345', 'qwerty', 'admin'];
+    const lowerPassword = password.toLowerCase();
+    
+    if (commonPatterns.some(pattern => lowerPassword.includes(pattern))) {
+      errors.push('Password contains a common pattern that is easily guessed');
+    }
+    
+    // Check for repeated characters
+    if (/(.)\1{2,}/.test(password)) {
+      errors.push('Password contains too many repeated characters');
+    }
+    
+    if (errors.length > 0) {
       throw new ApiError(
         HTTP_STATUS.BAD_REQUEST,
-        'Password must contain at least one uppercase letter, one lowercase letter, one number, and one special character',
+        errors.join('. '),
         true,
-        'VALIDATION_ERROR'
+        'PASSWORD_POLICY_VIOLATION'
       );
     }
   }

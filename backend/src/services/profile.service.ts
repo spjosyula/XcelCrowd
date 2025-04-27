@@ -166,15 +166,17 @@ export class ProfileService extends BaseService {
                 throw ApiError.badRequest('Invalid user ID format', 'INVALID_USER_ID');
             }
 
-            let exists = false;
+            const userObjectId = new Types.ObjectId(userId);
+            let count = 0;
 
             if (profileType === 'student') {
-                exists = !!(await StudentProfile.exists({ user: userId }));
+                // More efficient count operation with only _id projection
+                count = await StudentProfile.countDocuments({ user: userObjectId }).limit(1);
             } else if (profileType === 'company') {
-                exists = !!(await CompanyProfile.exists({ user: userId }));
+                count = await CompanyProfile.countDocuments({ user: userObjectId }).limit(1);
             }
 
-            return exists;
+            return count > 0;
         } catch (error) {
             logger.error(`Error checking if profile exists: ${error instanceof Error ? error.message : 'Unknown error'}`);
             if (error instanceof ApiError) throw error;
@@ -244,10 +246,12 @@ export class ProfileService extends BaseService {
                 throw ApiError.badRequest('Invalid user ID format', 'INVALID_USER_ID');
             }
 
-            // OPTIMIZED: Limited fields in populated user document
-            const profile = await StudentProfile.findOne({ user: userId })
+            // Convert string to ObjectId to prevent injection
+            const userObjectId = new Types.ObjectId(userId);
+
+            const profile = await StudentProfile.findOne({ user: userObjectId })
                 .populate('user', 'email role createdAt')
-                .lean(); // OPTIMIZED: Added lean() for better performance
+                .lean();
 
             if (!profile) {
                 throw ApiError.notFound('Student profile not found', 'PROFILE_NOT_FOUND');
@@ -363,7 +367,7 @@ export class ProfileService extends BaseService {
             const profile = await CompanyProfile.findOne({ user: userId })
                 .populate('user', 'email role createdAt')
                 .lean(); // OPTIMIZED: Added lean() for better performance
-                
+
             if (!profile) {
                 throw ApiError.notFound('Company profile not found', 'PROFILE_NOT_FOUND');
             }
@@ -468,7 +472,7 @@ export class ProfileService extends BaseService {
                     { user: userId },
                     { session }
                 );
-                
+
                 if (!result) {
                     throw ApiError.notFound('Company profile not found', 'PROFILE_NOT_FOUND');
                 }
