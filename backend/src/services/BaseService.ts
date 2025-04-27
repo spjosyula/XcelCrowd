@@ -9,9 +9,28 @@ export class BaseService {
    * @param operation - The async function to execute within the transaction
    * @returns The result of the operation
    */
-  protected async withTransaction<T>(operation: (session: mongoose.ClientSession) => Promise<T>): Promise<T> {
+  protected async withTransaction<T>(
+    operation: (session: mongoose.ClientSession) => Promise<T>,
+    options: {
+      isolationLevel?: mongoose.mongo.ReadConcernLevel
+    } = {}
+  ): Promise<T> {
     const session = await mongoose.startSession();
-    session.startTransaction();
+    
+    // Fix the type issue by using the correct option format
+    const transactionOptions: mongoose.mongo.TransactionOptions = {
+      readPreference: 'primary',
+      readConcern: { level: options.isolationLevel || 'majority' },
+      writeConcern: undefined
+    };
+    
+    // Use proper type for writeConcern - use numeric value instead of string
+    if (process.env.NODE_ENV === 'production') {
+      // In production, ensure majority write concern for consistency
+      transactionOptions.writeConcern = { w: 'majority' };
+    }
+    
+    session.startTransaction(transactionOptions);
 
     try {
       const result = await operation(session);
