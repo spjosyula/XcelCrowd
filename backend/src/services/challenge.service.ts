@@ -682,7 +682,7 @@ export class ChallengeService extends BaseService {
       // Check challenge ownership
       const challenge = await Challenge.findOne({
         _id: challengeId,
-        ...(companyId !== 'admin' ? { company: companyId } : {})
+        company: companyId
       });
 
       if (!challenge) {

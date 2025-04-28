@@ -69,7 +69,7 @@ export class ChallengeController extends BaseController {
       this.verifyAuthorization(req, [UserRole.COMPANY, UserRole.ADMIN], `publish a challenge`);
 
       // Get company profile ID for authorization
-      const profileId = req.user!.role === UserRole.COMPANY ? 
+      const profileId = req.user!.role === UserRole.COMPANY ?
         await this.getUserProfileId(req, UserRole.COMPANY) : req.user!.userId;
 
       // Authorize challenge owner using service
@@ -117,7 +117,7 @@ export class ChallengeController extends BaseController {
 
       const { status, difficulty, category, searchTerm } = req.query;
       const userRole = req.user!.role as UserRole;
-      
+
       // Get student profile for visibility filters if applicable
       let studentProfile = null;
       if (userRole === UserRole.STUDENT && req.user?.userId) {
@@ -147,9 +147,9 @@ export class ChallengeController extends BaseController {
           searchTerm: searchTerm as string,
           page,
           limit
-        }, 
-        req.user?.userId, 
-        userRole, 
+        },
+        req.user?.userId,
+        userRole,
         studentProfile
       );
 
@@ -191,7 +191,7 @@ export class ChallengeController extends BaseController {
       // Get user role and profile information for visibility checks
       const userRole = req.user!.role as UserRole;
       const profileId = req.user?.profile?.toString();
-      
+
       // Get student profile if applicable
       let studentProfile = null;
       if (userRole === UserRole.STUDENT) {
@@ -244,7 +244,7 @@ export class ChallengeController extends BaseController {
       this.verifyAuthorization(req, [UserRole.COMPANY, UserRole.ADMIN], `update a challenge`);
 
       // Get company profile ID for authorization
-      const profileId = req.user!.role === UserRole.COMPANY ? 
+      const profileId = req.user!.role === UserRole.COMPANY ?
         await this.getUserProfileId(req, UserRole.COMPANY) : req.user!.userId;
 
       // Authorize challenge owner using service
@@ -262,11 +262,11 @@ export class ChallengeController extends BaseController {
       // Update via service
       const updatedChallenge = await this.challengeService.updateChallenge(id, companyId, req.body);
 
-      this.logAction('challenge-update', req.user!.userId, { 
+      this.logAction('challenge-update', req.user!.userId, {
         challengeId: id,
         updatedFields: Object.keys(req.body)
       });
-      
+
       this.sendSuccess(res, updatedChallenge, 'Challenge updated successfully');
     }
   );
@@ -284,7 +284,7 @@ export class ChallengeController extends BaseController {
       this.verifyAuthorization(req, [UserRole.COMPANY, UserRole.ADMIN], `delete a challenge`);
 
       // Get company profile ID for authorization
-      const profileId = req.user!.role === UserRole.COMPANY ? 
+      const profileId = req.user!.role === UserRole.COMPANY ?
         await this.getUserProfileId(req, UserRole.COMPANY) : req.user!.userId;
 
       // Authorize challenge owner using service
@@ -301,12 +301,12 @@ export class ChallengeController extends BaseController {
       // Delete via service
       await this.challengeService.deleteChallenge(id);
 
-      this.logAction('challenge-delete', req.user!.userId, { 
-        challengeId: id, 
+      this.logAction('challenge-delete', req.user!.userId, {
+        challengeId: id,
         status: challenge.status,
         title: challenge.title
       });
-      
+
       this.sendSuccess(res, null, 'Challenge deleted successfully');
     }
   );
@@ -324,7 +324,7 @@ export class ChallengeController extends BaseController {
       this.verifyAuthorization(req, [UserRole.COMPANY, UserRole.ADMIN], `close a challenge`);
 
       // Get company profile ID for authorization
-      const profileId = req.user!.role === UserRole.COMPANY ? 
+      const profileId = req.user!.role === UserRole.COMPANY ?
         await this.getUserProfileId(req, UserRole.COMPANY) : req.user!.userId;
 
       // Authorize challenge owner using service
@@ -350,12 +350,12 @@ export class ChallengeController extends BaseController {
       // Close via service
       const updatedChallenge = await this.challengeService.closeChallenge(id, companyId);
 
-      this.logAction('challenge-close', req.user!.userId, { 
+      this.logAction('challenge-close', req.user!.userId, {
         challengeId: id,
         previousStatus: challenge.status,
         newStatus: ChallengeStatus.CLOSED
       });
-      
+
       this.sendSuccess(res, updatedChallenge, 'Challenge closed successfully');
     }
   );
@@ -373,7 +373,7 @@ export class ChallengeController extends BaseController {
       this.verifyAuthorization(req, [UserRole.COMPANY, UserRole.ADMIN], `complete a challenge`);
 
       // Get company profile ID for authorization
-      const profileId = req.user!.role === UserRole.COMPANY ? 
+      const profileId = req.user!.role === UserRole.COMPANY ?
         await this.getUserProfileId(req, UserRole.COMPANY) : req.user!.userId;
 
       // Authorize challenge owner using service
@@ -399,12 +399,12 @@ export class ChallengeController extends BaseController {
       // Complete via service
       const updatedChallenge = await this.challengeService.completeChallenge(id, companyId);
 
-      this.logAction('challenge-complete', req.user!.userId, { 
+      this.logAction('challenge-complete', req.user!.userId, {
         challengeId: id,
         previousStatus: challenge.status,
         newStatus: ChallengeStatus.COMPLETED
       });
-      
+
       this.sendSuccess(res, updatedChallenge, 'Challenge marked as completed successfully');
     }
   );
@@ -420,12 +420,12 @@ export class ChallengeController extends BaseController {
       this.verifyAuthorization(req, [UserRole.COMPANY], 'viewing company challenges');
 
       const companyId = await this.getUserProfileId(req, UserRole.COMPANY);
-      
+
       // Parse query parameters
-      const status = req.query.status && 
-        Object.values(ChallengeStatus).includes(req.query.status as ChallengeStatus) ? 
+      const status = req.query.status &&
+        Object.values(ChallengeStatus).includes(req.query.status as ChallengeStatus) ?
         req.query.status as ChallengeStatus : undefined;
-      
+
       const page = req.query.page ? parseInt(req.query.page as string) : 1;
       const limit = req.query.limit ? parseInt(req.query.limit as string) : 10;
 
@@ -472,7 +472,7 @@ export class ChallengeController extends BaseController {
       this.verifyAuthorization(req, [UserRole.COMPANY, UserRole.ADMIN], `view statistics for a challenge`);
 
       // Get company profile ID for authorization
-      const profileId = req.user!.role === UserRole.COMPANY ? 
+      const profileId = req.user!.role === UserRole.COMPANY ?
         await this.getUserProfileId(req, UserRole.COMPANY) : req.user!.userId;
 
       // Authorize challenge owner using service
@@ -483,18 +483,18 @@ export class ChallengeController extends BaseController {
         'view statistics for'
       );
 
-      // Get company profile ID
+      // Get company profile ID - FIXED to match pattern used in other methods
       const companyId = req.user!.role === UserRole.COMPANY ?
-        profileId : 'admin';
+        profileId : challenge.company.toString();
 
       // Get statistics via service
       const statistics = await this.challengeService.getChallengeStatistics(id, companyId);
 
-      this.logAction('challenge-statistics', req.user!.userId, { 
+      this.logAction('challenge-statistics', req.user!.userId, {
         challengeId: id,
         challengeTitle: challenge.title
       });
-      
+
       this.sendSuccess(res, statistics, 'Challenge statistics retrieved successfully');
     }
   );
