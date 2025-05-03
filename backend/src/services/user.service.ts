@@ -13,6 +13,10 @@ import { BaseService } from './BaseService';
 export interface UserDocument extends Omit<Document, '_id'>, IUser {
   _id: Types.ObjectId;  // Explicitly define _id as ObjectId
   comparePassword(password: string): Promise<boolean>;
+  generateEmailVerificationToken(): string;  // Method to generate email verification token
+  verifyEmailToken(otp: string): boolean;  // Method to verify email token
+  generatePasswordResetToken(): string;  // Method to generate password reset token
+  verifyPasswordResetToken(otp: string): boolean;  // Method to verify password reset token
 }
 
 export interface CreateUserDTO {
@@ -59,7 +63,7 @@ export class UserService extends BaseService {
   
         // Create new user with transaction support
         const users = await User.create([userData], { session });
-        const user = users[0] as UserDocument;
+        const user = users[0] as unknown as UserDocument;
   
         logger.info(`User created successfully with ID: ${user._id}`, {
           userId: user._id.toString(),
@@ -100,7 +104,7 @@ export class UserService extends BaseService {
         throw new ApiError(HTTP_STATUS.NOT_FOUND, 'User not found');
       }
 
-      return user as UserDocument;
+      return user as unknown as UserDocument;
     } catch (error) {
       if (error instanceof ApiError) throw error;
       throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to retrieve user');
@@ -117,7 +121,7 @@ export class UserService extends BaseService {
         throw new ApiError(HTTP_STATUS.NOT_FOUND, 'User not found');
       }
 
-      return user as UserDocument;
+      return user as unknown as UserDocument;
     } catch (error) {
       if (error instanceof ApiError) throw error;
       throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to retrieve user');

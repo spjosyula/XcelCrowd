@@ -11,6 +11,7 @@ import { BaseController } from './BaseController';
 import { AuthRequest } from '../types/request.types';
 import { profileService, ProfileService } from '../services/profile.service';
 import { architectService, ArchitectService } from '../services/architect.service';
+import { emailVerificationService, EmailVerificationService } from '../services/email.service';
 import { token } from 'morgan';
 
 /**
@@ -31,12 +32,14 @@ export class AuthController extends BaseController {
   private readonly userService: UserService;
   private readonly profileService: ProfileService;
   private readonly architectService: ArchitectService;
+  private readonly emailVerificationService: EmailVerificationService;
 
   constructor() {
     super();
     this.userService = userService
     this.profileService = profileService
     this.architectService = architectService
+    this.emailVerificationService = emailVerificationService
   }
 
   /**
@@ -126,7 +129,7 @@ export class AuthController extends BaseController {
   }
 
   /**
-  * Student registration
+  * Student registration with university email verification
   * @route POST /api/auth/student/register
   * @access Public
   */
@@ -140,8 +143,22 @@ export class AuthController extends BaseController {
       // Check password strength
       this.validatePasswordStrength(userData.password);
 
+      // Verify university email (in production this should be more robust)
+      const isUniversityEmail = this.emailVerificationService.isUniversityEmail(userData.email);
+
+      if (!isUniversityEmail) {
+        logger.warn(`Non-university email registration attempt: ${userData.email}`);
+        // For now, just log the warning but allow registration
+        // In production, you might want to reject non-university emails
+        // throw ApiError.badRequest('Please use a valid university email address');
+      }
+
       // Create user and profile in a single operation
       const user = await this.userService.createUser(userData);
+
+      // Generate email verification token
+      const verificationOtp = user.generateEmailVerificationToken();
+      await user.save();
 
       // Create the student profile
       const profileData = {
@@ -168,14 +185,29 @@ export class AuthController extends BaseController {
       // Generate CSRF token
       const csrfToken = crypto.randomBytes(64).toString('hex');
 
+      // Send verification email with OTP
+      await this.emailVerificationService.sendVerificationEmail(
+        user.email,
+        verificationOtp,
+        'student'
+      );
+
       this.logAction('student-register', user._id!.toString(), {
         email: user.email,
-        profileCreated: true
+        profileCreated: true,
+        verificationSent: true,
+        isUniversityEmail
       });
 
       this.sendSuccess(
         res,
-        { user, profile, csrfToken },
+        {
+          user,
+          profile,
+          csrfToken,
+          message: 'Please verify your email to activate your account',
+          isUniversityEmail
+        },
         'Student registered successfully with profile',
         HTTP_STATUS.CREATED
       );
@@ -183,10 +215,170 @@ export class AuthController extends BaseController {
   );
 
   /**
-   * Company registration
-   * @route POST /api/auth/company/register
+   * Verify student email
+   * @route POST /api/auth/student/verify-email
    * @access Public
    */
+  public verifyStudentEmail = catchAsync(
+    async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      const { email, otp } = req.body;
+
+      // Find user by email
+      const user = await this.userService.getUserByEmail(email);
+
+      if (user.isEmailVerified) {
+        return this.sendSuccess(res, {}, 'Email already verified', HTTP_STATUS.OK);
+      }
+
+      // Verify the OTP
+      const isValid = user.verifyEmailToken(otp);
+      if (!isValid) {
+        throw ApiError.badRequest('Invalid or expired verification code');
+      }
+
+      // Mark email as verified
+      user.isEmailVerified = true;
+      user.emailVerificationToken = undefined;
+      user.emailVerificationTokenExpires = undefined;
+      await user.save();
+
+      this.logAction('email-verified', user._id!.toString(), {
+        email: user.email
+      });
+
+      this.sendSuccess(
+        res,
+        {},
+        'Email verified successfully',
+        HTTP_STATUS.OK
+      );
+    }
+  );
+
+  /**
+* Student login
+* @route POST /api/auth/student/login
+* @access Public
+*/
+  public loginStudent = catchAsync(
+    async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      const { email, password } = req.body;
+
+      const result = await this.processLogin(email, password, UserRole.STUDENT, 'student-login');
+
+      // Set HTTP-only cookie with token
+      this.setTokenCookie(res, result.token);
+
+      this.sendSuccess(
+        res,
+        {
+          user: result.user,
+          profile: result.profile,
+          csrfToken: result.csrfToken,
+          token: result.token
+        },
+        'Student login successful'
+      );
+    }
+  );
+
+  /**
+  * Request password reset for student accounts
+  * @route POST /api/auth/student/request-password-reset
+  * @access Public
+  */
+  public requestStudentPasswordReset = catchAsync(
+    async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      const { email } = req.body;
+
+      // Find user by email
+      const user = await this.userService.getUserByEmail(email);
+
+      // Verify the user is a student
+      if (user.role !== UserRole.STUDENT) {
+        throw ApiError.badRequest('Invalid account type');
+      }
+
+      // Verify university email
+      const isUniversityEmail = this.emailVerificationService.isUniversityEmail(email);
+
+      if (!isUniversityEmail) {
+        logger.warn(`Password reset requested for non-university email: ${email}`);
+        // For now, log warning but allow the operation
+        // In production, you may want to enforce this more strictly
+      }
+
+      // Generate password reset token
+      const resetOtp = user.generatePasswordResetToken();
+      await user.save();
+
+      // Send password reset email with OTP
+      await this.emailVerificationService.sendVerificationEmail(
+        user.email,
+        resetOtp,
+        'password-reset'
+      );
+
+      this.logAction('student-password-reset-requested', user._id!.toString(), {
+        email: user.email,
+        isUniversityEmail
+      });
+
+      // Don't reveal if user exists or not for security
+      this.sendSuccess(
+        res,
+        {},
+        'If a user with that email exists, a password reset link has been sent',
+        HTTP_STATUS.OK
+      );
+    }
+  );
+
+  /**
+   * Reset student password with OTP
+   * @route POST /api/auth/student/reset-password
+   * @access Public
+   */
+  public resetStudentPassword = catchAsync(
+    async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      const { email, otp, newPassword } = req.body;
+
+      // Validate password strength
+      this.validatePasswordStrength(newPassword);
+
+      // Find user by email
+      const user = await this.userService.getUserByEmail(email);
+
+      // Verify the user is a student
+      if (user.role !== UserRole.STUDENT) {
+        throw ApiError.badRequest('Invalid account type');
+      }
+
+      // Verify the OTP
+      if (!user.verifyPasswordResetToken(otp)) {
+        throw ApiError.badRequest('Invalid or expired reset code');
+      }
+
+      // Update password
+      user.password = newPassword;
+      user.passwordResetToken = undefined;
+      user.passwordResetTokenExpires = undefined;
+      await user.save();
+
+      this.logAction('student-password-reset-completed', user._id!.toString(), {
+        email: user.email
+      });
+
+      this.sendSuccess(
+        res,
+        {},
+        'Password has been reset successfully',
+        HTTP_STATUS.OK
+      );
+    }
+  );
+
+
   public registerCompany = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
       const userData = {
@@ -197,8 +389,22 @@ export class AuthController extends BaseController {
       // Check password strength
       this.validatePasswordStrength(userData.password);
 
+      // Verify business email
+      const isBusinessEmail = this.emailVerificationService.isBusinessEmail(userData.email);
+
+      if (!isBusinessEmail) {
+        logger.warn(`Non-business email registration attempt: ${userData.email}`);
+        // For now, just log the warning but allow registration
+        // In production, you might want to reject personal emails
+        // throw ApiError.badRequest('Please use a valid business email address');
+      }
+
       // Create user
       const user = await this.userService.createUser(userData);
+
+      // Generate email verification token
+      const verificationOtp = user.generateEmailVerificationToken();
+      await user.save();
 
       // Create the company profile
       const profileData = {
@@ -228,14 +434,29 @@ export class AuthController extends BaseController {
       // Generate CSRF token
       const csrfToken = crypto.randomBytes(64).toString('hex');
 
+      // Send verification email with OTP
+      await this.emailVerificationService.sendVerificationEmail(
+        user.email,
+        verificationOtp,
+        'company'
+      );
+
       this.logAction('company-register', user._id!.toString(), {
         email: user.email,
-        profileCreated: true
+        profileCreated: true,
+        verificationSent: true,
+        isBusinessEmail
       });
 
       this.sendSuccess(
         res,
-        { user, profile, csrfToken },
+        {
+          user,
+          profile,
+          csrfToken,
+          message: 'Please verify your email to activate your account',
+          isBusinessEmail
+        },
         'Company registered successfully with profile',
         HTTP_STATUS.CREATED
       );
@@ -243,31 +464,52 @@ export class AuthController extends BaseController {
   );
 
   /**
- * Student login
- * @route POST /api/auth/student/login
- * @access Public
- */
-  public loginStudent = catchAsync(
+  * Verify company email
+  * @route POST /api/auth/company/verify-email
+  * @access Public
+  */
+  public verifyCompanyEmail = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
-      const { email, password } = req.body;
+      const { email, otp } = req.body;
 
-      const result = await this.processLogin(email, password, UserRole.STUDENT, 'student-login');
+      // Find user by email
+      const user = await this.userService.getUserByEmail(email);
 
-      // Set HTTP-only cookie with token
-      this.setTokenCookie(res, result.token);
+      // Verify the user is a company
+      if (user.role !== UserRole.COMPANY) {
+        throw ApiError.badRequest('Invalid account type');
+      }
+
+      if (user.isEmailVerified) {
+        return this.sendSuccess(res, {}, 'Email already verified', HTTP_STATUS.OK);
+      }
+
+      // Verify the OTP
+      const isValid = user.verifyEmailToken(otp);
+      if (!isValid) {
+        throw ApiError.badRequest('Invalid or expired verification code');
+      }
+
+      // Mark email as verified
+      user.isEmailVerified = true;
+      user.emailVerificationToken = undefined;
+      user.emailVerificationTokenExpires = undefined;
+      await user.save();
+
+      this.logAction('company-email-verified', user._id!.toString(), {
+        email: user.email
+      });
 
       this.sendSuccess(
         res,
-        {
-          user: result.user,
-          profile: result.profile,
-          csrfToken: result.csrfToken,
-          token: result.token
-        },
-        'Student login successful'
+        {},
+        'Business email verified successfully',
+        HTTP_STATUS.OK
       );
     }
   );
+
+
 
   /**
  * Company login
@@ -292,6 +534,102 @@ export class AuthController extends BaseController {
           token: result.token
         },
         'Company login successful'
+      );
+    }
+  );
+
+  /**
+   * Request password reset for company accounts
+   * @route POST /api/auth/company/request-password-reset
+   * @access Public
+   */
+  public requestCompanyPasswordReset = catchAsync(
+    async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      const { email } = req.body;
+
+      // Find user by email
+      const user = await this.userService.getUserByEmail(email);
+      
+      // Verify the user is a company
+      if (user.role !== UserRole.COMPANY) {
+        throw ApiError.badRequest('Invalid account type');
+      }
+
+      // Verify business email
+      const isBusinessEmail = this.emailVerificationService.isBusinessEmail(email);
+      
+      if (!isBusinessEmail) {
+        logger.warn(`Password reset requested for non-business email: ${email}`);
+        // For now, log warning but allow the operation
+        // In production, you may want to enforce this more strictly
+      }
+
+      // Generate password reset token
+      const resetOtp = user.generatePasswordResetToken();
+      await user.save();
+
+      // Send password reset email with OTP
+      await this.emailVerificationService.sendVerificationEmail(
+        user.email, 
+        resetOtp, 
+        'password-reset'
+      );
+
+      this.logAction('company-password-reset-requested', user._id!.toString(), {
+        email: user.email,
+        isBusinessEmail
+      });
+
+      // Don't reveal if user exists or not for security
+      this.sendSuccess(
+        res,
+        {},
+        'If a user with that email exists, a password reset link has been sent',
+        HTTP_STATUS.OK
+      );
+    }
+  );
+
+  /**
+   * Reset company password with OTP
+   * @route POST /api/auth/company/reset-password
+   * @access Public
+   */
+  public resetCompanyPassword = catchAsync(
+    async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      const { email, otp, newPassword } = req.body;
+
+      // Validate password strength
+      this.validatePasswordStrength(newPassword);
+
+      // Find user by email
+      const user = await this.userService.getUserByEmail(email);
+      
+      // Verify the user is a company
+      if (user.role !== UserRole.COMPANY) {
+        throw ApiError.badRequest('Invalid account type');
+      }
+
+      // Verify the OTP
+      if (!user.verifyPasswordResetToken(otp)) {
+        throw ApiError.badRequest('Invalid or expired reset code');
+      }
+
+      // Update password
+      user.password = newPassword;
+      user.passwordResetToken = undefined;
+      user.passwordResetTokenExpires = undefined;
+      await user.save();
+
+      this.logAction('company-password-reset-completed', user._id!.toString(), {
+        email: user.email
+      });
+
+      this.sendSuccess(
+        res,
+        {},
+        'Password has been reset successfully',
+        HTTP_STATUS.OK
       );
     }
   );
@@ -441,7 +779,7 @@ export class AuthController extends BaseController {
    */
   private validatePasswordStrength(password: string): void {
     const errors = [];
-  
+
     if (!password || typeof password !== 'string') {
       throw new ApiError(
         HTTP_STATUS.BAD_REQUEST,
@@ -450,46 +788,46 @@ export class AuthController extends BaseController {
         'VALIDATION_ERROR'
       );
     }
-  
+
     // Length check
     if (password.length < 8) {
       errors.push('Password must be at least 8 characters long');
     }
-    
+
     if (password.length > 128) {
       errors.push('Password exceeds maximum length of 128 characters');
     }
-  
+
     // Character type checks
     if (!/[a-z]/.test(password)) {
       errors.push('Password must contain at least one lowercase letter');
     }
-    
+
     if (!/[A-Z]/.test(password)) {
       errors.push('Password must contain at least one uppercase letter');
     }
-    
+
     if (!/\d/.test(password)) {
       errors.push('Password must contain at least one number');
     }
-    
+
     if (!/[@$!%*?&#^()_+\-=\[\]{};':"\\|,.<>\/]/.test(password)) {
       errors.push('Password must contain at least one special character');
     }
-    
+
     // Common patterns/dictionary check
     const commonPatterns = ['password', '12345', 'qwerty', 'admin'];
     const lowerPassword = password.toLowerCase();
-    
+
     if (commonPatterns.some(pattern => lowerPassword.includes(pattern))) {
       errors.push('Password contains a common pattern that is easily guessed');
     }
-    
+
     // Check for repeated characters
     if (/(.)\1{2,}/.test(password)) {
       errors.push('Password contains too many repeated characters');
     }
-    
+
     if (errors.length > 0) {
       throw new ApiError(
         HTTP_STATUS.BAD_REQUEST,

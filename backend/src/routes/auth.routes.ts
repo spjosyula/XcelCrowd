@@ -60,6 +60,46 @@ router.post(
 );
 
 /**
+ * @route   POST /api/auth/student/verify-email
+ * @desc    Verify student's email with OTP
+ * @access  Public
+ * @swagger
+ * /auth/student/verify-email:
+ */
+router.post(
+  '/student/verify-email',
+  validateRequest(authValidation.verifyEmail),
+  authController.verifyStudentEmail
+);
+
+/**
+ * @route   POST /api/auth/student/request-password-reset
+ * @desc    Request password reset for student accounts (university email)
+ * @access  Public
+ * @swagger
+ * /auth/student/request-password-reset:
+ */
+router.post(
+  '/student/request-password-reset',
+  validateRequest(authValidation.requestPasswordReset),
+  authController.requestStudentPasswordReset
+);
+
+/**
+ * @route   POST /api/auth/student/reset-password
+ * @desc    Reset student password with OTP
+ * @access  Public
+ * @swagger
+ * /auth/student/reset-password:
+ */
+router.post(
+  '/student/reset-password',
+  validateRequest(authValidation.resetPassword),
+  authController.resetStudentPassword
+);
+
+
+/**
  * @route   POST /api/auth/company/register
  * @desc    Register a new company account
  * @access  Public
@@ -84,6 +124,45 @@ router.post(
   loginRateLimiter,
   validateRequest(authValidation.login),
   authController.loginCompany
+);
+
+/**
+ * @route   POST /api/auth/company/verify-email
+ * @desc    Verify company's business email with OTP
+ * @access  Public
+ * @swagger
+ * /auth/company/verify-email:
+ */
+router.post(
+  '/company/verify-email',
+  validateRequest(authValidation.verifyCompanyEmail),
+  authController.verifyCompanyEmail
+);
+
+/**
+ * @route   POST /api/auth/company/request-password-reset
+ * @desc    Request password reset for company accounts (business email)
+ * @access  Public
+ * @swagger
+ * /auth/company/request-password-reset:
+ */
+router.post(
+  '/company/request-password-reset',
+  validateRequest(authValidation.requestPasswordReset),
+  authController.requestCompanyPasswordReset
+);
+
+/**
+ * @route   POST /api/auth/company/reset-password
+ * @desc    Reset company password with OTP
+ * @access  Public
+ * @swagger
+ * /auth/company/reset-password:
+ */
+router.post(
+  '/company/reset-password',
+  validateRequest(authValidation.resetPassword),
+  authController.resetCompanyPassword
 );
 
 /**
