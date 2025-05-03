@@ -20,6 +20,62 @@
  *           example: Password123!
  *           minLength: 8
  *     
+ *     RequestPasswordResetRequest:
+ *       type: object
+ *       required:
+ *         - email
+ *       properties:
+ *         email:
+ *           type: string
+ *           format: email
+ *           description: Email address associated with the account
+ *           example: student@university.edu
+ *     
+ *     ResetPasswordRequest:
+ *       type: object
+ *       required:
+ *         - email
+ *         - otp
+ *         - newPassword
+ *       properties:
+ *         email:
+ *           type: string
+ *           format: email
+ *           description: Email address associated with the account
+ *           example: student@university.edu
+ *         otp:
+ *           type: string
+ *           description: One-time password received via email
+ *           example: "123456"
+ *           minLength: 6
+ *           maxLength: 6
+ *           pattern: '^\d{6}$'
+ *         newPassword:
+ *           type: string
+ *           format: password
+ *           description: New strong password (min 8 chars with uppercase, lowercase, number, and special char)
+ *           example: NewStrongP@ss123
+ *           minLength: 8
+ *     
+ *     VerifyEmailRequest:
+ *       type: object
+ *       required:
+ *         - email
+ *         - otp
+ *       properties:
+ *         email:
+ *           type: string
+ *           format: email
+ *           description: Email address to verify
+ *           example: student@university.edu
+ *         otp:
+ *           type: string
+ *           description: One-time password received via email
+ *           example: "123456"
+ *           minLength: 6
+ *           maxLength: 6
+ *           pattern: '^\d{6}$'
+ *     
  *     RegisterStudentRequest:
  *       type: object
  *       required:
@@ -181,6 +237,23 @@
  *               type: string
  *               description: CSRF protection token
  *               example: a1b2c3d4e5f6...
+ *         timestamp:
+ *           type: string
+ *           format: date-time
+ *           example: '2023-05-26T14:45:00.000Z'
+ *     
+ *     SimpleSuccessResponse:
+ *       type: object
+ *       properties:
+ *         success:
+ *           type: boolean
+ *           example: true
+ *         message:
+ *           type: string
+ *           example: Operation successful
+ *         data:
+ *           type: object
+ *           example: {}
  *         timestamp:
  *           type: string
  *           format: date-time
@@ -402,6 +475,111 @@
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *
+ * /auth/student/verify-email:
+ *   post:
+ *     summary: Verify student's email address
+ *     description: Verifies a student's email address using the OTP sent during registration
+ *     tags: [Authentication]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/VerifyEmailRequest'
+ *     responses:
+ *       200:
+ *         description: Email verified successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/SimpleSuccessResponse'
+ *       400:
+ *         description: Invalid or expired verification code
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       404:
+ *         description: User not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ * 
+ * /auth/student/request-password-reset:
+ *   post:
+ *     summary: Request password reset for student
+ *     description: Sends a password reset OTP to the student's university email address
+ *     tags: [Authentication]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/RequestPasswordResetRequest'
+ *     responses:
+ *       200:
+ *         description: Password reset instructions sent if email exists
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/SimpleSuccessResponse'
+ *       400:
+ *         description: Validation error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ValidationError'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ * 
+ * /auth/student/reset-password:
+ *   post:
+ *     summary: Reset student password with OTP
+ *     description: Resets a student's password using the OTP sent to their email
+ *     tags: [Authentication]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/ResetPasswordRequest'
+ *     responses:
+ *       200:
+ *         description: Password reset successful
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/SimpleSuccessResponse'
+ *       400:
+ *         description: Invalid or expired reset code or password doesn't meet requirements
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ValidationError'
+ *       404:
+ *         description: User not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
  * 
  * /auth/company/register:
  *   post:
@@ -472,6 +650,111 @@
  *               $ref: '#/components/schemas/Error'
  *       429:
  *         description: Too many login attempts
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ * 
+ * /auth/company/verify-email:
+ *   post:
+ *     summary: Verify company's business email
+ *     description: Verifies a company's business email address using the OTP sent during registration
+ *     tags: [Authentication]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/VerifyEmailRequest'
+ *     responses:
+ *       200:
+ *         description: Business email verified successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/SimpleSuccessResponse'
+ *       400:
+ *         description: Invalid or expired verification code
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       404:
+ *         description: User not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ * 
+ * /auth/company/request-password-reset:
+ *   post:
+ *     summary: Request password reset for company
+ *     description: Sends a password reset OTP to the company's business email address
+ *     tags: [Authentication]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/RequestPasswordResetRequest'
+ *     responses:
+ *       200:
+ *         description: Password reset instructions sent if email exists
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/SimpleSuccessResponse'
+ *       400:
+ *         description: Validation error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ValidationError'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ * 
+ * /auth/company/reset-password:
+ *   post:
+ *     summary: Reset company password with OTP
+ *     description: Resets a company's password using the OTP sent to their business email
+ *     tags: [Authentication]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/ResetPasswordRequest'
+ *     responses:
+ *       200:
+ *         description: Password reset successful
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/SimpleSuccessResponse'
+ *       400:
+ *         description: Invalid or expired reset code or password doesn't meet requirements
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ValidationError'
+ *       404:
+ *         description: User not found
  *         content:
  *           application/json:
  *             schema:
