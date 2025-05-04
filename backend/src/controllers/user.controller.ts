@@ -11,6 +11,7 @@ import { MongoSanitizer } from '../utils/mongo.sanitize';
 /**
  * User controller for handling user-related HTTP requests
  * Extends BaseController for standardized response handling
+ * Uses MongoSanitizer to prevent NoSQL injection attacks
  */
 export class UserController extends BaseController {
   private readonly userService: UserService;
@@ -52,6 +53,7 @@ export class UserController extends BaseController {
    * Get user by ID
    * @route GET /api/users/:id
    * @access Private - Self or Admin only
+   * @security Uses MongoSanitizer to prevent NoSQL injection attacks
    */
   public getUserById = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
@@ -59,7 +61,7 @@ export class UserController extends BaseController {
 
       const { id } = req.params;
 
-      // Validate ObjectId format using centralized utility
+      // Validate ObjectId format using MongoSanitizer to prevent NoSQL injection
       MongoSanitizer.validateObjectId(id, 'user');
 
       // Ensure user can only access their own record, unless they're an admin
@@ -73,7 +75,7 @@ export class UserController extends BaseController {
         );
       }
 
-      // Call service to get user
+      // Call service to get user (service has additional sanitization)
       const user = await this.userService.getUserById(id);
 
       this.logAction('user-view', req.user!.userId, { viewedUserId: id });
@@ -90,6 +92,7 @@ export class UserController extends BaseController {
    * Update user
    * @route PUT /api/users/:id
    * @access Private - Self or Admin only
+   * @security Uses MongoSanitizer to prevent NoSQL injection attacks
    */
   public updateUser = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
@@ -97,7 +100,7 @@ export class UserController extends BaseController {
 
       const { id } = req.params;
 
-      // Validate ObjectId format using centralized utility
+      // Validate ObjectId format using MongoSanitizer to prevent NoSQL injection
       MongoSanitizer.validateObjectId(id, 'user');
 
       // Ensure user can only update their own record, unless they're an admin
@@ -121,7 +124,7 @@ export class UserController extends BaseController {
 
       const updateData: UpdateUserDTO = req.body;
 
-      // Call service to update user
+      // Call service to update user (service contains sanitization)
       const user = await this.userService.updateUser(id, updateData);
 
       this.logAction('user-update', req.user!.userId, {
@@ -142,6 +145,7 @@ export class UserController extends BaseController {
    * Delete user
    * @route DELETE /api/users/:id
    * @access Private - Admin only
+   * @security Uses MongoSanitizer to prevent NoSQL injection attacks
    */
   public deleteUser = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
@@ -150,7 +154,7 @@ export class UserController extends BaseController {
 
       const { id } = req.params;
 
-      // Validate ObjectId format using centralized utility
+      // Validate ObjectId format using MongoSanitizer to prevent NoSQL injection
       MongoSanitizer.validateObjectId(id, 'user');
 
       // Prevent deletion of own account
@@ -161,7 +165,7 @@ export class UserController extends BaseController {
         );
       }
 
-      // Call service to delete user
+      // Call service to delete user (service contains sanitization)
       await this.userService.deleteUser(id);
 
       this.logAction('user-delete', req.user!.userId, { deletedUserId: id });
@@ -175,10 +179,11 @@ export class UserController extends BaseController {
   );
 
   /**
- * Get all users (with filtering and pagination)
- * @route GET /api/users
- * @access Private - Admin only
- */
+   * Get all users (with filtering and pagination)
+   * @route GET /api/users
+   * @access Private - Admin only
+   * @security Uses sanitized filters and pagination to prevent NoSQL injection
+   */
   public getAllUsers = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
       // Verify admin authorization

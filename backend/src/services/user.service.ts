@@ -6,6 +6,7 @@ import { logger } from '../utils/logger';
 import { executePaginatedQuery, PaginationOptions, PaginationResult } from '../utils/paginationUtils';
 import { BaseService } from './BaseService';
 import { escapeRegExp } from 'lodash';
+import { MongoSanitizer } from '../utils/mongo.sanitize';
 
 /**
  * Extended interface for user documents from MongoDB
@@ -33,6 +34,7 @@ export interface UpdateUserDTO {
 
 /**
  * User service for handling user-related operations
+ * Implements sanitization to prevent NoSQL injection attacks
  */
 export class UserService extends BaseService {
   /**
@@ -51,8 +53,14 @@ export class UserService extends BaseService {
           );
         }
 
-        // Check if user with email already exists
-        const existingUser = await User.findOne({ email: userData.email }).session(session);
+        // Sanitize email before using in query
+        const sanitizedEmail = String(userData.email).trim().toLowerCase();
+
+        // Check if user with email already exists using $eq for safe comparison
+        const existingUser = await User.findOne({ 
+          email: { $eq: sanitizedEmail } 
+        }).session(session);
+        
         if (existingUser) {
           throw new ApiError(
             HTTP_STATUS.CONFLICT,
@@ -62,8 +70,15 @@ export class UserService extends BaseService {
           );
         }
 
+        // Create user with sanitized data
+        const sanitizedUserData = {
+          email: sanitizedEmail,
+          password: userData.password,
+          role: userData.role
+        };
+
         // Create new user with transaction support
-        const users = await User.create([userData], { session });
+        const users = await User.create([sanitizedUserData], { session });
         const user = users[0] as unknown as UserDocument;
 
         logger.info(`User created successfully with ID: ${user._id}`, {
@@ -96,11 +111,10 @@ export class UserService extends BaseService {
    */
   public async getUserById(userId: string): Promise<UserDocument> {
     try {
-      if (!Types.ObjectId.isValid(userId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid user ID');
-      }
+      // Sanitize and validate the ObjectId using MongoSanitizer
+      const sanitizedId = MongoSanitizer.validateObjectId(userId, 'user');
 
-      const user = await User.findById(userId);
+      const user = await User.findById(sanitizedId);
       if (!user) {
         throw new ApiError(HTTP_STATUS.NOT_FOUND, 'User not found');
       }
@@ -117,7 +131,13 @@ export class UserService extends BaseService {
    */
   public async getUserByEmail(email: string): Promise<UserDocument> {
     try {
-      const user = await User.findOne({ email }).select('+password');
+      // Sanitize email - ensure it's treated as a literal string value
+      const sanitizedEmail = String(email).trim().toLowerCase();
+
+      const user = await User.findOne({ 
+        email: { $eq: sanitizedEmail }
+      }).select('+password');
+      
       if (!user) {
         throw new ApiError(HTTP_STATUS.NOT_FOUND, 'User not found');
       }
@@ -139,9 +159,12 @@ export class UserService extends BaseService {
     options: PaginationOptions
   ): Promise<PaginationResult<IUser>> {
     try {
+      // Sanitize filters to prevent NoSQL injection
+      const sanitizedFilters = this.sanitizeFilters(filters);
+
       return await executePaginatedQuery<IUser>(
         User,
-        filters,
+        sanitizedFilters,
         {
           page: options.page || 1,
           limit: options.limit || 10,
@@ -165,17 +188,11 @@ export class UserService extends BaseService {
   public async updateUser(userId: string, updateData: UpdateUserDTO): Promise<IUser> {
     try {
       return await this.withTransaction(async (session) => {
-        if (!Types.ObjectId.isValid(userId)) {
-          throw new ApiError(
-            HTTP_STATUS.BAD_REQUEST,
-            'Invalid user ID',
-            true,
-            'INVALID_USER_ID'
-          );
-        }
+        // Sanitize and validate the ObjectId using MongoSanitizer
+        const sanitizedId = MongoSanitizer.validateObjectId(userId, 'user');
 
         // Check if the user exists
-        const existingUser = await User.findById(userId).session(session);
+        const existingUser = await User.findById(sanitizedId).session(session);
         if (!existingUser) {
           throw new ApiError(
             HTTP_STATUS.NOT_FOUND,
@@ -185,11 +202,17 @@ export class UserService extends BaseService {
           );
         }
 
-        // Handle email update - check for uniqueness
+        // Sanitize update data
+        const sanitizedUpdateData: UpdateUserDTO = {};
+        
+        // Handle email update - check for uniqueness and sanitize
         if (updateData.email && updateData.email !== existingUser.email) {
+          const sanitizedEmail = String(updateData.email).trim().toLowerCase();
+          sanitizedUpdateData.email = sanitizedEmail;
+          
           const emailExists = await User.findOne({
-            email: updateData.email,
-            _id: { $ne: userId }
+            email: { $eq: sanitizedEmail },
+            _id: { $ne: sanitizedId }
           }).session(session);
 
           if (emailExists) {
@@ -201,11 +224,16 @@ export class UserService extends BaseService {
             );
           }
         }
+        
+        // Handle password update
+        if (updateData.password) {
+          sanitizedUpdateData.password = updateData.password;
+        }
 
         // Update the user with transaction support
         const updatedUser = await User.findByIdAndUpdate(
-          userId,
-          updateData,
+          sanitizedId,
+          sanitizedUpdateData,
           {
             new: true,
             runValidators: true,
@@ -224,7 +252,7 @@ export class UserService extends BaseService {
 
         logger.info(`User ${userId} updated successfully`, {
           userId,
-          updatedFields: Object.keys(updateData).join(',')
+          updatedFields: Object.keys(sanitizedUpdateData).join(',')
         });
 
         return updatedUser;
@@ -252,17 +280,11 @@ export class UserService extends BaseService {
   public async deleteUser(userId: string): Promise<void> {
     try {
       await this.withTransaction(async (session) => {
-        if (!Types.ObjectId.isValid(userId)) {
-          throw new ApiError(
-            HTTP_STATUS.BAD_REQUEST,
-            'Invalid user ID',
-            true,
-            'INVALID_USER_ID'
-          );
-        }
+        // Sanitize and validate the ObjectId using MongoSanitizer
+        const sanitizedId = MongoSanitizer.validateObjectId(userId, 'user');
 
         // Get user with role to determine what to delete
-        const user = await User.findById(userId).session(session);
+        const user = await User.findById(sanitizedId).session(session);
         if (!user) {
           throw new ApiError(
             HTTP_STATUS.NOT_FOUND,
@@ -276,17 +298,27 @@ export class UserService extends BaseService {
         switch (user.role) {
           case UserRole.STUDENT:
             // Find student profile ID for solutions deletion
-            const studentProfile = await StudentProfile.findOne({ user: userId }).session(session);
+            const studentProfile = await StudentProfile.findOne({ 
+              user: { $eq: sanitizedId } 
+            }).session(session);
+            
             if (studentProfile) {
               // Delete all student solutions
-              await Solution.deleteMany({ student: studentProfile._id }).session(session);
+              await Solution.deleteMany({ 
+                student: { $eq: studentProfile._id } 
+              }).session(session);
+              
               // Delete student profile
               await StudentProfile.findByIdAndDelete(studentProfile._id).session(session);
               logger.info(`Deleted student profile and ${studentProfile._id} and related solutions`);
             }
             break;
+            
           case UserRole.COMPANY:
-            const companyProfile = await CompanyProfile.findOne({ user: userId }).session(session);
+            const companyProfile = await CompanyProfile.findOne({ 
+              user: { $eq: sanitizedId } 
+            }).session(session);
+            
             if (companyProfile) {
               // Delete company profile
               await CompanyProfile.findByIdAndDelete(companyProfile._id).session(session);
@@ -295,8 +327,12 @@ export class UserService extends BaseService {
               // based on business requirements
             }
             break;
+            
           case UserRole.ARCHITECT:
-            const architectProfile = await ArchitectProfile.findOne({ user: userId }).session(session);
+            const architectProfile = await ArchitectProfile.findOne({ 
+              user: { $eq: sanitizedId } 
+            }).session(session);
+            
             if (architectProfile) {
               // Delete architect profile
               await ArchitectProfile.findByIdAndDelete(architectProfile._id).session(session);
@@ -304,12 +340,13 @@ export class UserService extends BaseService {
               // Note: This should also handle review reassignment if necessary
             }
             break;
+            
           default:
             logger.warn(`Deleting user with unhandled role: ${user.role}`);
         }
 
         // Delete user document
-        await User.findByIdAndDelete(userId).session(session);
+        await User.findByIdAndDelete(sanitizedId).session(session);
         logger.info(`User ${userId} successfully deleted`);
       });
     } catch (error) {
@@ -329,9 +366,57 @@ export class UserService extends BaseService {
   }
 
   /**
- * Search users with filtering, sanitization and pagination
- * @param options - Search and pagination options
- */
+   * Sanitizes filter objects to prevent NoSQL injection
+   * @param filters - Raw filter object that might contain malicious data
+   * @returns Sanitized filter object safe to use in MongoDB queries
+   */
+  private sanitizeFilters(filters: Record<string, any>): Record<string, any> {
+    const safeFilters: Record<string, any> = {};
+
+    // Process each filter field
+    for (const [key, value] of Object.entries(filters)) {
+      // Skip undefined or null values
+      if (value === undefined || value === null) continue;
+
+      // Handle special cases like $or arrays
+      if (key === '$or' && Array.isArray(value)) {
+        safeFilters.$or = value.map(condition => this.sanitizeFilters(condition));
+        continue;
+      }
+
+      // For normal fields, use $eq operator to ensure value is treated as literal
+      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+        safeFilters[key] = { $eq: value };
+      } else if (value instanceof Types.ObjectId) {
+        safeFilters[key] = { $eq: value };
+      } else if (typeof value === 'object') {
+        // For objects that might already contain MongoDB operators
+        // Only allow specific safe operators and recursively sanitize their values
+        const safeOps: Record<string, any> = {};
+        const allowedOperators = ['$eq', '$gt', '$gte', '$lt', '$lte', '$in', '$nin'];
+        
+        for (const [op, opValue] of Object.entries(value)) {
+          if (allowedOperators.includes(op)) {
+            safeOps[op] = opValue;
+          }
+        }
+        
+        if (Object.keys(safeOps).length > 0) {
+          safeFilters[key] = safeOps;
+        } else {
+          // If no safe operators found, treat it as literal
+          safeFilters[key] = { $eq: value };
+        }
+      }
+    }
+
+    return safeFilters;
+  }
+
+  /**
+   * Search users with filtering, sanitization and pagination
+   * @param options - Search and pagination options
+   */
   public async searchUsers(options: {
     role?: UserRole;
     searchTerm?: string;
@@ -343,7 +428,16 @@ export class UserService extends BaseService {
 
       // Add role filter if provided
       if (options.role) {
-        filters.role = options.role;
+        // Validate that the role is a valid UserRole enum value
+        if (!Object.values(UserRole).includes(options.role)) {
+          throw new ApiError(
+            HTTP_STATUS.BAD_REQUEST,
+            'Invalid role value',
+            true,
+            'INVALID_ROLE'
+          );
+        }
+        filters.role = { $eq: options.role };
       }
 
       // Process search term if provided with proper validation and sanitization
@@ -360,16 +454,13 @@ export class UserService extends BaseService {
         }
 
         try {
-          // Safely escape special regex characters to prevent ReDoS attacks
-          const sanitizedSearchTerm = escapeRegExp(searchString);
-
-          // Apply word boundary markers for better search precision
-          const safeRegex = new RegExp(`\\b${sanitizedSearchTerm}`, 'i');
-
+          // Use MongoSanitizer for safe regex condition building
+          const safeRegexCondition = MongoSanitizer.buildSafeRegexCondition(searchString);
+          
           // Apply search to relevant fields
           filters.$or = [
-            { email: safeRegex },
-            { name: safeRegex }
+            { email: safeRegexCondition },
+            { name: safeRegexCondition }
           ];
 
           // Security audit logging for search operations
@@ -389,7 +480,7 @@ export class UserService extends BaseService {
         }
       }
 
-      // Execute paginated query with all filters
+      // Execute paginated query with all sanitized filters
       return await executePaginatedQuery<IUser>(
         User,
         filters,

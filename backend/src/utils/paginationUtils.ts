@@ -1,4 +1,5 @@
 import { logger } from './logger';
+import { MongoSanitizer } from './mongo.sanitize';
 
 /**
  * Standard pagination options interface
@@ -110,21 +111,27 @@ export async function executePaginatedQuery<T>(
   try {
     const { page, limit } = normalizePaginationOptions(options);
     
-    // Build base query
-    let query = model.find(filter);
+    // Sanitize sort options
+    const validatedOptions = validateAndSanitizeSortOptions(options);
+    
+    // Validate and sanitize filter to prevent NoSQL injection
+    const sanitizedFilter = sanitizeFilter(filter);
+    
+    // Build base query with sanitized filter
+    let query = model.find(sanitizedFilter);
     
     // Apply custom modifications (like populate)
     if (queryModifier) {
       query = queryModifier(query);
     }
     
-    // Apply pagination
-    query = applyPaginationToQuery(query, options);
+    // Apply pagination with validated options
+    query = applyPaginationToQuery(query, validatedOptions);
     
     // Execute query and count in parallel
     const [data, total] = await Promise.all([
       query.lean(),
-      model.countDocuments(filter)
+      model.countDocuments(sanitizedFilter)
     ]);
     
     // Return standardized result
@@ -133,4 +140,104 @@ export async function executePaginatedQuery<T>(
     logger.error('Pagination query error:', error);
     throw error;
   }
+}
+
+/**
+ * Validate and sanitize sort options to prevent injection attacks
+ * @param options - Raw pagination options
+ * @returns Validated and sanitized pagination options
+ */
+function validateAndSanitizeSortOptions(options: PaginationOptions): PaginationOptions {
+  const sanitizedOptions: PaginationOptions = {
+    page: options.page,
+    limit: options.limit,
+    maxLimit: options.maxLimit
+  };
+  
+  // Validate sortBy to only allow alphanumeric and underscore characters
+  // This prevents NoSQL injection via sort field names
+  if (options.sortBy) {
+    const safeFieldPattern = /^[a-zA-Z0-9_\.]+$/;
+    if (!safeFieldPattern.test(options.sortBy)) {
+      logger.warn(`Potentially unsafe sort field rejected: ${options.sortBy}`);
+      sanitizedOptions.sortBy = 'createdAt'; // Default to safe field
+    } else {
+      sanitizedOptions.sortBy = options.sortBy;
+    }
+  }
+  
+  // Validate sortOrder to only allow 'asc' or 'desc'
+  if (options.sortOrder && ['asc', 'desc'].includes(options.sortOrder)) {
+    sanitizedOptions.sortOrder = options.sortOrder;
+  } else {
+    sanitizedOptions.sortOrder = 'desc'; // Default
+  }
+  
+  return sanitizedOptions;
+}
+
+/**
+ * Sanitize filter object to prevent NoSQL injection
+ * @param filter - Raw filter object
+ * @returns Sanitized filter object
+ */
+function sanitizeFilter(filter: Record<string, any>): Record<string, any> {
+  const sanitizedFilter: Record<string, any> = {};
+  
+  // Process each filter property
+  for (const [key, value] of Object.entries(filter)) {
+    // Skip undefined or null values
+    if (value === undefined || value === null) continue;
+    
+    // Handle special $or operator
+    if (key === '$or' && Array.isArray(value)) {
+      sanitizedFilter.$or = value.map(item => sanitizeFilter(item));
+      continue;
+    }
+    
+    // Use $eq for simple value types to prevent injection
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      sanitizedFilter[key] = { $eq: value };
+    } else if (value instanceof Date) {
+      sanitizedFilter[key] = { $eq: value };
+    } else if (typeof value === 'object') {
+      // For objects that might already contain MongoDB operators
+      const safeOperations: Record<string, any> = {};
+      const allowedOperators = ['$eq', '$gt', '$gte', '$lt', '$lte', '$in', '$nin', '$regex', '$options'];
+      
+      // Check if it's a MongoDB query operator object
+      const hasOperators = Object.keys(value).some(k => k.startsWith('$'));
+      
+      if (hasOperators) {
+        // If it has operators, only allow whitelisted ones
+        for (const [op, opValue] of Object.entries(value)) {
+          if (allowedOperators.includes(op)) {
+            // Special handling for regex to prevent ReDoS
+            if (op === '$regex' && typeof opValue === 'string') {
+              try {
+                // Use MongoSanitizer for safe regex
+                const safeRegex = MongoSanitizer.buildSafeRegexCondition(opValue);
+                safeOperations.$regex = safeRegex.$regex;
+                safeOperations.$options = safeRegex.$options;
+              } catch (error) {
+                logger.warn(`Invalid regex pattern rejected: ${opValue}`);
+                // Skip this operator if regex is invalid
+              }
+            } else {
+              safeOperations[op] = opValue;
+            }
+          }
+        }
+        
+        if (Object.keys(safeOperations).length > 0) {
+          sanitizedFilter[key] = safeOperations;
+        }
+      } else {
+        // If not an operator object, treat as literal value
+        sanitizedFilter[key] = { $eq: value };
+      }
+    }
+  }
+  
+  return sanitizedFilter;
 }
