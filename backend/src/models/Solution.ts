@@ -1,5 +1,6 @@
 import mongoose, { Schema, model, Model } from 'mongoose';
 import { ISolution, SolutionStatus } from './interfaces';
+import validator from 'validator';
 
 /**
  * Solution schema definition
@@ -33,10 +34,19 @@ const solutionSchema = new Schema<ISolution>({
     trim: true,
     validate: {
       validator: function(v: string) {
-        // Basic URL validation
-        return /^(https?:\/\/)?([\da-z.-]+)\.([a-z.]{2,6})([/\w .-]*)*\/?$/.test(v);
+        // URL validation with 3rd party library for security
+        // and input length check to prevent DoS attacks
+        return v.length <= 2048 && validator.isURL(v, {
+          protocols: ['http', 'https'],
+          require_protocol: true,
+          require_valid_protocol: true,
+          require_tld: true,
+          allow_trailing_dot: false,
+          allow_protocol_relative_urls: false,
+          disallow_auth: true
+        });
       },
-      message: props => `${props.value} is not a valid URL`
+      message: props => `${props.value} is not a valid URL or exceeds maximum length`
     }
   },
   status: {
