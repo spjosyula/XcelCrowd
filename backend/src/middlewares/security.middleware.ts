@@ -100,6 +100,7 @@ export const enhancedCsrfProtection = (req: Request, res: Response, next: NextFu
  * Uses DOMPurify for robust protection against XSS attacks
  */
 function sanitizeHtml(html: string): string {
+<<<<<<< HEAD
   if (!html) return html;
   
   try {
@@ -131,6 +132,18 @@ function sanitizeHtml(html: string): string {
     logger.error('HTML sanitization error:', error);
     return ''; // Return empty string on error for maximum safety
   }
+=======
+  // Basic sanitization - in production, use a more robust library like DOMPurify
+  let sanitizedHtml = html;
+  let previousHtml;
+  do {
+    previousHtml = sanitizedHtml;
+    sanitizedHtml = sanitizedHtml.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
+  } while (sanitizedHtml !== previousHtml);
+  return sanitizedHtml
+    .replace(/javascript:/gi, 'removed:')
+    .replace(/on\w+=/gi, 'removed=');
+>>>>>>> a76ce04438ec3b0b9a6a1d597dd53c57748e1b3c
 }
 
 /**
