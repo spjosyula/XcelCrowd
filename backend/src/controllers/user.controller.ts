@@ -7,6 +7,8 @@ import { AuthRequest } from '../types/request.types';
 import { ApiError } from '../utils/api.error';
 import { UserRole } from '../models/interfaces';
 import { validateObjectId } from '../utils/mongoUtils';
+import { escapeRegExp } from 'lodash';
+import { logger } from '../utils/logger';
 
 /**
  * User controller for handling user-related HTTP requests
@@ -175,15 +177,15 @@ export class UserController extends BaseController {
   );
 
   /**
-   * Get all users (with filtering and pagination)
-   * @route GET /api/users
-   * @access Private - Admin only
-   */
+ * Get all users (with filtering and pagination)
+ * @route GET /api/users
+ * @access Private - Admin only
+ */
   public getAllUsers = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
       // Verify admin authorization
       this.verifyAuthorization(req, [UserRole.ADMIN]);
-  
+
       // Extract query parameters
       const {
         page = '1',
@@ -193,47 +195,47 @@ export class UserController extends BaseController {
         sortBy = 'createdAt',
         sortOrder = 'desc'
       } = req.query;
-  
+
       // Parse pagination params
       const pageNum = parseInt(page as string);
       const limitNum = parseInt(limit as string);
-  
-      // Construct filters
-      const filters: Record<string, any> = {};
-  
-      if (role) {
-        filters.role = role;
-      }
-  
-      if (searchTerm) {
-        const searchRegex = new RegExp(String(searchTerm), 'i');
-        filters.$or = [
-          { email: searchRegex },
-          { name: searchRegex }
-        ];
-      }
-  
-      // Call service to get users with pagination
-      const result = await this.userService.getUsers(
-        filters,
-        {
+
+      // Build search options object - delegate filtering to service layer
+      const searchOptions = {
+        role: role as UserRole | undefined,
+        searchTerm: searchTerm as string | undefined,
+        pagination: {
           page: pageNum,
           limit: limitNum,
           sortBy: sortBy as string,
           sortOrder: sortOrder as 'asc' | 'desc'
         }
-      );
-  
-      this.logAction('users-list', req.user!.userId, {
-        count: result.data.length, 
-        total: result.total, 
-      });
-  
-      this.sendPaginatedSuccess(
-        res,
-        result,
-        'Users retrieved successfully'
-      );
+      };
+
+      try {
+        // Call service to handle all business logic including search processing and pagination
+        const result = await this.userService.searchUsers(searchOptions);
+
+        this.logAction('users-list', req.user!.userId, {
+          count: result.data.length,
+          total: result.total,
+          hasSearch: !!searchTerm
+        });
+
+        this.sendPaginatedSuccess(
+          res,
+          result,
+          'Users retrieved successfully'
+        );
+      } catch (error) {
+        if (error instanceof ApiError) {
+          throw error;
+        }
+        throw new ApiError(
+          HTTP_STATUS.INTERNAL_SERVER_ERROR,
+          'An error occurred while retrieving users'
+        );
+      }
     }
   );
 }

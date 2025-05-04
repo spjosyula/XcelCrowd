@@ -5,6 +5,7 @@ import { HTTP_STATUS } from '../constants';
 import { logger } from '../utils/logger';
 import { executePaginatedQuery, PaginationOptions, PaginationResult } from '../utils/paginationUtils';
 import { BaseService } from './BaseService';
+import { escapeRegExp } from 'lodash';
 
 /**
  * Extended interface for user documents from MongoDB
@@ -43,34 +44,34 @@ export class UserService extends BaseService {
         // Validate input data
         if (!userData.email || !userData.password || !Object.values(UserRole).includes(userData.role)) {
           throw new ApiError(
-            HTTP_STATUS.BAD_REQUEST, 
+            HTTP_STATUS.BAD_REQUEST,
             'Invalid user data. Email, password and valid role are required',
             true,
             'INVALID_USER_DATA'
           );
         }
-  
+
         // Check if user with email already exists
         const existingUser = await User.findOne({ email: userData.email }).session(session);
         if (existingUser) {
           throw new ApiError(
-            HTTP_STATUS.CONFLICT, 
+            HTTP_STATUS.CONFLICT,
             'Email already in use',
             true,
             'EMAIL_ALREADY_EXISTS'
           );
         }
-  
+
         // Create new user with transaction support
         const users = await User.create([userData], { session });
         const user = users[0] as unknown as UserDocument;
-  
+
         logger.info(`User created successfully with ID: ${user._id}`, {
           userId: user._id.toString(),
           email: user.email,
           role: user.role
         });
-  
+
         return user;
       });
     } catch (error) {
@@ -79,10 +80,10 @@ export class UserService extends BaseService {
         role: userData.role,
         stack: error instanceof Error ? error.stack : undefined
       });
-  
+
       if (error instanceof ApiError) throw error;
       throw new ApiError(
-        HTTP_STATUS.INTERNAL_SERVER_ERROR, 
+        HTTP_STATUS.INTERNAL_SERVER_ERROR,
         'Failed to create user',
         true,
         'USER_CREATION_ERROR'
@@ -153,7 +154,7 @@ export class UserService extends BaseService {
         `Error retrieving users: ${error instanceof Error ? error.message : String(error)}`,
         { filters, error }
       );
-      
+
       throw new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Failed to retrieve users');
     }
   }
@@ -166,66 +167,66 @@ export class UserService extends BaseService {
       return await this.withTransaction(async (session) => {
         if (!Types.ObjectId.isValid(userId)) {
           throw new ApiError(
-            HTTP_STATUS.BAD_REQUEST, 
+            HTTP_STATUS.BAD_REQUEST,
             'Invalid user ID',
             true,
             'INVALID_USER_ID'
           );
         }
-  
+
         // Check if the user exists
         const existingUser = await User.findById(userId).session(session);
         if (!existingUser) {
           throw new ApiError(
-            HTTP_STATUS.NOT_FOUND, 
+            HTTP_STATUS.NOT_FOUND,
             'User not found',
             true,
             'USER_NOT_FOUND'
           );
         }
-  
+
         // Handle email update - check for uniqueness
         if (updateData.email && updateData.email !== existingUser.email) {
-          const emailExists = await User.findOne({ 
-            email: updateData.email, 
-            _id: { $ne: userId } 
+          const emailExists = await User.findOne({
+            email: updateData.email,
+            _id: { $ne: userId }
           }).session(session);
-  
+
           if (emailExists) {
             throw new ApiError(
-              HTTP_STATUS.CONFLICT, 
+              HTTP_STATUS.CONFLICT,
               'Email already in use by another account',
               true,
               'EMAIL_ALREADY_EXISTS'
             );
           }
         }
-  
+
         // Update the user with transaction support
         const updatedUser = await User.findByIdAndUpdate(
           userId,
           updateData,
-          { 
-            new: true, 
+          {
+            new: true,
             runValidators: true,
             session
           }
         );
-  
+
         if (!updatedUser) {
           throw new ApiError(
-            HTTP_STATUS.NOT_FOUND, 
+            HTTP_STATUS.NOT_FOUND,
             'User not found after update',
             true,
             'USER_UPDATE_FAILED'
           );
         }
-  
+
         logger.info(`User ${userId} updated successfully`, {
           userId,
           updatedFields: Object.keys(updateData).join(',')
         });
-  
+
         return updatedUser;
       });
     } catch (error) {
@@ -234,10 +235,10 @@ export class UserService extends BaseService {
         updateFields: Object.keys(updateData).join(','),
         stack: error instanceof Error ? error.stack : undefined
       });
-  
+
       if (error instanceof ApiError) throw error;
       throw new ApiError(
-        HTTP_STATUS.INTERNAL_SERVER_ERROR, 
+        HTTP_STATUS.INTERNAL_SERVER_ERROR,
         'Failed to update user',
         true,
         'USER_UPDATE_ERROR'
@@ -253,24 +254,24 @@ export class UserService extends BaseService {
       await this.withTransaction(async (session) => {
         if (!Types.ObjectId.isValid(userId)) {
           throw new ApiError(
-            HTTP_STATUS.BAD_REQUEST, 
+            HTTP_STATUS.BAD_REQUEST,
             'Invalid user ID',
             true,
             'INVALID_USER_ID'
           );
         }
-  
+
         // Get user with role to determine what to delete
         const user = await User.findById(userId).session(session);
         if (!user) {
           throw new ApiError(
-            HTTP_STATUS.NOT_FOUND, 
+            HTTP_STATUS.NOT_FOUND,
             'User not found',
             true,
             'USER_NOT_FOUND'
           );
         }
-  
+
         // Delete associated profile based on role
         switch (user.role) {
           case UserRole.STUDENT:
@@ -306,7 +307,7 @@ export class UserService extends BaseService {
           default:
             logger.warn(`Deleting user with unhandled role: ${user.role}`);
         }
-  
+
         // Delete user document
         await User.findByIdAndDelete(userId).session(session);
         logger.info(`User ${userId} successfully deleted`);
@@ -316,13 +317,100 @@ export class UserService extends BaseService {
         userId,
         stack: error instanceof Error ? error.stack : undefined
       });
-  
+
       if (error instanceof ApiError) throw error;
       throw new ApiError(
-        HTTP_STATUS.INTERNAL_SERVER_ERROR, 
+        HTTP_STATUS.INTERNAL_SERVER_ERROR,
         'Failed to delete user and associated data',
         true,
         'USER_DELETION_ERROR'
+      );
+    }
+  }
+
+  /**
+ * Search users with filtering, sanitization and pagination
+ * @param options - Search and pagination options
+ */
+  public async searchUsers(options: {
+    role?: UserRole;
+    searchTerm?: string;
+    pagination: PaginationOptions;
+  }): Promise<PaginationResult<IUser>> {
+    try {
+      // Build filters object
+      const filters: Record<string, any> = {};
+
+      // Add role filter if provided
+      if (options.role) {
+        filters.role = options.role;
+      }
+
+      // Process search term if provided with proper validation and sanitization
+      if (options.searchTerm) {
+        // Validate search term length to prevent DoS attacks
+        const searchString = String(options.searchTerm);
+        if (searchString.length > 100) {
+          throw new ApiError(
+            HTTP_STATUS.BAD_REQUEST,
+            'Search term exceeds maximum allowed length',
+            true,
+            'SEARCH_TERM_TOO_LONG'
+          );
+        }
+
+        try {
+          // Safely escape special regex characters to prevent ReDoS attacks
+          const sanitizedSearchTerm = escapeRegExp(searchString);
+
+          // Apply word boundary markers for better search precision
+          const safeRegex = new RegExp(`\\b${sanitizedSearchTerm}`, 'i');
+
+          // Apply search to relevant fields
+          filters.$or = [
+            { email: safeRegex },
+            { name: safeRegex }
+          ];
+
+          // Security audit logging for search operations
+          logger.debug(`User search performed with term: ${searchString.substring(0, 20)}${searchString.length > 20 ? '...' : ''}`);
+        } catch (error) {
+          // Log potential attack attempts
+          logger.warn(`Potentially malicious search term rejected: ${searchString.substring(0, 20)}...`, {
+            error: error instanceof Error ? error.message : String(error)
+          });
+
+          throw new ApiError(
+            HTTP_STATUS.BAD_REQUEST,
+            'Invalid search term',
+            true,
+            'INVALID_SEARCH_TERM'
+          );
+        }
+      }
+
+      // Execute paginated query with all filters
+      return await executePaginatedQuery<IUser>(
+        User,
+        filters,
+        options.pagination
+      );
+    } catch (error) {
+      logger.error(
+        `Error searching users: ${error instanceof Error ? error.message : String(error)}`,
+        {
+          searchTerm: options.searchTerm?.substring(0, 20),
+          role: options.role,
+          page: options.pagination.page
+        }
+      );
+
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(
+        HTTP_STATUS.INTERNAL_SERVER_ERROR,
+        'Failed to search users',
+        true,
+        'USER_SEARCH_ERROR'
       );
     }
   }
