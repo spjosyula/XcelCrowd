@@ -4,10 +4,9 @@ import { ApiError } from '../utils/api.error';
 import { HTTP_STATUS } from '../constants';
 import { UserRole } from '../models/interfaces';
 import { AuthorizationService, OwnershipCheck, RelationshipCheck } from '../utils/authorization';
-import { Types } from 'mongoose';
 import { logger } from '../utils/logger';
 import { PaginationResult } from '../utils/paginationUtils';
-import { validateObjectId as validateMongoId } from '../utils/mongoUtils';
+import { MongoSanitizer } from '../utils/mongo.sanitize';
 
 /**
  * Base controller with standardized responses and authorization methods
@@ -195,11 +194,11 @@ export class BaseController {
 
   /**
    * Validate that a string is a valid MongoDB ObjectId
-   * @deprecated Use validateObjectId from mongoUtils instead
+   * @deprecated Use MongoSanitizer.validateObjectId instead
    */
   protected validateObjectId(id: string, resourceName: string): void {
     // Delegate to the centralized implementation
-    validateMongoId(id, resourceName);
+    MongoSanitizer.validateObjectId(id, resourceName);
   }
 
   /**

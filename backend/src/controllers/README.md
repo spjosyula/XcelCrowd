@@ -82,7 +82,7 @@ Use standardized response methods:
 
 ## Validation
 
-1. Use `validateObjectId` for MongoDB ID validation
+1. Use `MongoSanitizer.validateObjectId` for MongoDB ID validation
 2. Delegate complex validation to services
 
 ## Authorization Levels

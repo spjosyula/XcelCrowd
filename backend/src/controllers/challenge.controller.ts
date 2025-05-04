@@ -7,7 +7,7 @@ import { catchAsync } from '../utils/catch.async';
 import { BaseController } from './BaseController';
 import { AuthRequest } from '../types/request.types';
 import { HTTP_STATUS } from '../constants';
-import { validateObjectId } from '../utils/mongoUtils';
+import { MongoSanitizer } from '../utils/mongo.sanitize';
 import { logger } from '../utils/logger';
 
 /**
@@ -186,7 +186,7 @@ export class ChallengeController extends BaseController {
       this.verifyAuthorization(req);
 
       const { id } = req.params;
-      validateObjectId(id, 'challenge');
+      MongoSanitizer.validateObjectId(id, 'challenge');
 
       // Get user role and profile information for visibility checks
       const userRole = req.user!.role as UserRole;

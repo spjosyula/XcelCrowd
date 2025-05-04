@@ -12,7 +12,7 @@ import { catchAsync } from '../utils/catch.async';
 import { BaseController } from './BaseController';
 import { AuthRequest } from '../types/request.types';
 import { UserRole } from '../models/interfaces';
-import { validateObjectId } from '../utils/mongoUtils';
+import { MongoSanitizer } from '../utils/mongo.sanitize';
 
 /**
  * Profile controller for handling profile-related HTTP requests
@@ -45,7 +45,7 @@ export class ProfileController extends BaseController {
       );
       
       // Validate userId format using the centralized utility
-      validateObjectId(userId, 'user');
+      MongoSanitizer.validateObjectId(userId, 'user');
       
       // Prepare data and delegate to service
       const profileData: CreateStudentProfileDTO = {
@@ -78,7 +78,7 @@ export class ProfileController extends BaseController {
       const { userId } = req.params;
       
       // Validate userId format using the centralized utility
-      validateObjectId(userId, 'user');
+      MongoSanitizer.validateObjectId(userId, 'user');
       
       // Authorization: check if user can access this profile
       await this.profileService.authorizeProfileReadAccess(
@@ -184,7 +184,7 @@ export class ProfileController extends BaseController {
       const { userId } = req.params;
       
       // Validate userId format using the centralized utility
-      validateObjectId(userId, 'user');
+      MongoSanitizer.validateObjectId(userId, 'user');
       
       // Authorization: check if user can access this profile
       await this.profileService.authorizeProfileReadAccess(

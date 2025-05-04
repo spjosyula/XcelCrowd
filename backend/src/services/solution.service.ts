@@ -16,10 +16,8 @@ import {
 } from '../models/interfaces';
 import { ApiError } from '../utils/api.error';
 import { logger } from '../utils/logger';
-import { isValidTransition, transitionSolutionState } from '../utils/solution-state-manager';
 import { executePaginatedQuery, PaginationOptions, PaginationResult } from '../utils/paginationUtils';
-import { validateObjectId } from '../utils/mongoUtils';
-import { ArchitectProfile } from '../models';
+import { MongoSanitizer } from '../utils/mongo.sanitize';
 import { BaseService } from './BaseService';
 
 
@@ -82,7 +80,7 @@ export class SolutionService extends BaseService {
           idempotencyKey,
           student: studentId
         }).populate('challenge').populate('student');
-        
+
         if (existingSolutionWithKey) {
           logger.info(`Found existing solution with idempotency key ${idempotencyKey}`, {
             studentId,
@@ -221,24 +219,59 @@ export class SolutionService extends BaseService {
     }
   ): Promise<{ solutions: ISolution[]; total: number; page: number; limit: number }> {
     try {
-      if (!Types.ObjectId.isValid(studentId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid student ID format');
-      }
+      // Sanitize the studentId
+      const sanitizedStudentId = MongoSanitizer.sanitizeObjectId(studentId, 'student');
 
       logger.debug(`Retrieving solutions for student ${studentId} with filters`, { filters });
 
       const session = await mongoose.startSession();
       session.startTransaction({ readConcern: { level: 'snapshot' } });
-      
+
       try {
         const { status, page = 1, limit = 10, sortBy = 'updatedAt', sortOrder = 'desc' } = filters;
-        const query: Record<string, any> = { student: new Types.ObjectId(studentId) };
-        if (status) query.status = status;
-        
-        const skip = (Number(page) - 1) * Number(limit);
-        const sort: Record<string, 1 | -1> = {};
-        sort[sortBy] = sortOrder === 'asc' ? 1 : -1;
 
+        // Build safe query with sanitized inputs
+        const query: Record<string, any> = {
+          student: sanitizedStudentId
+        };
+
+        // Safely add status filter if provided
+        if (status) {
+          // Validate status is a valid enum value
+          if (!Object.values(SolutionStatus).includes(status)) {
+            throw new ApiError(
+              HTTP_STATUS.BAD_REQUEST,
+              `Invalid solution status. Allowed values: ${Object.values(SolutionStatus).join(', ')}`,
+              true,
+              'INVALID_STATUS'
+            );
+          }
+          query.status = MongoSanitizer.buildEqualityCondition(status);
+        }
+
+        // Validate pagination parameters
+        const pageNum = Number(page);
+        const limitNum = Number(limit);
+
+        if (isNaN(pageNum) || pageNum < 1) {
+          throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Page must be a positive number');
+        }
+
+        if (isNaN(limitNum) || limitNum < 1 || limitNum > 100) {
+          throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Limit must be between 1 and 100');
+        }
+
+        const skip = (pageNum - 1) * limitNum;
+
+        // Validate and create sort options
+        const allowedSortFields = ['createdAt', 'updatedAt', 'title', 'status', 'score'];
+        const { sortBy: validatedSortBy, sortOrder: validatedSortOrder } =
+          MongoSanitizer.validateSortParams(sortBy, sortOrder, allowedSortFields);
+
+        const sort: Record<string, 1 | -1> = {};
+        sort[validatedSortBy] = validatedSortOrder;
+
+        // Execute the query with sanitized parameters
         const [solutions, total] = await Promise.all([
           Solution.find(query)
             .populate('challenge', 'title description difficulty status deadline')
@@ -246,7 +279,7 @@ export class SolutionService extends BaseService {
             .populate('selectedBy', 'firstName lastName')
             .sort(sort)
             .skip(skip)
-            .limit(Number(limit))
+            .limit(limitNum)
             .lean({ virtuals: true })
             .session(session),
           Solution.countDocuments(query).session(session)
@@ -254,12 +287,12 @@ export class SolutionService extends BaseService {
 
         await session.commitTransaction();
         session.endSession();
-        
+
         return {
           solutions,
           total,
-          page: Number(page),
-          limit: Number(limit)
+          page: pageNum,
+          limit: limitNum
         };
       } catch (error) {
         await session.abortTransaction();
@@ -306,10 +339,8 @@ export class SolutionService extends BaseService {
     } = {}
   ): Promise<{ solutions: ISolution[]; total: number; page: number; limit: number }> {
     try {
-      // Validate challenge ID
-      if (!Types.ObjectId.isValid(challengeId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid challenge ID format');
-      }
+      // Sanitize challenge ID
+      const sanitizedChallengeId = MongoSanitizer.sanitizeObjectId(challengeId, 'challenge');
 
       logger.debug(`Retrieving solutions for challenge ${challengeId}`, {
         userId,
@@ -318,7 +349,7 @@ export class SolutionService extends BaseService {
       });
 
       // Check if challenge exists with optimized query that includes needed fields
-      const challenge = await Challenge.findById(challengeId)
+      const challenge = await Challenge.findById(sanitizedChallengeId)
         .select('company status claimedBy visibility allowedInstitutions')
         .lean();
 
@@ -327,6 +358,7 @@ export class SolutionService extends BaseService {
       }
 
       let architectProfileId: string | null = null;
+
 
       // Role-based Authorization logic with challenge claiming checks
       if (userRole === UserRole.COMPANY) {
@@ -414,7 +446,7 @@ export class SolutionService extends BaseService {
         }
       }
 
-      // Build query based on filters with proper type safety
+      // Build query based on filters with proper sanitization
       const {
         status,
         search,
@@ -425,27 +457,46 @@ export class SolutionService extends BaseService {
         sortOrder = 'desc'
       } = filters;
 
-      const query: Record<string, any> = { challenge: new Types.ObjectId(challengeId) };
+      // Start with a secure base query
+      const query: Record<string, any> = {
+        challenge: sanitizedChallengeId
+      };
 
-      // Add status filter if specified
+      // Add status filter with sanitization
       if (status) {
-        query.status = status;
+        // Validate status is a valid enum value
+        if (!Object.values(SolutionStatus).includes(status)) {
+          throw new ApiError(
+            HTTP_STATUS.BAD_REQUEST,
+            `Invalid solution status. Allowed values: ${Object.values(SolutionStatus).join(', ')}`,
+            true,
+            'INVALID_STATUS'
+          );
+        }
+        query.status = MongoSanitizer.buildEqualityCondition(status);
       }
 
-      // Add search filter if specified
+      // Add search filter with sanitization for NoSQL injection prevention
       if (search && search.trim()) {
+        const safeRegex = MongoSanitizer.buildSafeRegexCondition(search);
+
         query.$or = [
-          { title: { $regex: search, $options: 'i' } },
-          { description: { $regex: search, $options: 'i' } },
-          { tags: { $regex: search, $options: 'i' } }
+          { title: safeRegex },
+          { description: safeRegex },
+          { tags: safeRegex }
         ];
       }
 
-      // Add score range filter if specified
+      // Add score range filter with validation
       if (score) {
-        query.score = {};
-        if (score.min !== undefined) query.score.$gte = score.min;
-        if (score.max !== undefined) query.score.$lte = score.max;
+        const scoreRange = MongoSanitizer.buildNumericRangeCondition(
+          score.min,
+          score.max
+        );
+
+        if (Object.keys(scoreRange).length > 0) {
+          query.score = scoreRange;
+        }
       }
 
       // For architect-specific filtering based on claiming status
@@ -482,12 +533,27 @@ export class SolutionService extends BaseService {
         }
       }
 
-      // Calculate pagination parameters
-      const skip = (Number(page) - 1) * Number(limit);
+      // Validate pagination parameters
+      const pageNum = Number(page);
+      const limitNum = Number(limit);
 
-      // Create sort object with type safety
+      if (isNaN(pageNum) || pageNum < 1) {
+        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Page must be a positive number');
+      }
+
+      if (isNaN(limitNum) || limitNum < 1 || limitNum > 100) {
+        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Limit must be between 1 and 100');
+      }
+
+      const skip = (pageNum - 1) * limitNum;
+
+      // Validate and create sort options
+      const allowedSortFields = ['createdAt', 'updatedAt', 'title', 'status', 'score'];
+      const { sortBy: validatedSortBy, sortOrder: validatedSortOrder } =
+        MongoSanitizer.validateSortParams(sortBy, sortOrder, allowedSortFields);
+
       const sort: Record<string, 1 | -1> = {};
-      sort[sortBy] = sortOrder === 'asc' ? 1 : -1;
+      sort[validatedSortBy] = validatedSortOrder;
 
       // Execute query with pagination using Promise.all for efficiency
       const [solutions, total] = await Promise.all([
@@ -497,8 +563,8 @@ export class SolutionService extends BaseService {
           .populate('selectedBy', 'firstName lastName')
           .sort(sort)
           .skip(skip)
-          .limit(Number(limit))
-          .lean({ virtuals: true }), // Use lean for better performance
+          .limit(limitNum)
+          .lean({ virtuals: true }),
         Solution.countDocuments(query)
       ]);
 
@@ -513,9 +579,10 @@ export class SolutionService extends BaseService {
       return {
         solutions,
         total,
-        page: Number(page),
-        limit: Number(limit)
+        page: pageNum,
+        limit: limitNum
       };
+
     } catch (error) {
       logger.error(
         `Error getting challenge solutions: ${error instanceof Error ? error.message : String(error)}`,
@@ -1241,7 +1308,8 @@ export class SolutionService extends BaseService {
    */
   async selectSolutionAsWinner(
     solutionId: string,
-    companyId: string
+    companyId: string,
+   // verificationToken: string -> TODO: Implement verification token logic to prevent cross-site request forgery (CSRF) attacks
   ): Promise<ISolution> {
     try {
       // Validate IDs upfront to fail fast
@@ -1419,7 +1487,7 @@ export class SolutionService extends BaseService {
 
       // Build match criteria with proper typing
       const matchCriteria: Record<string, any> = {
-        reviewedBy: new Types.ObjectId(architectId)
+        reviewedBy: MongoSanitizer.sanitizeObjectId(architectId, 'architect')
       };
 
       if (status) {

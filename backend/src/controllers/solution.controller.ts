@@ -4,9 +4,9 @@ import { HTTP_STATUS, SolutionStatus, UserRole } from '../models/interfaces';
 import { BaseController } from './BaseController';
 import { AuthRequest } from '../types/request.types';
 import { catchAsync } from '../utils/catch.async';
-import { validateObjectId } from '../utils/mongoUtils';
+import { MongoSanitizer } from '../utils/mongo.sanitize';
 import { logger } from '../utils/logger';
-import { ProfileService, profileService } from '../services/profile.service';
+
 
 /**
  * Controller for solution-related operations
@@ -15,12 +15,10 @@ import { ProfileService, profileService } from '../services/profile.service';
  */
 export class SolutionController extends BaseController {
   private readonly solutionService: SolutionService;
-  private readonly profileService: ProfileService;
 
   constructor() {
     super();
     this.solutionService = solutionService;
-    this.profileService = profileService;
   }
 
   /**
@@ -42,7 +40,7 @@ export class SolutionController extends BaseController {
       
       try {
         // Prioritize challengeId if both are present, otherwise try challenge
-        effectiveChallengeId = validateObjectId(
+        effectiveChallengeId = MongoSanitizer.validateObjectId(
           challengeId || challenge, 
           'challenge',
           {
