@@ -5,6 +5,13 @@ import { ApiError } from '../utils/api.error';
 import { HTTP_STATUS } from '../constants';
 import { logger } from '../utils/logger';
 
+import createDOMPurify from 'dompurify';
+import { JSDOM } from 'jsdom';
+
+// Initialize DOMPurify with JSDOM
+const window = new JSDOM('').window;
+const DOMPurify = createDOMPurify(window);
+
 /**
  * XSS protection middleware
  */
@@ -90,13 +97,40 @@ export const enhancedCsrfProtection = (req: Request, res: Response, next: NextFu
 
 /**
  * Helper function to sanitize HTML content
+ * Uses DOMPurify for robust protection against XSS attacks
  */
 function sanitizeHtml(html: string): string {
-  // Basic sanitization - in production, use a more robust library like DOMPurify
-  return html
-    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
-    .replace(/javascript:/gi, 'removed:')
-    .replace(/on\w+=/gi, 'removed=');
+  if (!html) return html;
+  
+  try {
+    // Primary sanitization using DOMPurify
+    // This handles all HTML elements, attributes, and malicious patterns
+    let sanitized = DOMPurify.sanitize(html, {
+      ALLOWED_TAGS: [], // Disallow all HTML tags for maximum security
+      ALLOWED_ATTR: [], // Disallow all attributes for maximum security
+      FORBID_TAGS: ['script', 'style', 'iframe', 'form', 'object', 'embed', 'meta'],
+      FORBID_ATTR: ['style', 'onerror', 'onload', 'onclick', 'onmouseover'],
+      SAFE_FOR_TEMPLATES: true,
+      WHOLE_DOCUMENT: false,
+      SANITIZE_DOM: true
+    });
+    
+    // Secondary defense - additional regex patterns for extra protection
+    sanitized = sanitized
+      // Remove any potentially remaining javascript: URLs
+      .replace(/javascript:/gi, 'removed:')
+      // Remove any event handlers  
+      .replace(/on\w+=/gi, 'removed=')
+      // Remove data: URLs that could contain base64-encoded scripts
+      .replace(/data:[^;]*;base64,/gi, 'removed:');
+      
+    logger.debug(`Sanitized input from "${html.slice(0, 30)}..." to "${sanitized.slice(0, 30)}..."`);
+    return sanitized;
+  } catch (error) {
+    // Log the error but return a safe value rather than failing
+    logger.error('HTML sanitization error:', error);
+    return ''; // Return empty string on error for maximum safety
+  }
 }
 
 /**
