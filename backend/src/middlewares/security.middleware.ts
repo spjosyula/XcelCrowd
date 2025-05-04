@@ -93,8 +93,13 @@ export const enhancedCsrfProtection = (req: Request, res: Response, next: NextFu
  */
 function sanitizeHtml(html: string): string {
   // Basic sanitization - in production, use a more robust library like DOMPurify
-  return html
-    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+  let sanitizedHtml = html;
+  let previousHtml;
+  do {
+    previousHtml = sanitizedHtml;
+    sanitizedHtml = sanitizedHtml.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
+  } while (sanitizedHtml !== previousHtml);
+  return sanitizedHtml
     .replace(/javascript:/gi, 'removed:')
     .replace(/on\w+=/gi, 'removed=');
 }
