@@ -91,12 +91,11 @@ export const enhancedCsrfProtection = (req: Request, res: Response, next: NextFu
 /**
  * Helper function to sanitize HTML content
  */
+import DOMPurify from 'dompurify';
+
 function sanitizeHtml(html: string): string {
-  // Basic sanitization - in production, use a more robust library like DOMPurify
-  return html
-    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
-    .replace(/javascript:/gi, 'removed:')
-    .replace(/on\w+=/gi, 'removed=');
+  // Use DOMPurify for robust HTML sanitization
+  return DOMPurify.sanitize(html);
 }
 
 /**
