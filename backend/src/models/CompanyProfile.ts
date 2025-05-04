@@ -19,7 +19,7 @@ const companyProfileSchema = new Schema<ICompanyProfile>({
   website: {
     type: String,
     trim: true,
-    match: [/^(https?:\/\/)?([\da-z.-]+)\.([a-z.]{2,6})([/\w .-]*)*\/?$/, 'Please enter a valid URL']
+    match: [/^(https?:\/\/)?([\da-z.-]+)\.([a-z.]{2,6})([\/\w\-]*)*\/?$/, 'Please enter a valid URL']
   },
   contactNumber: {
     type: String,
