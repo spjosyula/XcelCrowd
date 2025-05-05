@@ -4,6 +4,7 @@ import { ApiError } from '../utils/api.error';
 import { UserService } from './user.service';
 import { logger } from '../utils/logger';
 import { BaseService } from './BaseService';
+import { MongoSanitizer } from '../utils/mongo.sanitize';
 
 // Create an instance of UserService
 const userService = new UserService();
@@ -59,12 +60,15 @@ export class ProfileService extends BaseService {
                 throw ApiError.badRequest('User IDs are required', 'MISSING_USER_IDS');
             }
 
-            if (!Types.ObjectId.isValid(targetUserId)) {
-                throw ApiError.badRequest('Invalid target user ID format', 'INVALID_USER_ID');
-            }
+            // Use MongoSanitizer for enhanced validation and security
+            const sanitizedTargetUserId = MongoSanitizer.validateObjectId(
+                targetUserId, 
+                'user', 
+                { errorStatus: 400, additionalContext: 'During authorization check' }
+            );
 
-            // Verify self-operation
-            if (requestUserId !== targetUserId) {
+            // Verify self-operation with sanitized comparison
+            if (requestUserId !== sanitizedTargetUserId) {
                 throw ApiError.forbidden(
                     'You can only manage your own profile',
                     'SELF_OPERATION_REQUIRED'
@@ -96,13 +100,15 @@ export class ProfileService extends BaseService {
         profileType: 'student' | 'company'
     ): Promise<void> {
         try {
-            // Validate IDs
-            if (!Types.ObjectId.isValid(targetUserId)) {
-                throw ApiError.badRequest('Invalid target user ID format', 'INVALID_USER_ID');
-            }
+            // Enhanced validation with MongoSanitizer
+            const sanitizedTargetUserId = MongoSanitizer.validateObjectId(
+                targetUserId, 
+                'user', 
+                { errorStatus: 400, additionalContext: 'During authorization check' }
+            );
 
-            // Self access is always allowed
-            const isSelfAccess = requestUserId === targetUserId;
+            // Self access is always allowed - use sanitized ID for comparison
+            const isSelfAccess = requestUserId === sanitizedTargetUserId;
 
             // Define role-based access patterns
             const allowedRoles: Record<string, UserRole[]> = {
@@ -120,7 +126,7 @@ export class ProfileService extends BaseService {
                 );
             }
 
-            logger.info(`User ${requestUserId} authorized to view ${profileType} profile of ${targetUserId}`);
+            logger.info(`User ${requestUserId} authorized to view ${profileType} profile of ${sanitizedTargetUserId}`);
         } catch (error) {
             logger.error(`Profile view authorization failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             if (error instanceof ApiError) throw error;
@@ -133,11 +139,14 @@ export class ProfileService extends BaseService {
      */
     public async validateUserRole(userId: string, expectedRole: UserRole): Promise<void> {
         try {
-            if (!Types.ObjectId.isValid(userId)) {
-                throw ApiError.badRequest('Invalid user ID format', 'INVALID_USER_ID');
-            }
+            // Use MongoSanitizer for enhanced validation
+            const sanitizedUserId = MongoSanitizer.validateObjectId(
+                userId, 
+                'user', 
+                { errorStatus: 400, additionalContext: 'During role validation' }
+            );
 
-            const user = await userService.getUserById(userId);
+            const user = await userService.getUserById(sanitizedUserId);
 
             if (user.role !== expectedRole) {
                 throw ApiError.badRequest(
@@ -146,7 +155,7 @@ export class ProfileService extends BaseService {
                 );
             }
 
-            logger.info(`User ${userId} role validated as ${expectedRole}`);
+            logger.info(`User ${sanitizedUserId} role validated as ${expectedRole}`);
         } catch (error) {
             logger.error(`User role validation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             if (error instanceof ApiError) throw error;
@@ -162,18 +171,25 @@ export class ProfileService extends BaseService {
      */
     public async profileExists(userId: string, profileType: 'student' | 'company'): Promise<boolean> {
         try {
-            if (!Types.ObjectId.isValid(userId)) {
-                throw ApiError.badRequest('Invalid user ID format', 'INVALID_USER_ID');
-            }
+            // Use MongoSanitizer for enhanced validation
+            const sanitizedUserId = MongoSanitizer.validateObjectId(
+                userId, 
+                'user', 
+                { errorStatus: 400, additionalContext: 'When checking profile existence' }
+            );
 
-            const userObjectId = new Types.ObjectId(userId);
+            // Convert to ObjectId after validation
+            const userObjectId = new Types.ObjectId(sanitizedUserId);
             let count = 0;
+
+            // Create secure queries using $eq operator to prevent injection
+            const query = { user: MongoSanitizer.buildEqualityCondition(userObjectId) };
 
             if (profileType === 'student') {
                 // More efficient count operation with only _id projection
-                count = await StudentProfile.countDocuments({ user: userObjectId }).limit(1);
+                count = await StudentProfile.countDocuments(query).limit(1);
             } else if (profileType === 'company') {
-                count = await CompanyProfile.countDocuments({ user: userObjectId }).limit(1);
+                count = await CompanyProfile.countDocuments(query).limit(1);
             }
 
             return count > 0;
@@ -194,29 +210,39 @@ export class ProfileService extends BaseService {
             return await this.withTransaction(async (session) => {
                 // Validate user exists and has correct role
                 await this.validateUserRole(profileData.userId, UserRole.STUDENT);
+                
+                // Sanitize user ID
+                const sanitizedUserId = MongoSanitizer.validateObjectId(
+                    profileData.userId,
+                    'user',
+                    { errorStatus: 400, additionalContext: 'When creating student profile' }
+                );
 
                 // Check if profile already exists
-                const profileExists = await this.profileExists(profileData.userId, 'student');
+                const profileExists = await this.profileExists(sanitizedUserId, 'student');
                 if (profileExists) {
                     throw ApiError.conflict('Student profile already exists', 'PROFILE_ALREADY_EXISTS');
                 }
 
+                // Sanitize profile data
+                const sanitizedProfile = this.sanitizeStudentProfileData(profileData);
+
                 // Create profile with session for transaction
                 const profile = await StudentProfile.create([{
-                    user: profileData.userId,
-                    firstName: profileData.firstName,
-                    lastName: profileData.lastName,
-                    university: profileData.university,
-                    resumeUrl: profileData.resumeUrl,
-                    bio: profileData.bio,
-                    profilePicture: profileData.profilePicture,
-                    skills: profileData.skills || [],
-                    interests: profileData.interests || [],
+                    user: sanitizedUserId,
+                    firstName: sanitizedProfile.firstName,
+                    lastName: sanitizedProfile.lastName,
+                    university: sanitizedProfile.university,
+                    resumeUrl: sanitizedProfile.resumeUrl,
+                    bio: sanitizedProfile.bio,
+                    profilePicture: sanitizedProfile.profilePicture,
+                    skills: sanitizedProfile.skills || [],
+                    interests: sanitizedProfile.interests || [],
                     followers: [],
                     following: []
                 }], { session });
 
-                logger.info(`Student profile created for user ${profileData.userId}`);
+                logger.info(`Student profile created for user ${sanitizedUserId}`);
 
                 // Note: MongoDB's create returns an array when passed options with session
                 return profile[0];
@@ -236,20 +262,100 @@ export class ProfileService extends BaseService {
     }
 
     /**
+     * Sanitize student profile data to prevent injection attacks
+     * @param profileData - Raw student profile data
+     * @returns Sanitized profile data
+     */
+    private sanitizeStudentProfileData(profileData: CreateStudentProfileDTO): CreateStudentProfileDTO {
+        const sanitized: CreateStudentProfileDTO = {
+            userId: profileData.userId // This gets sanitized separately
+        };
+
+        // Sanitize string fields
+        if (profileData.firstName !== undefined) {
+            sanitized.firstName = MongoSanitizer.sanitizeString(profileData.firstName, {
+                fieldName: 'First name',
+                maxLength: 100
+            });
+        }
+
+        if (profileData.lastName !== undefined) {
+            sanitized.lastName = MongoSanitizer.sanitizeString(profileData.lastName, {
+                fieldName: 'Last name',
+                maxLength: 100
+            });
+        }
+
+        if (profileData.university !== undefined) {
+            sanitized.university = MongoSanitizer.sanitizeString(profileData.university, {
+                fieldName: 'University',
+                maxLength: 200
+            });
+        }
+
+        if (profileData.bio !== undefined) {
+            sanitized.bio = MongoSanitizer.sanitizeString(profileData.bio, {
+                fieldName: 'Bio',
+                maxLength: 500,
+                required: false
+            });
+        }
+
+        // Sanitize URL fields
+        if (profileData.resumeUrl !== undefined) {
+            sanitized.resumeUrl = MongoSanitizer.sanitizeUrl(profileData.resumeUrl, {
+                fieldName: 'Resume URL',
+                required: false
+            });
+        }
+
+        if (profileData.profilePicture !== undefined) {
+            sanitized.profilePicture = MongoSanitizer.sanitizeUrl(profileData.profilePicture, {
+                fieldName: 'Profile picture URL',
+                required: false
+            });
+        }
+
+        // Sanitize array fields
+        if (profileData.skills && Array.isArray(profileData.skills)) {
+            sanitized.skills = profileData.skills.map(skill => 
+                MongoSanitizer.sanitizeString(skill, {
+                    fieldName: 'Skill',
+                    maxLength: 50
+                })
+            );
+        }
+
+        if (profileData.interests && Array.isArray(profileData.interests)) {
+            sanitized.interests = profileData.interests.map(interest => 
+                MongoSanitizer.sanitizeString(interest, {
+                    fieldName: 'Interest',
+                    maxLength: 50
+                })
+            );
+        }
+
+        return sanitized;
+    }
+
+    /**
      * Get student profile by user ID
      * @param userId - ID of the user
      * @returns Student profile
      */
     public async getStudentProfileByUserId(userId: string): Promise<IStudentProfile> {
         try {
-            if (!Types.ObjectId.isValid(userId)) {
-                throw ApiError.badRequest('Invalid user ID format', 'INVALID_USER_ID');
-            }
+            // Use MongoSanitizer for enhanced validation
+            const sanitizedUserId = MongoSanitizer.validateObjectId(
+                userId, 
+                'user', 
+                { errorStatus: 400, additionalContext: 'When fetching student profile' }
+            );
 
-            // Convert string to ObjectId to prevent injection
-            const userObjectId = new Types.ObjectId(userId);
+            // Create secure query using $eq operator to prevent injection
+            const query = { user: { $eq: sanitizedUserId } };
 
-            const profile = await StudentProfile.findOne({ user: userObjectId })
+            const profile = await StudentProfile.findOne(query)
                 .populate('user', 'email role createdAt')
                 .lean();
 
@@ -277,13 +383,35 @@ export class ProfileService extends BaseService {
     ): Promise<IStudentProfile> {
         try {
             return await this.withTransaction(async (session) => {
-                if (!Types.ObjectId.isValid(userId)) {
-                    throw ApiError.badRequest('Invalid user ID format', 'INVALID_USER_ID');
-                }
+                // Use MongoSanitizer for enhanced validation
+                const sanitizedUserId = MongoSanitizer.validateObjectId(
+                    userId, 
+                    'user', 
+                    { errorStatus: 400, additionalContext: 'When updating student profile' }
+                );
+
+                // Sanitize update data
+                const sanitizedUpdateData = this.sanitizeStudentProfileData({ 
+                    userId: sanitizedUserId, 
+                    ...updateData 
+                });
+                
+                // Remove userId from the update object
+                const { userId: _, ...updateFields } = sanitizedUpdateData;
+
+                // Create secure query and sanitized update operations
+                const query = { user: { $eq: sanitizedUserId } };
+                const sanitizedUpdate = MongoSanitizer.sanitizeUpdateOperations(
+                    { $set: updateFields },
+                    [
+                        'firstName', 'lastName', 'university', 'resumeUrl',
+                        'bio', 'profilePicture', 'skills', 'interests'
+                    ]
+                );
 
                 const profile = await StudentProfile.findOneAndUpdate(
-                    { user: userId },
-                    updateData,
+                    query,
+                    sanitizedUpdate,
                     { new: true, runValidators: true, session }
                 );
 
@@ -291,7 +419,7 @@ export class ProfileService extends BaseService {
                     throw ApiError.notFound('Student profile not found', 'PROFILE_NOT_FOUND');
                 }
 
-                logger.info(`Student profile updated for user ${userId}`);
+                logger.info(`Student profile updated for user ${sanitizedUserId}`);
 
                 return profile;
             });
@@ -310,6 +438,70 @@ export class ProfileService extends BaseService {
     }
 
     /**
+     * Sanitize company profile data to prevent injection attacks
+     * @param profileData - Raw company profile data
+     * @returns Sanitized profile data
+     */
+    private sanitizeCompanyProfileData(profileData: CreateCompanyProfileDTO): CreateCompanyProfileDTO {
+        const sanitized: CreateCompanyProfileDTO = {
+            userId: profileData.userId // This gets sanitized separately
+        };
+
+        // Sanitize string fields
+        if (profileData.companyName !== undefined) {
+            sanitized.companyName = MongoSanitizer.sanitizeString(profileData.companyName, {
+                fieldName: 'Company name',
+                maxLength: 200
+            });
+        }
+
+        // Sanitize URL fields
+        if (profileData.website !== undefined) {
+            sanitized.website = MongoSanitizer.sanitizeUrl(profileData.website, {
+                fieldName: 'Website URL',
+                required: false
+            });
+        }
+
+        // Sanitize other fields
+        if (profileData.contactNumber !== undefined) {
+            sanitized.contactNumber = MongoSanitizer.sanitizeString(profileData.contactNumber, {
+                fieldName: 'Contact number',
+                maxLength: 20,
+                required: false,
+                pattern: /^[+\d\s()-]{5,20}$/,
+                patternErrorMessage: 'Contact number must be a valid phone number format'
+            });
+        }
+
+        if (profileData.industry !== undefined) {
+            sanitized.industry = MongoSanitizer.sanitizeString(profileData.industry, {
+                fieldName: 'Industry',
+                maxLength: 100,
+                required: false
+            });
+        }
+
+        if (profileData.description !== undefined) {
+            sanitized.description = MongoSanitizer.sanitizeString(profileData.description, {
+                fieldName: 'Description',
+                maxLength: 1000,
+                required: false
+            });
+        }
+
+        if (profileData.address !== undefined) {
+            sanitized.address = MongoSanitizer.sanitizeString(profileData.address, {
+                fieldName: 'Address',
+                maxLength: 300,
+                required: false
+            });
+        }
+
+        return sanitized;
+    }
+
+    /**
      * Create company profile
      * @param profileData - Company profile data
      * @returns Created company profile
@@ -319,25 +511,35 @@ export class ProfileService extends BaseService {
             return await this.withTransaction(async (session) => {
                 // Validate user exists and has correct role
                 await this.validateUserRole(profileData.userId, UserRole.COMPANY);
+                
+                // Sanitize user ID
+                const sanitizedUserId = MongoSanitizer.validateObjectId(
+                    profileData.userId,
+                    'user',
+                    { errorStatus: 400, additionalContext: 'When creating company profile' }
+                );
 
                 // Check if profile already exists
-                const profileExists = await this.profileExists(profileData.userId, 'company');
+                const profileExists = await this.profileExists(sanitizedUserId, 'company');
                 if (profileExists) {
                     throw ApiError.conflict('Company profile already exists', 'PROFILE_ALREADY_EXISTS');
                 }
 
+                // Sanitize profile data
+                const sanitizedProfile = this.sanitizeCompanyProfileData(profileData);
+
                 // Create profile with session for transaction
                 const profile = await CompanyProfile.create([{
-                    user: profileData.userId,
-                    companyName: profileData.companyName,
-                    website: profileData.website,
-                    contactNumber: profileData.contactNumber,
-                    industry: profileData.industry,
-                    description: profileData.description,
-                    address: profileData.address
+                    user: sanitizedUserId,
+                    companyName: sanitizedProfile.companyName,
+                    website: sanitizedProfile.website,
+                    contactNumber: sanitizedProfile.contactNumber,
+                    industry: sanitizedProfile.industry,
+                    description: sanitizedProfile.description,
+                    address: sanitizedProfile.address
                 }], { session });
 
-                logger.info(`Company profile created for user ${profileData.userId}`);
+                logger.info(`Company profile created for user ${sanitizedUserId}`);
 
                 // Return the created profile
                 return profile[0];
@@ -360,13 +562,19 @@ export class ProfileService extends BaseService {
      */
     public async getCompanyProfileByUserId(userId: string): Promise<ICompanyProfile> {
         try {
-            if (!Types.ObjectId.isValid(userId)) {
-                throw ApiError.badRequest('Invalid user ID format', 'INVALID_USER_ID');
-            }
+            // Use MongoSanitizer for enhanced validation
+            const sanitizedUserId = MongoSanitizer.validateObjectId(
+                userId, 
+                'user', 
+                { errorStatus: 400, additionalContext: 'When fetching company profile' }
+            );
 
-            const profile = await CompanyProfile.findOne({ user: userId })
+            // Create secure query using $eq operator to prevent injection
+            const query = { user: { $eq: sanitizedUserId } };
+
+            const profile = await CompanyProfile.findOne(query)
                 .populate('user', 'email role createdAt')
-                .lean(); // OPTIMIZED: Added lean() for better performance
+                .lean();
 
             if (!profile) {
                 throw ApiError.notFound('Company profile not found', 'PROFILE_NOT_FOUND');
@@ -392,13 +600,35 @@ export class ProfileService extends BaseService {
     ): Promise<ICompanyProfile> {
         try {
             return await this.withTransaction(async (session) => {
-                if (!Types.ObjectId.isValid(userId)) {
-                    throw ApiError.badRequest('Invalid user ID format', 'INVALID_USER_ID');
-                }
+                // Use MongoSanitizer for enhanced validation
+                const sanitizedUserId = MongoSanitizer.validateObjectId(
+                    userId, 
+                    'user', 
+                    { errorStatus: 400, additionalContext: 'When updating company profile' }
+                );
+
+                // Sanitize update data
+                const sanitizedUpdateData = this.sanitizeCompanyProfileData({ 
+                    userId: sanitizedUserId, 
+                    ...updateData 
+                });
+                
+                // Remove userId from the update object
+                const { userId: _, ...updateFields } = sanitizedUpdateData;
+
+                // Create secure query and sanitized update operations
+                const query = { user: { $eq: sanitizedUserId } };
+                const sanitizedUpdate = MongoSanitizer.sanitizeUpdateOperations(
+                    { $set: updateFields },
+                    [
+                        'companyName', 'website', 'contactNumber', 
+                        'industry', 'description', 'address'
+                    ]
+                );
 
                 const profile = await CompanyProfile.findOneAndUpdate(
-                    { user: userId },
-                    updateData,
+                    query,
+                    sanitizedUpdate,
                     { new: true, runValidators: true, session }
                 );
 
@@ -406,7 +636,7 @@ export class ProfileService extends BaseService {
                     throw ApiError.notFound('Company profile not found', 'PROFILE_NOT_FOUND');
                 }
 
-                logger.info(`Company profile updated for user ${userId}`);
+                logger.info(`Company profile updated for user ${sanitizedUserId}`);
 
                 return profile;
             });
@@ -428,12 +658,18 @@ export class ProfileService extends BaseService {
     public async deleteStudentProfile(userId: string): Promise<void> {
         try {
             await this.withTransaction(async (session) => {
-                if (!Types.ObjectId.isValid(userId)) {
-                    throw ApiError.badRequest('Invalid user ID format', 'INVALID_USER_ID');
-                }
+                // Use MongoSanitizer for enhanced validation
+                const sanitizedUserId = MongoSanitizer.validateObjectId(
+                    userId, 
+                    'user', 
+                    { errorStatus: 400, additionalContext: 'When deleting student profile' }
+                );
+
+                // Create secure query using $eq operator to prevent injection
+                const query = { user: { $eq: sanitizedUserId } };
 
                 const result = await StudentProfile.findOneAndDelete(
-                    { user: userId },
+                    query,
                     { session }
                 );
 
@@ -441,7 +677,7 @@ export class ProfileService extends BaseService {
                     throw ApiError.notFound('Student profile not found', 'PROFILE_NOT_FOUND');
                 }
 
-                logger.info(`Student profile deleted for user ${userId}`);
+                logger.info(`Student profile deleted for user ${sanitizedUserId}`);
             });
         } catch (error) {
             logger.error(
@@ -464,12 +700,18 @@ export class ProfileService extends BaseService {
     public async deleteCompanyProfile(userId: string): Promise<void> {
         try {
             await this.withTransaction(async (session) => {
-                if (!Types.ObjectId.isValid(userId)) {
-                    throw ApiError.badRequest('Invalid user ID format', 'INVALID_USER_ID');
-                }
+                // Use MongoSanitizer for enhanced validation
+                const sanitizedUserId = MongoSanitizer.validateObjectId(
+                    userId, 
+                    'user', 
+                    { errorStatus: 400, additionalContext: 'When deleting company profile' }
+                );
+
+                // Create secure query using $eq operator to prevent injection
+                const query = { user: { $eq: sanitizedUserId } };
 
                 const result = await CompanyProfile.findOneAndDelete(
-                    { user: userId },
+                    query,
                     { session }
                 );
 
@@ -477,7 +719,7 @@ export class ProfileService extends BaseService {
                     throw ApiError.notFound('Company profile not found', 'PROFILE_NOT_FOUND');
                 }
 
-                logger.info(`Company profile deleted for user ${userId}`);
+                logger.info(`Company profile deleted for user ${sanitizedUserId}`);
             });
         } catch (error) {
             logger.error(
@@ -497,11 +739,17 @@ export class ProfileService extends BaseService {
      */
     public async getStudentProfileId(userId: string): Promise<string> {
         try {
-            if (!Types.ObjectId.isValid(userId)) {
-                throw ApiError.badRequest('Invalid user ID format', 'INVALID_USER_ID');
-            }
+            // Use MongoSanitizer for enhanced validation
+            const sanitizedUserId = MongoSanitizer.validateObjectId(
+                userId, 
+                'user', 
+                { errorStatus: 400, additionalContext: 'When getting student profile ID' }
+            );
 
-            const profile = await StudentProfile.findOne({ user: userId }, '_id').lean();
+            // Create secure query using $eq operator to prevent injection
+            const query = { user: { $eq: sanitizedUserId } };
+
+            const profile = await StudentProfile.findOne(query, '_id').lean();
 
             if (!profile) {
                 throw ApiError.notFound('Student profile not found', 'PROFILE_NOT_FOUND');
@@ -522,11 +770,17 @@ export class ProfileService extends BaseService {
      */
     public async getCompanyProfileId(userId: string): Promise<string> {
         try {
-            if (!Types.ObjectId.isValid(userId)) {
-                throw ApiError.badRequest('Invalid user ID format', 'INVALID_USER_ID');
-            }
+            // Use MongoSanitizer for enhanced validation
+            const sanitizedUserId = MongoSanitizer.validateObjectId(
+                userId, 
+                'user', 
+                { errorStatus: 400, additionalContext: 'When getting company profile ID' }
+            );
 
-            const profile = await CompanyProfile.findOne({ user: userId }, '_id').lean();
+            // Create secure query using $eq operator to prevent injection
+            const query = { user: { $eq: sanitizedUserId } };
+
+            const profile = await CompanyProfile.findOne(query, '_id').lean();
 
             if (!profile) {
                 throw ApiError.notFound('Company profile not found', 'PROFILE_NOT_FOUND');
@@ -547,11 +801,17 @@ export class ProfileService extends BaseService {
      */
     public async getArchitectProfileId(userId: string): Promise<string> {
         try {
-            if (!Types.ObjectId.isValid(userId)) {
-                throw ApiError.badRequest('Invalid user ID format', 'INVALID_USER_ID');
-            }
+            // Use MongoSanitizer for enhanced validation
+            const sanitizedUserId = MongoSanitizer.validateObjectId(
+                userId, 
+                'user', 
+                { errorStatus: 400, additionalContext: 'When getting architect profile ID' }
+            );
 
-            const profile = await ArchitectProfile.findOne({ user: userId }, '_id').lean();
+            // Create secure query using $eq operator to prevent injection
+            const query = { user: { $eq: sanitizedUserId } };
+
+            const profile = await ArchitectProfile.findOne(query, '_id').lean();
 
             if (!profile) {
                 throw ApiError.notFound('Architect profile not found', 'PROFILE_NOT_FOUND');
