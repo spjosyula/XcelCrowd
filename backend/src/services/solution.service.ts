@@ -52,13 +52,9 @@ export class SolutionService extends BaseService {
     idempotencyKey?: string // Optional idempotency key for deduplication
   ): Promise<ISolution> {
     try {
-      // Validate IDs to fail fast
-      if (!Types.ObjectId.isValid(studentId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid student ID format');
-      }
-      if (!Types.ObjectId.isValid(challengeId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid challenge ID format');
-      }
+      // Sanitize and validate IDs using MongoSanitizer to prevent NoSQL injection
+      const sanitizedStudentId = MongoSanitizer.validateObjectId(studentId, 'student');
+      const sanitizedChallengeId = MongoSanitizer.validateObjectId(challengeId, 'challenge');
 
       // Validate solution data
       if (!solutionData.title || typeof solutionData.title !== 'string') {
@@ -71,19 +67,28 @@ export class SolutionService extends BaseService {
         throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Submission URL is required and must be a string');
       }
 
+      // Sanitize all string inputs
+      const sanitizedTitle = String(solutionData.title).trim();
+      const sanitizedDescription = String(solutionData.description).trim();
+      const sanitizedSubmissionUrl = String(solutionData.submissionUrl).trim();
+      
+      // Validate and sanitize tags if provided
+      const sanitizedTags = solutionData.tags?.map(tag => String(tag).trim()) || [];
+
       // Log submission attempt
-      logger.info(`Student ${studentId} attempting to submit solution for challenge ${challengeId}`);
+      logger.info(`Student ${sanitizedStudentId} attempting to submit solution for challenge ${sanitizedChallengeId}`);
 
       // If idempotencyKey provided, check for existing submission with this key
       if (idempotencyKey) {
+        const sanitizedKey = String(idempotencyKey).trim();
         const existingSolutionWithKey = await Solution.findOne({
-          idempotencyKey,
-          student: studentId
+          idempotencyKey: { $eq: sanitizedKey },
+          student: { $eq: new Types.ObjectId(sanitizedStudentId) }
         }).populate('challenge').populate('student');
 
         if (existingSolutionWithKey) {
-          logger.info(`Found existing solution with idempotency key ${idempotencyKey}`, {
-            studentId,
+          logger.info(`Found existing solution with idempotency key ${sanitizedKey}`, {
+            studentId: sanitizedStudentId,
             solutionId: existingSolutionWithKey._id
           });
           return existingSolutionWithKey;
@@ -93,7 +98,7 @@ export class SolutionService extends BaseService {
       return await this.withTransaction(async (session) => {
         // Increment the current participants count atomically with transaction support
         const updatedChallenge = await Challenge.findByIdAndUpdate(
-          challengeId,
+          sanitizedChallengeId,
           { $inc: { currentParticipants: 1 } },
           { session, new: true }
         );
@@ -112,7 +117,7 @@ export class SolutionService extends BaseService {
 
         // Check if student is eligible to participate (e.g., university restrictions)
         if (updatedChallenge.visibility === ChallengeVisibility.PRIVATE && updatedChallenge.allowedInstitutions?.length) {
-          const student = await StudentProfile.findById(studentId).session(session);
+          const student = await StudentProfile.findById(sanitizedStudentId).session(session);
           if (!student) {
             throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Student profile not found');
           }
@@ -128,10 +133,10 @@ export class SolutionService extends BaseService {
           }
         }
 
-        // Check for duplicate submission
+        // Check for duplicate submission using $eq operator to prevent injection
         const existingSolution = await Solution.findOne({
-          student: studentId,
-          challenge: challengeId
+          student: { $eq: new Types.ObjectId(sanitizedStudentId) },
+          challenge: { $eq: new Types.ObjectId(sanitizedChallengeId) }
         }).session(session);
 
         if (existingSolution) {
@@ -143,25 +148,25 @@ export class SolutionService extends BaseService {
           );
         }
 
-        // Create the solution
+        // Create the solution with sanitized data
         const solution = new Solution({
-          student: studentId,
-          challenge: challengeId,
-          title: solutionData.title,
-          description: solutionData.description,
-          submissionUrl: solutionData.submissionUrl,
+          student: new Types.ObjectId(sanitizedStudentId),
+          challenge: new Types.ObjectId(sanitizedChallengeId),
+          title: sanitizedTitle,
+          description: sanitizedDescription,
+          submissionUrl: sanitizedSubmissionUrl,
           status: SolutionStatus.SUBMITTED,
-          ...(solutionData.tags && { tags: solutionData.tags }),
-          ...(idempotencyKey && { idempotencyKey })
+          tags: sanitizedTags,
+          ...(idempotencyKey && { idempotencyKey: String(idempotencyKey).trim() })
         });
 
         await solution.save({ session });
 
         logger.info(
-          `Student ${studentId} successfully submitted solution ${solution._id} for challenge ${challengeId}`,
+          `Student ${sanitizedStudentId} successfully submitted solution ${solution._id} for challenge ${sanitizedChallengeId}`,
           {
-            studentId,
-            challengeId,
+            studentId: sanitizedStudentId,
+            challengeId: sanitizedChallengeId,
             solutionId: solution._id
           }
         );
@@ -219,20 +224,28 @@ export class SolutionService extends BaseService {
     }
   ): Promise<{ solutions: ISolution[]; total: number; page: number; limit: number }> {
     try {
-      // Sanitize the studentId
-      const sanitizedStudentId = MongoSanitizer.sanitizeObjectId(studentId, 'student');
+      // Sanitize and validate the studentId
+      const sanitizedStudentId = MongoSanitizer.validateObjectId(studentId, 'student');
 
-      logger.debug(`Retrieving solutions for student ${studentId} with filters`, { filters });
+      logger.debug(`Retrieving solutions for student ${sanitizedStudentId} with filters`, { filters });
 
       const session = await mongoose.startSession();
       session.startTransaction({ readConcern: { level: 'snapshot' } });
 
       try {
-        const { status, page = 1, limit = 10, sortBy = 'updatedAt', sortOrder = 'desc' } = filters;
+        // Sanitize pagination parameters
+        const { status } = filters;
+        const pageRaw = filters.page === undefined ? 1 : Number(filters.page);
+        const limitRaw = filters.limit === undefined ? 10 : Number(filters.limit);
+        
+        // Validate and sanitize page/limit values
+        const page = isNaN(pageRaw) || pageRaw < 1 ? 1 : Math.floor(pageRaw);
+        const limit = isNaN(limitRaw) || limitRaw < 1 ? 10 : Math.min(Math.floor(limitRaw), 100);
+        const skip = (page - 1) * limit;
 
-        // Build safe query with sanitized inputs
+        // Build safe query with $eq operator to prevent injection
         const query: Record<string, any> = {
-          student: sanitizedStudentId
+          student: { $eq: new Types.ObjectId(sanitizedStudentId) }
         };
 
         // Safely add status filter if provided
@@ -246,30 +259,22 @@ export class SolutionService extends BaseService {
               'INVALID_STATUS'
             );
           }
-          query.status = MongoSanitizer.buildEqualityCondition(status);
+          query.status = { $eq: status };
         }
 
-        // Validate pagination parameters
-        const pageNum = Number(page);
-        const limitNum = Number(limit);
-
-        if (isNaN(pageNum) || pageNum < 1) {
-          throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Page must be a positive number');
-        }
-
-        if (isNaN(limitNum) || limitNum < 1 || limitNum > 100) {
-          throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Limit must be between 1 and 100');
-        }
-
-        const skip = (pageNum - 1) * limitNum;
-
-        // Validate and create sort options
+        // Validate and sanitize sort parameters
         const allowedSortFields = ['createdAt', 'updatedAt', 'title', 'status', 'score'];
-        const { sortBy: validatedSortBy, sortOrder: validatedSortOrder } =
-          MongoSanitizer.validateSortParams(sortBy, sortOrder, allowedSortFields);
-
+        let sortBy = 'updatedAt'; // Default sort field
+        
+        if (filters.sortBy && allowedSortFields.includes(filters.sortBy)) {
+          sortBy = filters.sortBy;
+        }
+        
+        // Sanitize sort order
+        const sortOrder = filters.sortOrder === 'asc' ? 1 : -1;
+        
         const sort: Record<string, 1 | -1> = {};
-        sort[validatedSortBy] = validatedSortOrder;
+        sort[sortBy] = sortOrder;
 
         // Execute the query with sanitized parameters
         const [solutions, total] = await Promise.all([
@@ -279,7 +284,7 @@ export class SolutionService extends BaseService {
             .populate('selectedBy', 'firstName lastName')
             .sort(sort)
             .skip(skip)
-            .limit(limitNum)
+            .limit(limit)
             .lean({ virtuals: true })
             .session(session),
           Solution.countDocuments(query).session(session)
@@ -291,8 +296,8 @@ export class SolutionService extends BaseService {
         return {
           solutions,
           total,
-          page: pageNum,
-          limit: limitNum
+          page,
+          limit
         };
       } catch (error) {
         await session.abortTransaction();
@@ -340,10 +345,13 @@ export class SolutionService extends BaseService {
   ): Promise<{ solutions: ISolution[]; total: number; page: number; limit: number }> {
     try {
       // Sanitize challenge ID
-      const sanitizedChallengeId = MongoSanitizer.sanitizeObjectId(challengeId, 'challenge');
+      const sanitizedChallengeId = MongoSanitizer.validateObjectId(challengeId, 'challenge');
+      
+      // Sanitize userId for use in authorization
+      const sanitizedUserId = String(userId).trim();
 
-      logger.debug(`Retrieving solutions for challenge ${challengeId}`, {
-        userId,
+      logger.debug(`Retrieving solutions for challenge ${sanitizedChallengeId}`, {
+        userId: sanitizedUserId,
         userRole,
         filters
       });
@@ -359,16 +367,15 @@ export class SolutionService extends BaseService {
 
       let architectProfileId: string | null = null;
 
-
       // Role-based Authorization logic with challenge claiming checks
       if (userRole === UserRole.COMPANY) {
         // Companies can only view their own challenges
-        const companyId = await profileService.getCompanyProfileId(userId);
+        const companyId = await profileService.getCompanyProfileId(sanitizedUserId);
 
         if (challenge.company.toString() !== companyId) {
-          logger.warn(`Unauthorized challenge access attempt by company ${companyId} for challenge ${challengeId}`, {
+          logger.warn(`Unauthorized challenge access attempt by company ${companyId} for challenge ${sanitizedChallengeId}`, {
             companyId,
-            challengeId,
+            challengeId: sanitizedChallengeId,
             actualOwner: challenge.company.toString()
           });
 
@@ -379,13 +386,13 @@ export class SolutionService extends BaseService {
         }
       } else if (userRole === UserRole.ARCHITECT) {
         // Get the architect's profile ID for comparison
-        architectProfileId = await profileService.getArchitectProfileId(userId);
+        architectProfileId = await profileService.getArchitectProfileId(sanitizedUserId);
 
         // Verify challenge is in CLOSED status - architects can only view closed challenges
         if (challenge.status !== ChallengeStatus.CLOSED) {
           logger.warn(`Architect attempted to access solutions for non-closed challenge`, {
             architectId: architectProfileId,
-            challengeId,
+            challengeId: sanitizedChallengeId,
             challengeStatus: challenge.status
           });
 
@@ -401,7 +408,7 @@ export class SolutionService extends BaseService {
           if (challenge.claimedBy.toString() !== architectProfileId) {
             logger.warn(`Architect ${architectProfileId} attempted to access solutions for challenge claimed by another architect`, {
               architectId: architectProfileId,
-              challengeId,
+              challengeId: sanitizedChallengeId,
               claimedBy: challenge.claimedBy.toString()
             });
 
@@ -412,10 +419,10 @@ export class SolutionService extends BaseService {
           }
 
           // Architect is authorized - this is the claiming architect
-          logger.info(`Architect ${architectProfileId} accessing solutions for claimed challenge ${challengeId}`);
+          logger.info(`Architect ${architectProfileId} accessing solutions for claimed challenge ${sanitizedChallengeId}`);
         } else {
           // Challenge is not claimed yet - log this access for audit purposes
-          logger.info(`Architect ${architectProfileId} accessing solutions for unclaimed challenge ${challengeId}`);
+          logger.info(`Architect ${architectProfileId} accessing solutions for unclaimed challenge ${sanitizedChallengeId}`);
         }
       } else if (userRole === UserRole.STUDENT) {
         // Students can only see public challenges or restricted challenges they are eligible for
@@ -427,7 +434,7 @@ export class SolutionService extends BaseService {
         }
 
         if (challenge.visibility === ChallengeVisibility.ANONYMOUS && challenge.allowedInstitutions?.length) {
-          const studentId = await profileService.getStudentProfileId(userId);
+          const studentId = await profileService.getStudentProfileId(sanitizedUserId);
           const student = await StudentProfile.findById(studentId).select('university');
 
           if (!student) {
@@ -446,7 +453,8 @@ export class SolutionService extends BaseService {
         }
       }
 
-      // Build query based on filters with proper sanitization
+      // Sanitize and validate all filter parameters
+      // Get sanitized values with defaults
       const {
         status,
         search,
@@ -459,10 +467,10 @@ export class SolutionService extends BaseService {
 
       // Start with a secure base query
       const query: Record<string, any> = {
-        challenge: sanitizedChallengeId
+        challenge: { $eq: new Types.ObjectId(sanitizedChallengeId) }
       };
 
-      // Add status filter with sanitization
+      // Add status filter with validation and $eq operator
       if (status) {
         // Validate status is a valid enum value
         if (!Object.values(SolutionStatus).includes(status)) {
@@ -473,11 +481,12 @@ export class SolutionService extends BaseService {
             'INVALID_STATUS'
           );
         }
-        query.status = MongoSanitizer.buildEqualityCondition(status);
+        query.status = { $eq: status };
       }
 
       // Add search filter with sanitization for NoSQL injection prevention
       if (search && search.trim()) {
+        // Use MongoSanitizer for safe regex building
         const safeRegex = MongoSanitizer.buildSafeRegexCondition(search);
 
         query.$or = [
@@ -489,6 +498,7 @@ export class SolutionService extends BaseService {
 
       // Add score range filter with validation
       if (score) {
+        // Use MongoSanitizer for safe numeric range
         const scoreRange = MongoSanitizer.buildNumericRangeCondition(
           score.min,
           score.max
@@ -527,30 +537,25 @@ export class SolutionService extends BaseService {
 
           // Ensure architects only see solutions they are reviewing or should review
           query.$or = [
-            { status: SolutionStatus.SUBMITTED }, // Not yet claimed solutions
-            { reviewedBy: new Types.ObjectId(architectProfileId) } // Solutions being reviewed by this architect
+            { status: { $eq: SolutionStatus.SUBMITTED } }, // Not yet claimed solutions
+            { reviewedBy: { $eq: new Types.ObjectId(architectProfileId) } } // Solutions being reviewed by this architect
           ];
         }
       }
 
       // Validate pagination parameters
-      const pageNum = Number(page);
-      const limitNum = Number(limit);
+      const validatedPage = Math.max(1, Number(page) || 1);
+      const validatedLimit = Math.min(100, Math.max(1, Number(limit) || 10));
+      const skip = (validatedPage - 1) * validatedLimit;
 
-      if (isNaN(pageNum) || pageNum < 1) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Page must be a positive number');
-      }
-
-      if (isNaN(limitNum) || limitNum < 1 || limitNum > 100) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Limit must be between 1 and 100');
-      }
-
-      const skip = (pageNum - 1) * limitNum;
-
-      // Validate and create sort options
+      // Validate and sanitize sort parameters using MongoSanitizer
       const allowedSortFields = ['createdAt', 'updatedAt', 'title', 'status', 'score'];
       const { sortBy: validatedSortBy, sortOrder: validatedSortOrder } =
-        MongoSanitizer.validateSortParams(sortBy, sortOrder, allowedSortFields);
+        MongoSanitizer.validateSortParams(
+          typeof sortBy === 'string' ? sortBy : 'createdAt',
+          typeof sortOrder === 'string' ? sortOrder as 'asc' | 'desc' : 'desc',
+          allowedSortFields
+        );
 
       const sort: Record<string, 1 | -1> = {};
       sort[validatedSortBy] = validatedSortOrder;
@@ -563,24 +568,24 @@ export class SolutionService extends BaseService {
           .populate('selectedBy', 'firstName lastName')
           .sort(sort)
           .skip(skip)
-          .limit(limitNum)
+          .limit(validatedLimit)
           .lean({ virtuals: true }),
         Solution.countDocuments(query)
       ]);
 
-      logger.debug(`Retrieved ${solutions.length} solutions for challenge ${challengeId}`, {
-        challengeId,
+      logger.debug(`Retrieved ${solutions.length} solutions for challenge ${sanitizedChallengeId}`, {
+        challengeId: sanitizedChallengeId,
         userRole,
         totalCount: total,
-        page,
-        limit
+        page: validatedPage,
+        limit: validatedLimit
       });
 
       return {
         solutions,
         total,
-        page: pageNum,
-        limit: limitNum
+        page: validatedPage,
+        limit: validatedLimit
       };
 
     } catch (error) {
@@ -624,20 +629,13 @@ export class SolutionService extends BaseService {
     userRole: UserRole
   ): Promise<ISolution> {
     try {
-      // Validate solution ID
-      if (!Types.ObjectId.isValid(solutionId)) {
-        throw new ApiError(
-          HTTP_STATUS.BAD_REQUEST,
-          'Invalid solution ID format',
-          true,
-          'INVALID_ID_FORMAT'
-        );
-      }
+      // Sanitize and validate solution ID using MongoSanitizer
+      const sanitizedSolutionId = MongoSanitizer.validateObjectId(solutionId, 'solution');
 
-      logger.debug(`Getting solution ${solutionId} for user ${userId} with role ${userRole}`);
+      logger.debug(`Getting solution ${sanitizedSolutionId} for user ${userId} with role ${userRole}`);
 
       // Find the solution with all necessary populated fields
-      const solution = await Solution.findById(solutionId)
+      const solution = await Solution.findById(sanitizedSolutionId)
         .populate({
           path: 'challenge',
           populate: {
@@ -654,7 +652,7 @@ export class SolutionService extends BaseService {
       }
 
       // Normalize role for consistent comparison
-      const role = userRole.toLowerCase();
+      const role = String(userRole).toLowerCase();
 
       // Check permissions based on user role
       switch (role) {
@@ -668,10 +666,10 @@ export class SolutionService extends BaseService {
             : (solution.student as any)?._id?.toString();
 
           if (!solutionStudentId || solutionStudentId !== studentId) {
-            logger.warn(`Student ${studentId} attempted to access solution ${solutionId} they don't own`, {
+            logger.warn(`Student ${studentId} attempted to access solution ${sanitizedSolutionId} they don't own`, {
               attemptedAccessBy: studentId,
               actualOwner: solutionStudentId,
-              requestedSolution: solutionId
+              requestedSolution: sanitizedSolutionId
             });
 
             throw new ApiError(
@@ -681,6 +679,7 @@ export class SolutionService extends BaseService {
               'UNAUTHORIZED_SOLUTION_ACCESS'
             );
           }
+          break;
         }
         case 'company': {
           // Companies can only view solutions for challenges they own
@@ -709,7 +708,7 @@ export class SolutionService extends BaseService {
           const companyProfileId = await profileService.getCompanyProfileId(userId);
 
           if (companyId !== companyProfileId) {
-            logger.warn(`Company ${companyProfileId} attempted to access solution ${solutionId} for challenge owned by ${companyId}`);
+            logger.warn(`Company ${companyProfileId} attempted to access solution ${sanitizedSolutionId} for challenge owned by ${companyId}`);
             throw new ApiError(
               HTTP_STATUS.FORBIDDEN,
               'You do not have permission to view this solution',
@@ -766,12 +765,12 @@ export class SolutionService extends BaseService {
 
         case 'admin':
           // Admins can view all solutions
-          logger.debug(`Admin ${userId} accessing solution ${solutionId}`);
+          logger.debug(`Admin ${userId} accessing solution ${sanitizedSolutionId}`);
           break;
 
         default:
           // Unknown role
-          logger.warn(`Unknown role ${role} attempted to access solution ${solutionId}`);
+          logger.warn(`Unknown role ${role} attempted to access solution ${sanitizedSolutionId}`);
           throw new ApiError(
             HTTP_STATUS.FORBIDDEN,
             'You do not have permission to view this solution'
@@ -815,28 +814,23 @@ export class SolutionService extends BaseService {
     }
   ): Promise<ISolution> {
     try {
-      // Validate IDs upfront to fail fast
-      if (!Types.ObjectId.isValid(solutionId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid solution ID format');
-      }
+      // Sanitize and validate IDs using MongoSanitizer
+      const sanitizedSolutionId = MongoSanitizer.validateObjectId(solutionId, 'solution');
+      const sanitizedStudentId = MongoSanitizer.validateObjectId(studentId, 'student');
 
-      if (!Types.ObjectId.isValid(studentId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid student ID format');
-      }
-
-      logger.debug(`Student ${studentId} attempting to update solution ${solutionId}`);
+      logger.debug(`Student ${sanitizedStudentId} attempting to update solution ${sanitizedSolutionId}`);
 
       return await this.withTransaction(async (session) => {
-        // Get the solution
-        const solution = await Solution.findById(solutionId).session(session);
+        // Get the solution using $eq operator to prevent injection
+        const solution = await Solution.findById(sanitizedSolutionId).session(session);
 
         if (!solution) {
           throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Solution not found');
         }
 
-        // Verify ownership
-        if (solution.student.toString() !== studentId) {
-          logger.warn(`Student ${studentId} attempted to update solution ${solutionId} they don't own`);
+        // Verify ownership using $eq operator to prevent injection
+        if (solution.student.toString() !== sanitizedStudentId) {
+          logger.warn(`Student ${sanitizedStudentId} attempted to update solution ${sanitizedSolutionId} they don't own`);
           throw new ApiError(
             HTTP_STATUS.FORBIDDEN,
             'You do not have permission to update this solution'
@@ -874,10 +868,19 @@ export class SolutionService extends BaseService {
         const allowedFields = ['title', 'description', 'submissionUrl', 'tags'];
         const updates: Record<string, any> = {};
 
-        // Filter updates to only allowed fields
+        // Filter updates to only allowed fields and sanitize values
         for (const field of allowedFields) {
           if (field in updateData && updateData[field as keyof typeof updateData] !== undefined) {
-            updates[field] = updateData[field as keyof typeof updateData];
+            const value = updateData[field as keyof typeof updateData];
+            
+            // Sanitize based on field type
+            if (field === 'tags' && Array.isArray(value)) {
+              // Sanitize each tag 
+              updates[field] = (value as string[]).map(tag => String(tag).trim());
+            } else if (typeof value === 'string') {
+              // Sanitize string values
+              updates[field] = String(value).trim();
+            }
           }
         }
 
@@ -903,16 +906,16 @@ export class SolutionService extends BaseService {
         await solution.save({ session });
 
         logger.info(
-          `Student ${studentId} successfully updated solution ${solutionId}`,
+          `Student ${sanitizedStudentId} successfully updated solution ${sanitizedSolutionId}`,
           {
-            studentId,
-            solutionId,
+            studentId: sanitizedStudentId,
+            solutionId: sanitizedSolutionId,
             updatedFields: Object.keys(updates)
           }
         );
 
         // Return the updated solution (populated within transaction)
-        const populatedSolution = await Solution.findById(solutionId)
+        const populatedSolution = await Solution.findById(sanitizedSolutionId)
           .populate('challenge')
           .populate('student')
           .session(session);
@@ -964,7 +967,9 @@ export class SolutionService extends BaseService {
         throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Status is required');
       }
 
-      if (![SolutionStatus.APPROVED, SolutionStatus.REJECTED].includes(reviewData.status)) {
+      // Ensure status is a string and validate against allowed values
+      const status = String(reviewData.status);
+      if (![SolutionStatus.APPROVED, SolutionStatus.REJECTED].includes(status as SolutionStatus)) {
         throw new ApiError(
           HTTP_STATUS.BAD_REQUEST,
           'Status must be either approved or rejected'
@@ -977,6 +982,7 @@ export class SolutionService extends BaseService {
       }
 
       // Validate score if provided
+      let sanitizedScore: number | undefined = undefined;
       if (reviewData.score !== undefined) {
         const score = Number(reviewData.score);
         if (isNaN(score) || score < 0 || score > 100) {
@@ -985,10 +991,11 @@ export class SolutionService extends BaseService {
             'Score must be between 0 and 100'
           );
         }
+        sanitizedScore = score;
       }
 
       // Additional validation for specific status types
-      if (reviewData.status === SolutionStatus.APPROVED && reviewData.score === undefined) {
+      if (status === SolutionStatus.APPROVED && sanitizedScore === undefined) {
         throw new ApiError(
           HTTP_STATUS.BAD_REQUEST,
           'Score is required when approving a solution'
@@ -996,9 +1003,9 @@ export class SolutionService extends BaseService {
       }
 
       return {
-        status: reviewData.status as SolutionStatus.APPROVED | SolutionStatus.REJECTED,
+        status: status as SolutionStatus.APPROVED | SolutionStatus.REJECTED,
         feedback: reviewData.feedback,
-        score: reviewData.score
+        score: sanitizedScore
       };
     } catch (error) {
       logger.error(`Error validating review data: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -1018,20 +1025,15 @@ export class SolutionService extends BaseService {
     architectId: string
   ): Promise<ISolution> {
     try {
-      // Validate IDs upfront to fail fast
-      if (!Types.ObjectId.isValid(solutionId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid solution ID format');
-      }
+      // Sanitize and validate IDs using MongoSanitizer
+      const sanitizedSolutionId = MongoSanitizer.validateObjectId(solutionId, 'solution');
+      const sanitizedArchitectId = MongoSanitizer.validateObjectId(architectId, 'architect');
 
-      if (!Types.ObjectId.isValid(architectId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid architect ID format');
-      }
-
-      logger.debug(`Architect ${architectId} attempting to claim solution ${solutionId} for review`);
+      logger.debug(`Architect ${sanitizedArchitectId} attempting to claim solution ${sanitizedSolutionId} for review`);
 
       return await this.withTransaction(async (session) => {
-        // Find the solution without populating challenge first
-        const solution = await Solution.findById(solutionId).session(session);
+        // Find the solution using sanitized ID
+        const solution = await Solution.findById(sanitizedSolutionId).session(session);
 
         if (!solution) {
           throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Solution not found');
@@ -1055,18 +1057,8 @@ export class SolutionService extends BaseService {
           );
         }
 
-        // Check if solution is already claimed by another architect
-        if (solution.reviewedBy && solution.reviewedBy.toString() !== architectId) {
-          throw new ApiError(
-            HTTP_STATUS.CONFLICT,
-            'This solution has already been claimed by another architect',
-            true,
-            'SOLUTION_ALREADY_CLAIMED'
-          );
-        }
-
-        // Check if solution is already claimed by another architect
-        if (solution.reviewedBy && solution.reviewedBy.toString() !== architectId) {
+        // Check if solution is already claimed by another architect using $eq operator
+        if (solution.reviewedBy && solution.reviewedBy.toString() !== sanitizedArchitectId) {
           throw new ApiError(
             HTTP_STATUS.CONFLICT,
             'This solution has already been claimed by another architect',
@@ -1083,14 +1075,14 @@ export class SolutionService extends BaseService {
           );
         }
 
-        // Apply the state transition
+        // Apply the state transition with sanitized ID
         solution.status = SolutionStatus.UNDER_REVIEW;
-        solution.reviewedBy = new Types.ObjectId(architectId);
+        solution.reviewedBy = new Types.ObjectId(sanitizedArchitectId);
         solution.updatedAt = new Date();
 
         await solution.save({ session });
 
-        logger.info(`Solution ${solutionId} claimed for review by architect ${architectId}`);
+        logger.info(`Solution ${sanitizedSolutionId} claimed for review by architect ${sanitizedArchitectId}`);
 
         // Populate within transaction
         const populatedSolution = await Solution.findById(solution._id)
@@ -1144,25 +1136,23 @@ export class SolutionService extends BaseService {
     }
   ): Promise<ISolution> {
     try {
-      // Validate IDs upfront to fail fast
-      if (!Types.ObjectId.isValid(solutionId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid solution ID format');
-      }
+      // Sanitize and validate IDs using MongoSanitizer
+      const sanitizedSolutionId = MongoSanitizer.validateObjectId(solutionId, 'solution');
+      const sanitizedArchitectId = MongoSanitizer.validateObjectId(architectId, 'architect');
 
-      if (!Types.ObjectId.isValid(architectId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid architect ID format');
-      }
-
-      logger.debug(`Architect ${architectId} attempting to review solution ${solutionId}`, {
+      logger.debug(`Architect ${sanitizedArchitectId} attempting to review solution ${sanitizedSolutionId}`, {
         reviewStatus: reviewData.status
       });
 
       // Validate review data
       const validatedData = this.validateReviewData(reviewData);
+      
+      // Sanitize feedback
+      const sanitizedFeedback = String(validatedData.feedback).trim();
 
       return await this.withTransaction(async (session) => {
-        // Find the solution - OPTIMIZATION: Retrieve with a single query including references
-        const solution = await Solution.findById(solutionId)
+        // Find the solution using sanitized ID
+        const solution = await Solution.findById(sanitizedSolutionId)
           .populate('challenge')
           .session(session);
 
@@ -1170,8 +1160,8 @@ export class SolutionService extends BaseService {
           throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Solution not found');
         }
 
-        // Verify reviewer is the claiming architect
-        if (!solution.reviewedBy || solution.reviewedBy.toString() !== architectId) {
+        // Verify reviewer is the claiming architect using $eq operator to prevent injection
+        if (!solution.reviewedBy || solution.reviewedBy.toString() !== sanitizedArchitectId) {
           throw new ApiError(
             HTTP_STATUS.FORBIDDEN,
             'Only the architect who claimed this solution can review it'
@@ -1187,7 +1177,7 @@ export class SolutionService extends BaseService {
           // Use findOneAndUpdate with conditional update instead of separate operations
           const challengeUpdate = await Challenge.findOneAndUpdate(
             {
-              _id: challengeId,
+              _id: { $eq: challengeId },
               $or: [
                 { maxApprovedSolutions: { $exists: false } },
                 { maxApprovedSolutions: null },
@@ -1250,17 +1240,21 @@ export class SolutionService extends BaseService {
           );
         }
 
-        // Apply the state change
+        // Apply the state change with sanitized data
         solution.status = validatedData.status;
-        solution.feedback = validatedData.feedback;
-        if (validatedData.score !== undefined) solution.score = validatedData.score;
+        solution.feedback = sanitizedFeedback;
+        if (validatedData.score !== undefined) {
+          // Ensure score is a valid number within allowed range
+          const sanitizedScore = Math.min(Math.max(0, Number(validatedData.score)), 100);
+          solution.score = sanitizedScore;
+        }
         solution.reviewedAt = new Date();
 
         await solution.save({ session });
 
         logger.info(
-          `Solution ${solutionId} ${validatedData.status === SolutionStatus.APPROVED ? 'approved' : 'rejected'} ` +
-          `by architect ${architectId}`
+          `Solution ${sanitizedSolutionId} ${validatedData.status === SolutionStatus.APPROVED ? 'approved' : 'rejected'} ` +
+          `by architect ${sanitizedArchitectId}`
         );
 
         // OPTIMIZATION: Use a single query with specific field projection
@@ -1312,20 +1306,15 @@ export class SolutionService extends BaseService {
    // verificationToken: string -> TODO: Implement verification token logic to prevent cross-site request forgery (CSRF) attacks
   ): Promise<ISolution> {
     try {
-      // Validate IDs upfront to fail fast
-      if (!Types.ObjectId.isValid(solutionId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid solution ID format');
-      }
+      // Sanitize and validate IDs using MongoSanitizer
+      const sanitizedSolutionId = MongoSanitizer.validateObjectId(solutionId, 'solution');
+      const sanitizedCompanyId = MongoSanitizer.validateObjectId(companyId, 'company');
 
-      if (!Types.ObjectId.isValid(companyId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid company ID format');
-      }
-
-      logger.debug(`Company ${companyId} attempting to select solution ${solutionId} as winner`);
+      logger.debug(`Company ${sanitizedCompanyId} attempting to select solution ${sanitizedSolutionId} as winner`);
 
       return await this.withTransaction(async (session) => {
-        // Find the solution
-        const solution = await Solution.findById(solutionId)
+        // Find the solution using sanitized ID
+        const solution = await Solution.findById(sanitizedSolutionId)
           .populate({
             path: 'challenge',
             populate: {
@@ -1364,8 +1353,8 @@ export class SolutionService extends BaseService {
           ? challenge.company
           : (challenge.company as any)._id?.toString();
 
-        if (challengeCompanyId !== companyId) {
-          logger.warn(`Company ${companyId} attempted to select a solution for challenge owned by ${challengeCompanyId}`);
+        if (challengeCompanyId !== sanitizedCompanyId) {
+          logger.warn(`Company ${sanitizedCompanyId} attempted to select a solution for challenge owned by ${challengeCompanyId}`);
           throw new ApiError(
             HTTP_STATUS.FORBIDDEN,
             'You do not have permission to select a solution for this challenge'
@@ -1398,10 +1387,10 @@ export class SolutionService extends BaseService {
           }
         }
 
-        // Apply the status change
+        // Apply the status change with sanitized company ID
         solution.status = SolutionStatus.SELECTED;
         solution.selectedAt = new Date();
-        solution.selectedBy = new Types.ObjectId(companyId);
+        solution.selectedBy = new Types.ObjectId(sanitizedCompanyId);
 
         await solution.save({ session });
 
@@ -1416,7 +1405,7 @@ export class SolutionService extends BaseService {
 
         if (challengeStatus !== ChallengeStatus.COMPLETED) {
           await Challenge.findByIdAndUpdate(
-            challengeId,
+            { _id: { $eq: challengeId } }, // Use $eq operator for safety
             {
               $set: {
                 status: ChallengeStatus.COMPLETED,
@@ -1427,7 +1416,7 @@ export class SolutionService extends BaseService {
           );
         }
 
-        logger.info(`Solution ${solutionId} selected as winner by company ${companyId}`);
+        logger.info(`Solution ${sanitizedSolutionId} selected as winner by company ${sanitizedCompanyId}`);
 
         // Populate within transaction
         const populatedSolution = await Solution.findById(solution._id)
@@ -1476,25 +1465,36 @@ export class SolutionService extends BaseService {
     options: PaginationOptions = {}
   ): Promise<PaginationResult<ISolution>> {
     try {
-      if (!Types.ObjectId.isValid(architectId)) {
-        throw new ApiError(HTTP_STATUS.BAD_REQUEST, 'Invalid architect ID format');
-      }
+      // Sanitize and validate architect ID
+      const sanitizedArchitectId = MongoSanitizer.validateObjectId(architectId, 'architect');
 
-      logger.debug(`Retrieving reviews for architect ${architectId}`, { options });
+      logger.debug(`Retrieving reviews for architect ${sanitizedArchitectId}`, { options });
 
-      const { status, page = 1, limit = 10 } = options;
+      // Sanitize pagination parameters
+      const sanitizedOptions = this.validateAndSanitizePaginationOptions(options);
+      const { status, page = 1, limit = 10 } = sanitizedOptions;
       const skip = (Number(page) - 1) * Number(limit);
 
-      // Build match criteria with proper typing
+      // Build match criteria with proper sanitization
       const matchCriteria: Record<string, any> = {
-        reviewedBy: MongoSanitizer.sanitizeObjectId(architectId, 'architect')
+        reviewedBy: new Types.ObjectId(sanitizedArchitectId)
       };
 
+      // Add status filter if provided (after validation)
       if (status) {
-        matchCriteria.status = status;
+        // Validate status is a valid enum value
+        if (!Object.values(SolutionStatus).includes(status as SolutionStatus)) {
+          throw new ApiError(
+            HTTP_STATUS.BAD_REQUEST,
+            `Invalid solution status. Allowed values: ${Object.values(SolutionStatus).join(', ')}`,
+            true,
+            'INVALID_STATUS'
+          );
+        }
+        matchCriteria.status = { $eq: status };
       }
 
-      // Define pipeline stages with more explicit typing
+      // Define pipeline stages with explicit typing and sanitization
       const pipeline: PipelineStage[] = [
         { $match: matchCriteria },
         { $sort: { reviewedAt: -1 } },
@@ -1554,12 +1554,13 @@ export class SolutionService extends BaseService {
         }
       ];
 
+      // Execute the aggregate with sanitized pipeline
       const results = await Solution.aggregate(pipeline);
 
       const total = results[0]?.totalCount[0]?.count || 0;
       const data = results[0]?.paginatedResults || [];
 
-      logger.debug(`Retrieved ${data.length} reviews for architect ${architectId}`, {
+      logger.debug(`Retrieved ${data.length} reviews for architect ${sanitizedArchitectId}`, {
         totalReviews: total,
         page,
         limit
@@ -1590,6 +1591,68 @@ export class SolutionService extends BaseService {
         'ARCHITECT_REVIEWS_ERROR'
       );
     }
+  }
+
+  /**
+   * Validate and sanitize pagination options
+   * @param options - Raw pagination options
+   * @returns Sanitized pagination options
+   */
+  private validateAndSanitizePaginationOptions(options: PaginationOptions): PaginationOptions {
+    const sanitizedOptions: PaginationOptions = {};
+    
+    // Sanitize page
+    if (options.page !== undefined) {
+      const page = Number(options.page);
+      if (isNaN(page) || page < 1) {
+        sanitizedOptions.page = 1; // Default to first page if invalid
+      } else {
+        sanitizedOptions.page = Math.floor(page); // Ensure it's an integer
+      }
+    } else {
+      sanitizedOptions.page = 1; // Default
+    }
+    
+    // Sanitize limit
+    if (options.limit !== undefined) {
+      const limit = Number(options.limit);
+      if (isNaN(limit) || limit < 1) {
+        sanitizedOptions.limit = 10; // Default limit if invalid
+      } else {
+        // Cap at 100 for performance reasons
+        sanitizedOptions.limit = Math.min(Math.floor(limit), 100);
+      }
+    } else {
+      sanitizedOptions.limit = 10; // Default
+    }
+    
+    // Sanitize status if provided
+    if (options.status) {
+      // Options.status will be validated in the method that uses it
+      sanitizedOptions.status = options.status;
+    }
+    
+    // Sanitize sort options
+    if (options.sortBy) {
+      // Allow only certain fields for sorting
+      const allowedSortFields = ['createdAt', 'updatedAt', 'reviewedAt', 'status', 'score'];
+      if (allowedSortFields.includes(options.sortBy)) {
+        sanitizedOptions.sortBy = options.sortBy;
+      } else {
+        sanitizedOptions.sortBy = 'reviewedAt'; // Default
+      }
+    } else {
+      sanitizedOptions.sortBy = 'reviewedAt'; // Default
+    }
+    
+    // Sanitize sort order
+    if (options.sortOrder && ['asc', 'desc'].includes(options.sortOrder)) {
+      sanitizedOptions.sortOrder = options.sortOrder;
+    } else {
+      sanitizedOptions.sortOrder = 'desc'; // Default
+    }
+    
+    return sanitizedOptions;
   }
 }
 

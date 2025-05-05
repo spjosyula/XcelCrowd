@@ -16,6 +16,7 @@ import { CreateUserDTO } from './user.service';
 import { profileService } from './profile.service';
 import { solutionService } from './solution.service';
 import { BaseService } from './BaseService';
+import { MongoSanitizer } from '../utils/mongo.sanitize';
 
 /**
  * Service for architect-related operations
@@ -242,7 +243,11 @@ export class ArchitectService extends BaseService {
     }
 
     try {
-      const profile = await ArchitectProfile.findOne({ user: userId });
+      // Sanitize user ID using MongoSanitizer to prevent NoSQL injection
+      const sanitizedUserId = MongoSanitizer.validateObjectId(userId, 'user');
+      
+      // Use $eq operator to ensure the value is treated as a literal
+      const profile = await ArchitectProfile.findOne({ user: { $eq: sanitizedUserId } });
       
       if (!profile) {
         logger.warn(`Architect profile not found`, { userId });
@@ -275,9 +280,42 @@ export class ArchitectService extends BaseService {
     }
 
     try {
+      // Sanitize user ID using MongoSanitizer to prevent NoSQL injection
+      const sanitizedUserId = MongoSanitizer.validateObjectId(userId, 'user');
+      
+      // Sanitize and validate profile data
+      const sanitizedProfileData: Partial<IArchitectProfile> = {};
+      
+      // Process string fields with proper sanitization
+      const stringFields = ['firstName', 'lastName', 'specialization', 'bio', 'profilePicture'] as const;
+      for (const field of stringFields) {
+        if (field in profileData && profileData[field as keyof typeof profileData] !== undefined) {
+          sanitizedProfileData[field] = String(profileData[field as keyof typeof profileData]).trim();
+        }
+      }
+      
+      // Process numeric fields
+      if ('yearsOfExperience' in profileData && profileData.yearsOfExperience !== undefined) {
+        const years = Number(profileData.yearsOfExperience);
+        if (isNaN(years) || years < 0) {
+          throw ApiError.badRequest('Years of experience must be a non-negative number');
+        }
+        sanitizedProfileData.yearsOfExperience = years;
+      }
+      
+      // Process array fields with item-level sanitization
+      if (profileData.skills && Array.isArray(profileData.skills)) {
+        sanitizedProfileData.skills = profileData.skills.map(skill => String(skill).trim());
+      }
+      
+      if (profileData.certifications && Array.isArray(profileData.certifications)) {
+        sanitizedProfileData.certifications = profileData.certifications.map(cert => String(cert).trim());
+      }
+
+      // Use $eq for user ID comparison to prevent NoSQL injection
       const profile = await ArchitectProfile.findOneAndUpdate(
-        { user: userId },
-        { ...profileData, user: userId },
+        { user: { $eq: sanitizedUserId } },
+        { ...sanitizedProfileData, user: sanitizedUserId },
         { new: true, upsert: true, runValidators: true }
       );
 
@@ -379,21 +417,40 @@ export class ArchitectService extends BaseService {
     try {
       const { status = SolutionStatus.SUBMITTED, challengeId, studentId, page = 1, limit = 10 } = filters;
 
-      // Build query with validation
-      const query: Record<string, any> = { status };
+      // Build base query with validation
+      const baseQuery: Record<string, any> = {};
 
-      if (challengeId) {
-        if (!Types.ObjectId.isValid(challengeId)) {
-          throw ApiError.badRequest('Invalid challenge ID format');
+      // Validate and add status with $eq operator
+      if (status) {
+        // Ensure status is a valid enum value
+        if (!Object.values(SolutionStatus).includes(status)) {
+          throw ApiError.badRequest(`Invalid status value: ${status}`);
         }
-        query.challenge = new Types.ObjectId(challengeId);
+        baseQuery.status = { $eq: status };
       }
 
+      // Validate and add challengeId if provided
+      if (challengeId) {
+        const sanitizedChallengeId = MongoSanitizer.validateObjectId(challengeId, 'challenge');
+        baseQuery.challenge = new Types.ObjectId(sanitizedChallengeId);
+      }
+
+      // Validate and add studentId if provided
       if (studentId) {
-        if (!Types.ObjectId.isValid(studentId)) {
-          throw ApiError.badRequest('Invalid student ID format');
-        }
-        query.student = new Types.ObjectId(studentId);
+        const sanitizedStudentId = MongoSanitizer.validateObjectId(studentId, 'student');
+        baseQuery.student = new Types.ObjectId(sanitizedStudentId);
+      }
+
+      // Apply sanitization to all query parameters
+      const query = this.sanitizeFilters(baseQuery);
+
+      // Validate pagination parameters
+      if (typeof page !== 'number' || page < 1) {
+        throw ApiError.badRequest('Page must be a positive integer');
+      }
+
+      if (typeof limit !== 'number' || limit < 1 || limit > 100) {
+        throw ApiError.badRequest('Limit must be between 1 and 100');
       }
 
       const skip = (page - 1) * limit;
@@ -508,17 +565,16 @@ export class ArchitectService extends BaseService {
     }
 
     try {
-      if (!Types.ObjectId.isValid(solutionId)) {
-        throw ApiError.badRequest('Invalid solution ID format');
-      }
+      // Sanitize solutionId with MongoSanitizer to prevent NoSQL injection
+      const sanitizedSolutionId = MongoSanitizer.validateObjectId(solutionId, 'solution');
 
-      const solution = await Solution.findById(solutionId)
+      const solution = await Solution.findById(sanitizedSolutionId)
         .populate('challenge')
         .populate('student')
         .populate('reviewedBy');
 
       if (!solution) {
-        logger.warn(`Solution not found: ${solutionId}`);
+        logger.warn(`Solution not found: ${sanitizedSolutionId}`);
         throw ApiError.notFound('Solution not found');
       }
 
@@ -554,33 +610,29 @@ export class ArchitectService extends BaseService {
       throw ApiError.badRequest('Challenge ID and architect ID are required');
     }
     
-    if (!Types.ObjectId.isValid(challengeId)) {
-      throw ApiError.badRequest('Invalid challenge ID format');
-    }
-
-    if (!Types.ObjectId.isValid(architectId)) {
-      throw ApiError.badRequest('Invalid architect ID format');
-    }
-  
     try {
+      // Sanitize IDs with MongoSanitizer to prevent NoSQL injection
+      const sanitizedChallengeId = MongoSanitizer.validateObjectId(challengeId, 'challenge');
+      const sanitizedArchitectId = MongoSanitizer.validateObjectId(architectId, 'architect');
+  
       return await this.withTransaction(async (session) => {
-        // Find the challenge using session
-        const challenge = await Challenge.findById(challengeId)
+        // Find the challenge using session with sanitized ID
+        const challenge = await Challenge.findById(sanitizedChallengeId)
           .session(session)
           .lean({ virtuals: true })
           .exec();
   
         // Comprehensive null checking
         if (!challenge) {
-          logger.warn(`Challenge not found for claiming`, { challengeId, architectId });
-          throw ApiError.notFound(`Challenge with ID ${challengeId} not found`);
+          logger.warn(`Challenge not found for claiming`, { challengeId: sanitizedChallengeId, architectId: sanitizedArchitectId });
+          throw ApiError.notFound(`Challenge with ID ${sanitizedChallengeId} not found`);
         }
         
         // Check if challenge is in CLOSED status
         if (challenge.status !== ChallengeStatus.CLOSED) {
           logger.warn(`Claim attempt for challenge in invalid status`, {
-            challengeId,
-            architectId,
+            challengeId: sanitizedChallengeId,
+            architectId: sanitizedArchitectId,
             currentStatus: challenge.status,
             requiredStatus: ChallengeStatus.CLOSED
           });
@@ -591,15 +643,15 @@ export class ArchitectService extends BaseService {
         }
   
         // Check if challenge is already claimed by another architect
-        if (challenge.claimedBy && challenge.claimedBy.toString() !== architectId) {
+        if (challenge.claimedBy && challenge.claimedBy.toString() !== sanitizedArchitectId) {
           const claimingArchitect = await ArchitectProfile.findById(challenge.claimedBy)
             .session(session)
             .lean()
             .exec();
   
           logger.warn(`Challenge already claimed by another architect`, {
-            challengeId,
-            attemptingArchitectId: architectId,
+            challengeId: sanitizedChallengeId,
+            attemptingArchitectId: sanitizedArchitectId,
             currentClaimantId: challenge.claimedBy.toString(),
             claimantName: `${claimingArchitect?.firstName || 'Unknown'} ${claimingArchitect?.lastName || 'Architect'}`
           });
@@ -610,14 +662,14 @@ export class ArchitectService extends BaseService {
         }
   
         // If already claimed by this architect, just return the challenge
-        if (challenge.claimedBy && challenge.claimedBy.toString() === architectId) {
+        if (challenge.claimedBy && challenge.claimedBy.toString() === sanitizedArchitectId) {
           logger.info(`Challenge already claimed by this architect`, {
-            challengeId, 
-            architectId
+            challengeId: sanitizedChallengeId, 
+            architectId: sanitizedArchitectId
           });
   
           // Return fresh data with population
-          const populatedChallenge = await Challenge.findById(challengeId)
+          const populatedChallenge = await Challenge.findById(sanitizedChallengeId)
             .populate('claimedBy', 'firstName lastName specialization')
             .lean({ virtuals: true })
             .exec();
@@ -630,21 +682,21 @@ export class ArchitectService extends BaseService {
         }
   
         // Verify architect exists
-        const architect = await ArchitectProfile.findById(architectId)
+        const architect = await ArchitectProfile.findById(sanitizedArchitectId)
           .session(session)
           .lean()
           .exec();
   
         if (!architect) {
-          logger.warn(`Architect profile not found during challenge claim`, { architectId });
+          logger.warn(`Architect profile not found during challenge claim`, { architectId: sanitizedArchitectId });
           throw ApiError.notFound('Architect profile not found');
         }
   
         // Update challenge document to mark as claimed
         const updatedChallenge = await Challenge.findByIdAndUpdate(
-          challengeId,
+          sanitizedChallengeId,
           {
-            claimedBy: new Types.ObjectId(architectId),
+            claimedBy: new Types.ObjectId(sanitizedArchitectId),
             claimedAt: new Date(),
             updatedAt: new Date()
           },
@@ -657,16 +709,16 @@ export class ArchitectService extends BaseService {
   
         if (!updatedChallenge) {
           logger.error(`Failed to update challenge during claim operation`, { 
-            challengeId, 
-            architectId 
+            challengeId: sanitizedChallengeId, 
+            architectId: sanitizedArchitectId
           });
           throw ApiError.internal('Failed to update challenge');
         }
   
         // Get all SUBMITTED solutions for this challenge - use countDocuments first for optimization
         const submittedSolutionsCount = await Solution.countDocuments({
-          challenge: challengeId,
-          status: SolutionStatus.SUBMITTED
+          challenge: { $eq: sanitizedChallengeId }, // Use $eq for NoSQL injection prevention
+          status: { $eq: SolutionStatus.SUBMITTED } // Use $eq for NoSQL injection prevention
         }).session(session);
   
         // Only proceed with update if there are solutions to update
@@ -674,13 +726,13 @@ export class ArchitectService extends BaseService {
           // Batch update all solutions with optimized query
           const updateResult = await Solution.updateMany(
             {
-              challenge: challengeId,
-              status: SolutionStatus.SUBMITTED
+              challenge: { $eq: sanitizedChallengeId }, // Use $eq for NoSQL injection prevention
+              status: { $eq: SolutionStatus.SUBMITTED } // Use $eq for NoSQL injection prevention
             },
             {
               $set: {
                 status: SolutionStatus.UNDER_REVIEW,
-                reviewedBy: new Types.ObjectId(architectId),
+                reviewedBy: new Types.ObjectId(sanitizedArchitectId),
                 updatedAt: new Date()
               }
             },
@@ -688,7 +740,7 @@ export class ArchitectService extends BaseService {
           );
   
           logger.info(`Solutions updated to UNDER_REVIEW status`, {
-            challengeId,
+            challengeId: sanitizedChallengeId,
             updatedCount: updateResult.modifiedCount,
             expectedCount: submittedSolutionsCount
           });
@@ -696,26 +748,26 @@ export class ArchitectService extends BaseService {
           // Verify update succeeded
           if (updateResult.modifiedCount !== submittedSolutionsCount) {
             logger.warn(`Solution update discrepancy during challenge claim`, {
-              challengeId,
-              architectId,
+              challengeId: sanitizedChallengeId,
+              architectId: sanitizedArchitectId,
               updatedCount: updateResult.modifiedCount,
               expectedCount: submittedSolutionsCount
             });
           }
         } else {
-          logger.info(`No submitted solutions found for challenge`, { challengeId });
+          logger.info(`No submitted solutions found for challenge`, { challengeId: sanitizedChallengeId });
         }
   
         // Log success with detailed information
         logger.info(`Challenge successfully claimed by architect`, {
-          challengeId,
-          architectId,
+          challengeId: sanitizedChallengeId,
+          architectId: sanitizedArchitectId,
           title: updatedChallenge.title,
           submittedSolutionsCount
         });
   
         // Return the populated challenge with efficient projection
-        const populatedChallenge = await Challenge.findById(challengeId)
+        const populatedChallenge = await Challenge.findById(sanitizedChallengeId)
           .populate({
             path: 'claimedBy',
             select: 'firstName lastName specialization',
@@ -729,8 +781,8 @@ export class ArchitectService extends BaseService {
   
         if (!populatedChallenge) {
           logger.error(`Challenge not found after successful claim operation`, {
-            challengeId,
-            architectId
+            challengeId: sanitizedChallengeId,
+            architectId: sanitizedArchitectId
           });
           throw ApiError.notFound('Challenge not found after claiming');
         }
@@ -1907,6 +1959,82 @@ export class ArchitectService extends BaseService {
         'SELECT_SOLUTIONS_ERROR'
       );
     }
+  }
+
+  /**
+   * Sanitizes filter objects to prevent NoSQL injection
+   * @param filters - Raw filter object that might contain malicious data
+   * @returns Sanitized filter object safe to use in MongoDB queries
+   */
+  private sanitizeFilters(filters: Record<string, any>): Record<string, any> {
+    const safeFilters: Record<string, any> = {};
+
+    // Skip empty filters
+    if (!filters || typeof filters !== 'object') {
+      return safeFilters;
+    }
+
+    // Process each filter field
+    for (const [key, value] of Object.entries(filters)) {
+      // Skip undefined or null values
+      if (value === undefined || value === null) continue;
+
+      // Handle special cases like $or arrays
+      if (key === '$or' && Array.isArray(value)) {
+        safeFilters.$or = value.map(condition => this.sanitizeFilters(condition));
+        continue;
+      }
+
+      // For normal fields, use $eq operator to ensure value is treated as literal
+      if (typeof value === 'string') {
+        safeFilters[key] = { $eq: String(value).trim() };
+      } else if (typeof value === 'number' || typeof value === 'boolean') {
+        safeFilters[key] = { $eq: value };
+      } else if (value instanceof Types.ObjectId) {
+        safeFilters[key] = { $eq: value };
+      } else if (value instanceof Date) {
+        safeFilters[key] = { $eq: value };
+      } else if (typeof value === 'object') {
+        // For objects that might already contain MongoDB operators
+        // Only allow specific safe operators and recursively sanitize their values
+        const safeOps: Record<string, any> = {};
+        const allowedOperators = ['$eq', '$gt', '$gte', '$lt', '$lte', '$in', '$nin', '$regex', '$options'];
+        
+        // Check if it's a MongoDB query operator object
+        const hasOperators = Object.keys(value).some(k => k.startsWith('$'));
+        
+        if (hasOperators) {
+          // If it has operators, only allow whitelisted ones
+          for (const [op, opValue] of Object.entries(value)) {
+            if (allowedOperators.includes(op)) {
+              // Special handling for regex to prevent ReDoS
+              if (op === '$regex' && typeof opValue === 'string') {
+                try {
+                  // Use MongoSanitizer for safe regex
+                  const safeRegex = MongoSanitizer.buildSafeRegexCondition(opValue);
+                  safeOps.$regex = safeRegex.$regex;
+                  safeOps.$options = safeRegex.$options;
+                } catch (error) {
+                  logger.warn(`Invalid regex pattern rejected: ${opValue}`);
+                  // Skip this operator if regex is invalid
+                }
+              } else {
+                safeOps[op] = opValue;
+              }
+            }
+          }
+          
+          if (Object.keys(safeOps).length > 0) {
+            safeFilters[key] = safeOps;
+          }
+        } else {
+          // If not an operator object, treat as literal value
+          safeFilters[key] = { $eq: value };
+        }
+      }
+    }
+
+    return safeFilters;
   }
 }
 
