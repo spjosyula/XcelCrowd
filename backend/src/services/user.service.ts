@@ -205,29 +205,42 @@ export class UserService extends BaseService {
         // Sanitize update data
         const sanitizedUpdateData: UpdateUserDTO = {};
         
-        // Handle email update - check for uniqueness and sanitize
-        if (updateData.email && updateData.email !== existingUser.email) {
-          const sanitizedEmail = String(updateData.email).trim().toLowerCase();
-          sanitizedUpdateData.email = sanitizedEmail;
-          
-          const emailExists = await User.findOne({
-            email: { $eq: sanitizedEmail },
-            _id: { $ne: sanitizedId }
-          }).session(session);
+        // Iterate over updateData keys and sanitize each field
+        for (const [key, value] of Object.entries(updateData)) {
+          switch (key) {
+            case 'email':
+              if (value && value !== existingUser.email) {
+                const sanitizedEmail = String(value).trim().toLowerCase();
+                sanitizedUpdateData.email = sanitizedEmail;
+                
+                const emailExists = await User.findOne({
+                  email: { $eq: sanitizedEmail },
+                  _id: { $ne: sanitizedId }
+                }).session(session);
 
-          if (emailExists) {
-            throw new ApiError(
-              HTTP_STATUS.CONFLICT,
-              'Email already in use by another account',
-              true,
-              'EMAIL_ALREADY_EXISTS'
-            );
+                if (emailExists) {
+                  throw new ApiError(
+                    HTTP_STATUS.CONFLICT,
+                    'Email already in use by another account',
+                    true,
+                    'EMAIL_ALREADY_EXISTS'
+                  );
+                }
+              }
+              break;
+            case 'password':
+              sanitizedUpdateData.password = String(value);
+              break;
+            // Add cases for other fields as needed
+            default:
+              logger.warn(`Unexpected field in updateData: ${key}`);
+              throw new ApiError(
+                HTTP_STATUS.BAD_REQUEST,
+                `Unexpected field: ${key}`,
+                true,
+                'INVALID_UPDATE_FIELD'
+              );
           }
-        }
-        
-        // Handle password update
-        if (updateData.password) {
-          sanitizedUpdateData.password = updateData.password;
         }
 
         // Update the user with transaction support
