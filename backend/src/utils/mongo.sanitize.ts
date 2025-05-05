@@ -415,7 +415,6 @@ export class MongoSanitizer {
     // Validate maximum length to prevent DoS attacks
     if (sanitized.length > maxLength) {
       logger.warn(`String exceeds maximum length: ${fieldName}`, {
-        value: fieldName.toLowerCase().includes('password') ? '[REDACTED]' : sanitized.substring(0, 30) + '...',
         actualLength: sanitized.length,
         maxLength
       });
