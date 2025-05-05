@@ -103,7 +103,7 @@ export class ArchitectService extends BaseService {
     try {
       return await this.withTransaction(async (session) => {
         // Check if user with email already exists
-        const sanitizedEmail = MongoSanitizer.sanitize(architectData.email);
+        const sanitizedEmail = MongoSanitizer.sanitizeEmail(architectData.email);
         const existingUser = await User.findOne({ email: sanitizedEmail }).session(session);
         if (existingUser) {
           logger.warn(`Email already in use: ${architectData.email}`, { adminId: adminUserId });

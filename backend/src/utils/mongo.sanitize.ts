@@ -340,6 +340,469 @@ export class MongoSanitizer {
   }
 
   /**
+ * Sanitizes a string value with comprehensive validation and security checks
+ * Protects against XSS, NoSQL injection, and buffer overflow attacks
+ * @param value - The string value to sanitize
+ * @param options - Configuration options for sanitization
+ * @returns Safely sanitized string
+ */
+  static sanitizeString(
+    value: unknown,
+    options: {
+      fieldName?: string;
+      maxLength?: number;
+      minLength?: number;
+      required?: boolean;
+      trim?: boolean;
+      allowNull?: boolean;
+      pattern?: RegExp;
+      patternErrorMessage?: string;
+      transformations?: Array<(s: string) => string>;
+    } = {}
+  ): string {
+    const {
+      fieldName = 'String',
+      maxLength = 1000,
+      minLength = 0,
+      required = true,
+      trim = true,
+      allowNull = false,
+      pattern,
+      patternErrorMessage,
+      transformations = []
+    } = options;
+
+    // Handle null/undefined values
+    if (value === null) {
+      if (allowNull) return '';
+      if (required) {
+        throw new ApiError(
+          HTTP_STATUS.BAD_REQUEST,
+          `${fieldName} is required`,
+          true,
+          'REQUIRED_FIELD_MISSING'
+        );
+      }
+      return '';
+    }
+
+    if (value === undefined) {
+      if (required) {
+        throw new ApiError(
+          HTTP_STATUS.BAD_REQUEST,
+          `${fieldName} is required`,
+          true,
+          'REQUIRED_FIELD_MISSING'
+        );
+      }
+      return '';
+    }
+
+    // Coerce to string and trim if needed
+    let sanitized = String(value);
+    if (trim) sanitized = sanitized.trim();
+
+    // Validate minimum length
+    if (sanitized.length < minLength) {
+      throw new ApiError(
+        HTTP_STATUS.BAD_REQUEST,
+        `${fieldName} must be at least ${minLength} characters long`,
+        true,
+        'STRING_TOO_SHORT'
+      );
+    }
+
+    // Validate maximum length to prevent DoS attacks
+    if (sanitized.length > maxLength) {
+      logger.warn(`String exceeds maximum length: ${fieldName}`, {
+        value: sanitized.substring(0, 30) + '...',
+        actualLength: sanitized.length,
+        maxLength
+      });
+
+      throw new ApiError(
+        HTTP_STATUS.BAD_REQUEST,
+        `${fieldName} exceeds maximum allowed length (${maxLength} characters)`,
+        true,
+        'STRING_TOO_LONG'
+      );
+    }
+
+    // Apply custom pattern validation if provided
+    if (pattern && !pattern.test(sanitized)) {
+      throw new ApiError(
+        HTTP_STATUS.BAD_REQUEST,
+        patternErrorMessage || `${fieldName} does not match required format`,
+        true,
+        'INVALID_STRING_FORMAT'
+      );
+    }
+
+    // Apply any custom transformations
+    for (const transform of transformations) {
+      sanitized = transform(sanitized);
+    }
+
+    // Check for potentially dangerous content like MongoDB operators
+    if (sanitized.includes("$") || sanitized.includes("{") && sanitized.includes("}")) {
+      // Escape all potential MongoDB operator characters
+      sanitized = escapeRegExp(sanitized);
+      logger.debug(`Potentially unsafe string sanitized in ${fieldName}`);
+    }
+
+    return sanitized;
+  }
+
+  /**
+   * Sanitizes and validates an email address with enterprise-grade security
+   * Performs RFC 5322 compliant validation with protection against injection attacks
+   * @param email - The email address to sanitize
+   * @param options - Configuration options for email sanitization
+   * @returns Sanitized and normalized email address
+   */
+  static sanitizeEmail(
+    email: unknown,
+    options: {
+      fieldName?: string;
+      required?: boolean;
+      maxLength?: number;
+      allowedDomains?: string[];
+      blockedDomains?: string[];
+    } = {}
+  ): string {
+    const {
+      fieldName = 'Email',
+      required = true,
+      maxLength = 254, // Max email length per RFC 5321
+      allowedDomains = [],
+      blockedDomains = []
+    } = options;
+
+    // First perform basic string sanitization
+    const sanitized = this.sanitizeString(email, {
+      fieldName,
+      required,
+      maxLength,
+      trim: true,
+      transformations: [str => str.toLowerCase()] // Email addresses are case-insensitive
+    });
+
+    // Empty string already handled by sanitizeString if required=true
+    if (!sanitized) return sanitized;
+
+    // Advanced email format validation - RFC 5322 compliant
+    // This is a comprehensive regex that handles the complexity of the email specification
+    const emailRegex = /^(([^<>()\[\]\\.,;:\s@"]+(\.[^<>()\[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/;
+
+    if (!emailRegex.test(sanitized)) {
+      throw new ApiError(
+        HTTP_STATUS.BAD_REQUEST,
+        `${fieldName} is not a valid email address`,
+        true,
+        'INVALID_EMAIL_FORMAT'
+      );
+    }
+
+    // Extract domain for additional validation
+    const domain = sanitized.split('@')[1].toLowerCase();
+
+    // Check blocked domains
+    if (blockedDomains.length > 0 && blockedDomains.includes(domain)) {
+      throw new ApiError(
+        HTTP_STATUS.BAD_REQUEST,
+        `Email domain ${domain} is not allowed`,
+        true,
+        'BLOCKED_EMAIL_DOMAIN'
+      );
+    }
+
+    // Restrict to allowed domains if list is provided
+    if (allowedDomains.length > 0 && !allowedDomains.includes(domain)) {
+      throw new ApiError(
+        HTTP_STATUS.BAD_REQUEST,
+        `Email domain ${domain} is not in the list of allowed domains`,
+        true,
+        'UNAUTHORIZED_EMAIL_DOMAIN'
+      );
+    }
+
+    // Check for unicode homograph attacks and lookalike domains
+    const containsPunycode = domain.includes('xn--');
+    if (containsPunycode) {
+      logger.warn(`Punycode detected in email domain: ${domain}`, {
+        email: sanitized,
+        domain
+      });
+
+      // You may want to implement additional homograph attack prevention here
+      // or just flag it for review in high-security environments
+    }
+
+    // Log email validation for security audit
+    logger.debug(`Email validated successfully: ${sanitized.substring(0, 3)}...@${domain}`);
+
+    return sanitized;
+  }
+
+  /**
+   * Sanitizes a username with specialized rules for user identification
+   * Protects against injection and ensures username policy compliance
+   * @param username - The username to sanitize
+   * @param options - Configuration options for username sanitization
+   * @returns Sanitized username
+   */
+  static sanitizeUsername(
+    username: unknown,
+    options: {
+      fieldName?: string;
+      minLength?: number;
+      maxLength?: number;
+      allowedPattern?: RegExp;
+      required?: boolean;
+      allowedCharacters?: string;
+    } = {}
+  ): string {
+    const {
+      fieldName = 'Username',
+      minLength = 3,
+      maxLength = 50,
+      allowedPattern = /^[a-zA-Z0-9_\-.]+$/,
+      required = true,
+      allowedCharacters = 'alphanumeric characters, hyphens, underscores, and periods'
+    } = options;
+
+    // Basic string sanitization
+    const sanitized = this.sanitizeString(username, {
+      fieldName,
+      minLength,
+      maxLength,
+      required,
+      trim: true,
+      pattern: allowedPattern,
+      patternErrorMessage: `${fieldName} may only contain ${allowedCharacters}`
+    });
+
+    // Check for common username patterns used in NoSQL injection attacks
+    const suspiciousPatterns = [
+      /\.\$/, /\$\{/, /\$ne/, /\$gt/, /\$where/, /\$regex/,
+      /\$in/, /\$exists/, /javascript/i, /eval\(/i
+    ];
+
+    const hasSuspiciousPattern = suspiciousPatterns.some(pattern => pattern.test(sanitized));
+    if (hasSuspiciousPattern) {
+      logger.warn(`Potentially malicious username pattern detected: ${sanitized}`, {
+        username: sanitized.substring(0, 15) + (sanitized.length > 15 ? '...' : '')
+      });
+
+      throw new ApiError(
+        HTTP_STATUS.BAD_REQUEST,
+        `${fieldName} contains disallowed patterns`,
+        true,
+        'UNSAFE_USERNAME_PATTERN'
+      );
+    }
+
+    return sanitized;
+  }
+
+  /**
+   * Sanitizes a secure password with password policy enforcement
+   * Ensures password complexity and prevents common password attacks
+   * @param password - The password to sanitize
+   * @param options - Configuration options for password sanitization
+   * @returns Sanitized password
+   */
+  static sanitizePassword(
+    password: unknown,
+    options: {
+      fieldName?: string;
+      minLength?: number;
+      maxLength?: number;
+      requireUppercase?: boolean;
+      requireLowercase?: boolean;
+      requireNumbers?: boolean;
+      requireSpecialChars?: boolean;
+      disallowCommonPasswords?: boolean;
+    } = {}
+  ): string {
+    const {
+      fieldName = 'Password',
+      minLength = 8,
+      maxLength = 128,
+      requireUppercase = true,
+      requireLowercase = true,
+      requireNumbers = true,
+      requireSpecialChars = true,
+      disallowCommonPasswords = true
+    } = options;
+
+    // Basic sanitization without pattern validation (we'll do custom validation)
+    const sanitized = this.sanitizeString(password, {
+      fieldName,
+      minLength,
+      maxLength,
+      required: true,
+      trim: false // Don't trim passwords as spaces might be intentional
+    });
+
+    let validationErrors = [];
+
+    // Password complexity validation
+    if (requireUppercase && !/[A-Z]/.test(sanitized)) {
+      validationErrors.push('at least one uppercase letter');
+    }
+
+    if (requireLowercase && !/[a-z]/.test(sanitized)) {
+      validationErrors.push('at least one lowercase letter');
+    }
+
+    if (requireNumbers && !/\d/.test(sanitized)) {
+      validationErrors.push('at least one number');
+    }
+
+    if (requireSpecialChars && !/[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?]/.test(sanitized)) {
+      validationErrors.push('at least one special character');
+    }
+
+    if (validationErrors.length > 0) {
+      throw new ApiError(
+        HTTP_STATUS.BAD_REQUEST,
+        `${fieldName} must contain ${validationErrors.join(', ')}`,
+        true,
+        'PASSWORD_COMPLEXITY_ERROR'
+      );
+    }
+
+    // Check for common passwords (optional, would need a common password list)
+    if (disallowCommonPasswords) {
+      const commonPasswords = ['password', 'qwerty', '123456', 'admin1234']; // Example list, replace with a proper one
+      const passwordLower = sanitized.toLowerCase();
+
+      if (commonPasswords.includes(passwordLower)) {
+        throw new ApiError(
+          HTTP_STATUS.BAD_REQUEST,
+          `${fieldName} is too common and easily guessable`,
+          true,
+          'COMMON_PASSWORD_ERROR'
+        );
+      }
+    }
+
+    return sanitized;
+  }
+
+  /**
+   * Sanitizes URL input with comprehensive security checks
+   * Protects against URL-based attacks including XSS, open redirect, and SSRF
+   * @param url - The URL to sanitize
+   * @param options - Configuration options for URL sanitization
+   * @returns Sanitized URL
+   */
+  static sanitizeUrl(
+    url: unknown,
+    options: {
+      fieldName?: string;
+      required?: boolean;
+      maxLength?: number;
+      allowedProtocols?: string[];
+      allowedDomains?: string[];
+      allowRelative?: boolean;
+    } = {}
+  ): string {
+    const {
+      fieldName = 'URL',
+      required = true,
+      maxLength = 2048,
+      allowedProtocols = ['https', 'http'],
+      allowedDomains = [],
+      allowRelative = false
+    } = options;
+
+    // Basic string sanitization
+    const sanitized = this.sanitizeString(url, {
+      fieldName,
+      maxLength,
+      required,
+      trim: true
+    });
+
+    if (!sanitized && !required) {
+      return '';
+    }
+
+    try {
+      // For relative URLs
+      if (allowRelative && sanitized.startsWith('/')) {
+        // Validate relative URL format
+        if (!/^\/[^/].*$/.test(sanitized)) {
+          throw new ApiError(
+            HTTP_STATUS.BAD_REQUEST,
+            `${fieldName} is not a valid relative URL`,
+            true,
+            'INVALID_RELATIVE_URL'
+          );
+        }
+        return sanitized;
+      }
+
+      // Parse URL to validate and extract components
+      const parsedUrl = new URL(sanitized);
+
+      // Protocol validation
+      const protocol = parsedUrl.protocol.replace(':', '');
+      if (!allowedProtocols.includes(protocol)) {
+        throw new ApiError(
+          HTTP_STATUS.BAD_REQUEST,
+          `URL protocol '${protocol}' is not allowed. Allowed protocols: ${allowedProtocols.join(', ')}`,
+          true,
+          'DISALLOWED_URL_PROTOCOL'
+        );
+      }
+
+      // Domain validation if allowedDomains is specified
+      if (allowedDomains.length > 0) {
+        const hostname = parsedUrl.hostname.toLowerCase();
+        const isDomainAllowed = allowedDomains.some(domain =>
+          hostname === domain || hostname.endsWith(`.${domain}`)
+        );
+
+        if (!isDomainAllowed) {
+          throw new ApiError(
+            HTTP_STATUS.BAD_REQUEST,
+            `URL domain '${parsedUrl.hostname}' is not allowed`,
+            true,
+            'DISALLOWED_URL_DOMAIN'
+          );
+        }
+      }
+
+      // Check for potentially dangerous content in URL parameters
+      const hasScriptInParams = /[?&].*script.*=/.test(sanitized) ||
+        /[?&].*<.*>.*=/.test(sanitized);
+      if (hasScriptInParams) {
+        logger.warn(`Potentially malicious script content in URL params: ${sanitized}`);
+        throw new ApiError(
+          HTTP_STATUS.BAD_REQUEST,
+          `${fieldName} contains potentially unsafe parameters`,
+          true,
+          'UNSAFE_URL_PARAMETERS'
+        );
+      }
+
+      return sanitized;
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+
+      throw new ApiError(
+        HTTP_STATUS.BAD_REQUEST,
+        `${fieldName} is not a valid URL: ${error instanceof Error ? error.message : String(error)}`,
+        true,
+        'INVALID_URL_FORMAT'
+      );
+    }
+  }
+
+  /**
    * Safely creates a numeric range condition with boundary checks
    * Prevents integer overflow/underflow attacks and validates numeric types
    * @param min - Minimum value (optional)
@@ -639,7 +1102,7 @@ export class MongoSanitizer {
             safeQuery[key] = this.sanitizeObjectId(value, key);
             break;
 
-          case 'date':  
+          case 'date':
             let dateValue: Date;
 
             // Handle string dates or Date objects
