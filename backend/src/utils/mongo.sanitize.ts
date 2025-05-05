@@ -414,9 +414,16 @@ export class MongoSanitizer {
 
     // Validate maximum length to prevent DoS attacks
     if (sanitized.length > maxLength) {
-      logger.warn(`String exceeds maximum length: ${fieldName}`, {
-        actualLength: sanitized.length,
-        maxLength
+      // More secure logging - obscure the actual field name for sensitive fields
+      const isSensitiveField = /password|credential|token|key|secret|auth/i.test(fieldName);
+      const logFieldName = isSensitiveField ? 'Sensitive field' : fieldName;
+
+      // Log with minimal information that can't be exploited
+      logger.warn(`Input exceeds maximum length limits`, {
+        field: logFieldName,
+        lengthCategory: sanitized.length > maxLength * 2 ? 'Extreme' : 'Exceeded',
+        // Avoid logging exact length for potential DoS detection evasion
+        percentExceeded: Math.round((sanitized.length / maxLength - 1) * 100)
       });
 
       throw new ApiError(
