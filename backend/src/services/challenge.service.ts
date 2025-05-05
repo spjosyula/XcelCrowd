@@ -4,7 +4,6 @@ import Solution from '../models/Solution';
 import { BaseService } from './BaseService';
 import { logger } from '../utils/logger';
 import { ApiError } from '../utils/api.error';
-import { HTTP_STATUS } from '../models/interfaces';
 import {
   IChallenge,
   ChallengeStatus,
@@ -19,6 +18,7 @@ import {
   executePaginatedQuery,
   createPaginationResult
 } from '../utils/paginationUtils';
+import { MongoSanitizer } from '../utils/mongo.sanitize';
 
 export class ChallengeService extends BaseService {
   /**
@@ -31,10 +31,15 @@ export class ChallengeService extends BaseService {
     logger.info('[createChallenge] Creating new challenge', { companyId });
 
     try {
-      // Validate company ID
-      if (!Types.ObjectId.isValid(companyId)) {
-        throw ApiError.badRequest('Invalid company ID format', 'INVALID_ID_FORMAT');
-      }
+      // Validate company ID using MongoSanitizer to prevent NoSQL injection
+      const sanitizedCompanyId = MongoSanitizer.validateObjectId(
+        companyId, 
+        'company', 
+        { errorStatus: 400, additionalContext: 'When creating a challenge' }
+      );
+
+      // Sanitize challenge data
+      const sanitizedData = this.sanitizeChallengeData(challengeData);
 
       return await this.withTransaction(async (session) => {
         // Process autoPublish flag and set initial status
@@ -43,12 +48,12 @@ export class ChallengeService extends BaseService {
           ChallengeStatus.DRAFT;
 
         // Remove autoPublish flag from challenge data
-        const { autoPublish, ...filteredData } = challengeData as any;
+        const { autoPublish, ...filteredData } = sanitizedData as any;
 
         // Create new challenge with initial values
         const challenge = new Challenge({
           ...filteredData,
-          company: companyId,
+          company: sanitizedCompanyId,
           status,
           currentParticipants: 0,
           approvedSolutionsCount: 0
@@ -58,7 +63,7 @@ export class ChallengeService extends BaseService {
 
         logger.info('[createChallenge] Challenge created successfully', {
           challengeId: challenge._id,
-          companyId,
+          companyId: sanitizedCompanyId,
           status
         });
 
@@ -77,6 +82,179 @@ export class ChallengeService extends BaseService {
   }
 
   /**
+   * Sanitizes challenge data to prevent NoSQL injection
+   * @param data - The raw challenge data to sanitize
+   * @returns Sanitized challenge data
+   */
+  private sanitizeChallengeData(data: Partial<IChallenge>): Partial<IChallenge> {
+    if (!data || typeof data !== 'object') {
+      throw ApiError.badRequest('Invalid challenge data', 'INVALID_CHALLENGE_DATA');
+    }
+
+    const sanitized: Partial<IChallenge> = {};
+
+    // Sanitize string fields
+    if (data.title !== undefined) {
+      sanitized.title = MongoSanitizer.sanitizeString(data.title, {
+        fieldName: 'Challenge title',
+        maxLength: 100
+      });
+    }
+
+    if (data.description !== undefined) {
+      sanitized.description = MongoSanitizer.sanitizeString(data.description, {
+        fieldName: 'Challenge description',
+        maxLength: 5000
+      });
+    }
+
+    // Sanitize any direct MongoDB ObjectId references
+    if (data.company !== undefined && typeof data.company === 'string') {
+      try {
+        sanitized.company = MongoSanitizer.sanitizeObjectId(data.company, 'company');
+      } catch (error) {
+        logger.warn('[sanitizeChallengeData] Invalid company ID provided', {
+          companyId: data.company,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        // Don't include invalid IDs in sanitized data
+      }
+    }
+
+    // Sanitize array fields
+    if (data.requirements && Array.isArray(data.requirements)) {
+      sanitized.requirements = data.requirements.map(item => 
+        MongoSanitizer.sanitizeString(item, {
+          fieldName: 'Requirement',
+          maxLength: 500
+        })
+      );
+    }
+
+    if (data.resources && Array.isArray(data.resources)) {
+      sanitized.resources = data.resources.map(item => 
+        MongoSanitizer.sanitizeString(item, {
+          fieldName: 'Resource',
+          maxLength: 1000
+        })
+      );
+    }
+
+    if (data.category && Array.isArray(data.category)) {
+      sanitized.category = data.category.map(item => 
+        MongoSanitizer.sanitizeString(item, {
+          fieldName: 'Category',
+          maxLength: 100
+        })
+      );
+    }
+
+    if (data.tags && Array.isArray(data.tags)) {
+      sanitized.tags = data.tags.map(item => 
+        MongoSanitizer.sanitizeString(item, {
+          fieldName: 'Tag',
+          maxLength: 50
+        })
+      );
+    }
+
+    if (data.allowedInstitutions && Array.isArray(data.allowedInstitutions)) {
+      sanitized.allowedInstitutions = data.allowedInstitutions.map(item => 
+        MongoSanitizer.sanitizeString(item, {
+          fieldName: 'Institution',
+          maxLength: 200
+        })
+      );
+    }
+
+    // Sanitize rewards field
+    if (data.rewards !== undefined) {
+      sanitized.rewards = MongoSanitizer.sanitizeString(data.rewards, {
+        fieldName: 'Rewards',
+        maxLength: 1000,
+        required: false
+      });
+    }
+
+    // Sanitize enum values
+    if (data.difficulty !== undefined) {
+      if (!Object.values(ChallengeDifficulty).includes(data.difficulty as ChallengeDifficulty)) {
+        throw ApiError.badRequest(
+          `Invalid difficulty value. Allowed values: ${Object.values(ChallengeDifficulty).join(', ')}`,
+          'INVALID_DIFFICULTY'
+        );
+      }
+      sanitized.difficulty = data.difficulty;
+    }
+
+    if (data.status !== undefined) {
+      if (!Object.values(ChallengeStatus).includes(data.status as ChallengeStatus)) {
+        throw ApiError.badRequest(
+          `Invalid status value. Allowed values: ${Object.values(ChallengeStatus).join(', ')}`,
+          'INVALID_STATUS'
+        );
+      }
+      sanitized.status = data.status;
+    }
+
+    if (data.visibility !== undefined) {
+      if (!Object.values(ChallengeVisibility).includes(data.visibility as ChallengeVisibility)) {
+        throw ApiError.badRequest(
+          `Invalid visibility value. Allowed values: ${Object.values(ChallengeVisibility).join(', ')}`,
+          'INVALID_VISIBILITY'
+        );
+      }
+      sanitized.visibility = data.visibility;
+    }
+
+    // Sanitize numeric fields
+    if (data.maxParticipants !== undefined) {
+      if (typeof data.maxParticipants !== 'number' || 
+          data.maxParticipants < 1 || 
+          data.maxParticipants > 10000) {
+        throw ApiError.badRequest(
+          'Maximum participants must be a positive number between 1 and 10000',
+          'INVALID_MAX_PARTICIPANTS'
+        );
+      }
+      sanitized.maxParticipants = data.maxParticipants;
+    }
+
+    if (data.maxApprovedSolutions !== undefined) {
+      if (typeof data.maxApprovedSolutions !== 'number' || 
+          data.maxApprovedSolutions < 1 || 
+          data.maxApprovedSolutions > 1000) {
+        throw ApiError.badRequest(
+          'Maximum approved solutions must be a positive number between 1 and 1000',
+          'INVALID_MAX_APPROVED_SOLUTIONS'
+        );
+      }
+      sanitized.maxApprovedSolutions = data.maxApprovedSolutions;
+    }
+
+    // Sanitize boolean fields
+    if (data.isCompanyVisible !== undefined) {
+      sanitized.isCompanyVisible = Boolean(data.isCompanyVisible);
+    }
+
+    // Sanitize dates
+    if (data.deadline !== undefined) {
+      const deadlineDate = new Date(data.deadline);
+      if (isNaN(deadlineDate.getTime())) {
+        throw ApiError.badRequest('Invalid deadline date format', 'INVALID_DEADLINE_FORMAT');
+      }
+      sanitized.deadline = deadlineDate;
+    }
+
+    // Include any additional autoPublish flag if present
+    if ((data as any).autoPublish !== undefined) {
+      (sanitized as any).autoPublish = Boolean((data as any).autoPublish);
+    }
+
+    return sanitized;
+  }
+
+  /**
    * Get a challenge by ID
    * @param challengeId - The ID of the challenge
    * @returns The challenge
@@ -85,13 +263,16 @@ export class ChallengeService extends BaseService {
     logger.info('[getChallengeById] Fetching challenge', { challengeId });
 
     try {
-      // Validate challenge ID
-      if (!Types.ObjectId.isValid(challengeId)) {
-        throw ApiError.badRequest('Invalid challenge ID format', 'INVALID_ID_FORMAT');
-      }
+      // Validate challenge ID using MongoSanitizer
+      const sanitizedChallengeId = MongoSanitizer.validateObjectId(
+        challengeId, 
+        'challenge', 
+        { errorStatus: 400, additionalContext: 'When fetching challenge' }
+      );
 
       // Limited fields in populated company for optimization
-      const challenge = await Challenge.findById(challengeId)
+      // Use $eq operator to prevent NoSQL injection
+      const challenge = await Challenge.findById({ $eq: sanitizedChallengeId })
         .populate('company', 'companyName industry location')
         .lean();
 
@@ -99,7 +280,7 @@ export class ChallengeService extends BaseService {
         throw ApiError.notFound('Challenge not found', 'CHALLENGE_NOT_FOUND');
       }
 
-      logger.info('[getChallengeById] Challenge retrieved successfully', { challengeId });
+      logger.info('[getChallengeById] Challenge retrieved successfully', { challengeId: sanitizedChallengeId });
       return challenge;
     } catch (error) {
       logger.error('[getChallengeById] Failed to retrieve challenge', {
@@ -127,7 +308,7 @@ export class ChallengeService extends BaseService {
   ): Promise<IChallenge> {
     if (!updateData || Object.keys(updateData).length === 0) {
       throw ApiError.badRequest(
-        'No update data provided', 
+        'No update data provided',
         'EMPTY_UPDATE_DATA'
       );
     }
@@ -138,16 +319,28 @@ export class ChallengeService extends BaseService {
     });
 
     try {
-      // Validate IDs
-      if (!Types.ObjectId.isValid(challengeId) || !Types.ObjectId.isValid(companyId)) {
-        throw ApiError.badRequest('Invalid ID format', 'INVALID_ID_FORMAT');
-      }
+      // Validate IDs using MongoSanitizer
+      const sanitizedChallengeId = MongoSanitizer.validateObjectId(
+        challengeId, 
+        'challenge', 
+        { errorStatus: 400, additionalContext: 'When updating challenge' }
+      );
+      
+      const sanitizedCompanyId = MongoSanitizer.validateObjectId(
+        companyId, 
+        'company', 
+        { errorStatus: 400, additionalContext: 'When updating challenge' }
+      );
+
+      // Sanitize update data
+      const sanitizedUpdateData = this.sanitizeChallengeData(updateData);
 
       return await this.withTransaction(async (session) => {
         // Find challenge with company verification (security check)
+        // Use $eq operator to prevent NoSQL injection
         const challenge = await Challenge.findOne({
-          _id: challengeId,
-          company: companyId
+          _id: { $eq: sanitizedChallengeId },
+          company: { $eq: sanitizedCompanyId }
         }).session(session);
 
         if (!challenge) {
@@ -158,7 +351,7 @@ export class ChallengeService extends BaseService {
         }
 
         // Prevent status changes through this endpoint
-        if (updateData.status && updateData.status !== challenge.status) {
+        if (sanitizedUpdateData.status && sanitizedUpdateData.status !== challenge.status) {
           throw ApiError.badRequest(
             'Status changes must be done through specific endpoints',
             'STATUS_CHANGE_NOT_ALLOWED'
@@ -174,8 +367,8 @@ export class ChallengeService extends BaseService {
         }
 
         // Add this validation block
-        if (updateData.visibility === ChallengeVisibility.PRIVATE &&
-          (!updateData.allowedInstitutions || updateData.allowedInstitutions.length === 0)) {
+        if (sanitizedUpdateData.visibility === ChallengeVisibility.PRIVATE &&
+          (!sanitizedUpdateData.allowedInstitutions || sanitizedUpdateData.allowedInstitutions.length === 0)) {
           // If challenge was already private, keep its existing institutions
           if (challenge.visibility !== ChallengeVisibility.PRIVATE) {
             throw ApiError.badRequest(
@@ -186,7 +379,7 @@ export class ChallengeService extends BaseService {
         }
 
         // Validate deadline if provided
-        if (updateData.deadline && new Date(updateData.deadline) <= new Date()) {
+        if (sanitizedUpdateData.deadline && new Date(sanitizedUpdateData.deadline) <= new Date()) {
           throw ApiError.badRequest(
             'Deadline must be in the future',
             'INVALID_DEADLINE'
@@ -202,21 +395,45 @@ export class ChallengeService extends BaseService {
         ];
 
         // Filter out fields that aren't allowed to be updated
-        const filteredUpdateData = Object.fromEntries(
-          Object.entries(updateData).filter(([key]) => allowedFields.includes(key))
+        const filteredUpdateData: Partial<IChallenge> = {};
+        
+        for (const field of allowedFields) {
+          if (field in sanitizedUpdateData) {
+            filteredUpdateData[field as keyof IChallenge] = 
+              sanitizedUpdateData[field as keyof IChallenge];
+          }
+        }
+
+        // Safely update allowed fields using MongoSanitizer
+        const safeUpdateOps = MongoSanitizer.sanitizeUpdateOperations(
+          { $set: filteredUpdateData },
+          allowedFields
         );
 
-        // Update fields with validated data
-        Object.assign(challenge, filteredUpdateData);
+        // Update using findOneAndUpdate with sanitized operations
+        const updatedChallenge = await Challenge.findOneAndUpdate(
+          { _id: sanitizedChallengeId }, 
+          safeUpdateOps,
+          { 
+            new: true, 
+            runValidators: true,
+            session 
+          }
+        );
 
-        await challenge.save({ session });
+        if (!updatedChallenge) {
+          throw ApiError.notFound(
+            'Challenge not found after update',
+            'CHALLENGE_UPDATE_FAILED'
+          );
+        }
 
         logger.info('[updateChallenge] Challenge updated successfully', {
-          challengeId,
-          companyId
+          challengeId: sanitizedChallengeId,
+          companyId: sanitizedCompanyId
         });
 
-        return challenge;
+        return updatedChallenge;
       });
     } catch (error) {
       logger.error('[updateChallenge] Failed to update challenge', {
@@ -317,16 +534,25 @@ export class ChallengeService extends BaseService {
     });
 
     try {
-      // Validate IDs
-      if (!Types.ObjectId.isValid(challengeId) || !Types.ObjectId.isValid(companyId)) {
-        throw ApiError.badRequest('Invalid ID format', 'INVALID_ID_FORMAT');
-      }
+      // Validate IDs using MongoSanitizer
+      const sanitizedChallengeId = MongoSanitizer.validateObjectId(
+        challengeId, 
+        'challenge', 
+        { errorStatus: 400, additionalContext: 'When publishing challenge' }
+      );
+      
+      const sanitizedCompanyId = MongoSanitizer.validateObjectId(
+        companyId, 
+        'company', 
+        { errorStatus: 400, additionalContext: 'When publishing challenge' }
+      );
 
       return await this.withTransaction(async (session) => {
         // Find challenge with company verification (security check)
+        // Use $eq operator to prevent NoSQL injection
         const challenge = await Challenge.findOne({
-          _id: challengeId,
-          company: companyId
+          _id: { $eq: sanitizedChallengeId },
+          company: { $eq: sanitizedCompanyId }
         }).session(session);
 
         if (!challenge) {
@@ -351,8 +577,8 @@ export class ChallengeService extends BaseService {
         await challenge.save({ session });
 
         logger.info('[publishChallenge] Challenge published successfully', {
-          challengeId,
-          companyId
+          challengeId: sanitizedChallengeId,
+          companyId: sanitizedCompanyId
         });
 
         return challenge;
@@ -397,34 +623,74 @@ export class ChallengeService extends BaseService {
     });
 
     try {
-      // Build query filters
+      // Build query filters using MongoSanitizer for safety
       const queryFilters: Record<string, any> = {};
 
+      // Status filter with validation
       if (filters.status) {
-        queryFilters.status = filters.status;
-      }
-
-      if (filters.companyId) {
-        if (!Types.ObjectId.isValid(filters.companyId)) {
-          throw ApiError.badRequest('Invalid company ID format', 'INVALID_ID_FORMAT');
+        // Validate status is a valid enum value
+        if (!Object.values(ChallengeStatus).includes(filters.status)) {
+          throw ApiError.badRequest(
+            `Invalid status value. Allowed values: ${Object.values(ChallengeStatus).join(', ')}`,
+            'INVALID_STATUS'
+          );
         }
-        queryFilters.company = new Types.ObjectId(filters.companyId);
+        queryFilters.status = MongoSanitizer.buildEqualityCondition(filters.status);
       }
 
+      // Company ID filter with validation
+      if (filters.companyId) {
+        const sanitizedCompanyId = MongoSanitizer.validateObjectId(
+          filters.companyId, 
+          'company', 
+          { errorStatus: 400, additionalContext: 'In challenge filters' }
+        );
+        queryFilters.company = new Types.ObjectId(sanitizedCompanyId);
+      }
+
+      // Category filter with validation
       if (filters.category) {
         if (Array.isArray(filters.category)) {
-          queryFilters.category = { $in: filters.category };
+          // Sanitize each category
+          const sanitizedCategories = filters.category.map(cat => 
+            MongoSanitizer.sanitizeString(cat, {
+              fieldName: 'Category',
+              maxLength: 100
+            })
+          );
+          queryFilters.category = { $in: sanitizedCategories };
         } else {
-          queryFilters.category = filters.category;
+          // Sanitize single category
+          const sanitizedCategory = MongoSanitizer.sanitizeString(filters.category, {
+            fieldName: 'Category',
+            maxLength: 100
+          });
+          queryFilters.category = sanitizedCategory;
         }
       }
 
+      // Difficulty filter with validation
       if (filters.difficulty) {
-        queryFilters.difficulty = filters.difficulty;
+        // Validate difficulty is a valid enum value
+        if (!Object.values(ChallengeDifficulty).includes(filters.difficulty)) {
+          throw ApiError.badRequest(
+            `Invalid difficulty value. Allowed values: ${Object.values(ChallengeDifficulty).join(', ')}`,
+            'INVALID_DIFFICULTY'
+          );
+        }
+        queryFilters.difficulty = MongoSanitizer.buildEqualityCondition(filters.difficulty);
       }
 
+      // Visibility filter with validation
       if (filters.visibility) {
-        queryFilters.visibility = filters.visibility;
+        // Validate visibility is a valid enum value
+        if (!Object.values(ChallengeVisibility).includes(filters.visibility)) {
+          throw ApiError.badRequest(
+            `Invalid visibility value. Allowed values: ${Object.values(ChallengeVisibility).join(', ')}`,
+            'INVALID_VISIBILITY'
+          );
+        }
+        queryFilters.visibility = MongoSanitizer.buildEqualityCondition(filters.visibility);
       }
 
       // Date range filtering
@@ -432,33 +698,93 @@ export class ChallengeService extends BaseService {
         queryFilters.createdAt = {};
 
         if (filters.startDate) {
-          queryFilters.createdAt.$gte = new Date(filters.startDate);
+          const startDate = new Date(filters.startDate);
+          if (isNaN(startDate.getTime())) {
+            throw ApiError.badRequest('Invalid start date format', 'INVALID_DATE_FORMAT');
+          }
+          queryFilters.createdAt.$gte = startDate;
         }
 
         if (filters.endDate) {
-          queryFilters.createdAt.$lte = new Date(filters.endDate);
+          const endDate = new Date(filters.endDate);
+          if (isNaN(endDate.getTime())) {
+            throw ApiError.badRequest('Invalid end date format', 'INVALID_DATE_FORMAT');
+          }
+          queryFilters.createdAt.$lte = endDate;
         }
       }
 
-      // Text search functionality
+      // Text search functionality with sanitization
       if (filters.searchTerm) {
-        queryFilters.$or = [
-          { title: { $regex: filters.searchTerm, $options: 'i' } },
-          { description: { $regex: filters.searchTerm, $options: 'i' } },
-          { tags: { $in: [new RegExp(filters.searchTerm, 'i')] } }
-        ];
+        // Validate and sanitize search term
+        if (typeof filters.searchTerm !== 'string') {
+          throw ApiError.badRequest('Search term must be a string', 'INVALID_SEARCH_TERM_TYPE');
+        }
+
+        // Use MongoSanitizer for safe regex building
+        try {
+          const titleRegex = MongoSanitizer.buildSafeRegexCondition(filters.searchTerm);
+          const descRegex = MongoSanitizer.buildSafeRegexCondition(filters.searchTerm);
+          const tagRegex = MongoSanitizer.buildSafeRegexCondition(filters.searchTerm);
+
+          queryFilters.$or = [
+            { title: titleRegex },
+            { description: descRegex },
+            { tags: tagRegex }
+          ];
+        } catch (error) {
+          // Log the error and throw a sanitized error message
+          logger.error('[getChallenges] Error building search regex', {
+            error: error instanceof Error ? error.message : String(error),
+            searchTerm: filters.searchTerm.substring(0, 20) + 
+              (filters.searchTerm.length > 20 ? '...' : '')
+          });
+          
+          throw ApiError.badRequest(
+            'Invalid search pattern. Please simplify your search term.',
+            'INVALID_SEARCH_PATTERN'
+          );
+        }
       }
 
-      // Use pagination utilities for standardized pagination
+      // Validate and sanitize pagination parameters
+      const page = typeof filters.page === 'number' ? 
+        Math.max(1, filters.page) : 1;
+        
+      const maxLimit = 50; // Set maximum items per page
+      const limit = typeof filters.limit === 'number' ? 
+        Math.min(Math.max(1, filters.limit), maxLimit) : 10;
+
+      // Validate and sanitize sort parameters
+      const allowedSortFields = [
+        'createdAt', 'title', 'deadline', 'difficulty', 
+        'maxParticipants', 'currentParticipants', 'status'
+      ];
+      
+      const sortBy = filters.sortBy || 'createdAt';
+      const sortOrder = filters.sortOrder || 'desc';
+
+      // Use MongoSanitizer to validate sort parameters
+      const validatedSort = MongoSanitizer.validateSortParams(
+        sortBy,
+        sortOrder,
+        allowedSortFields
+      );
+      
+      const sortOptions: Record<string, 1 | -1> = {
+        [validatedSort.sortBy]: validatedSort.sortOrder
+      };
+
+      // Use executePaginatedQuery for standardized pagination
       return await executePaginatedQuery<IChallenge>(
         Challenge,
         queryFilters,
         {
-          page: filters.page || 1,
-          limit: filters.limit || 10,
-          sortBy: filters.sortBy || 'createdAt',
-          sortOrder: filters.sortOrder || 'desc',
-          maxLimit: 50 // Set max items per page
+          page,
+          limit,
+          sortBy: validatedSort.sortBy,
+          sortOrder: sortOrder,
+          maxLimit
         },
         // Query modifier for populating relations and other operations
         (query) => query.populate('company', 'companyName logo').lean()
@@ -467,7 +793,12 @@ export class ChallengeService extends BaseService {
       logger.error('[getChallenges] Failed to retrieve challenges', {
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined,
-        filters
+        filters: JSON.stringify({ 
+          ...filters, 
+          searchTerm: filters.searchTerm ? 
+            (filters.searchTerm.substring(0, 20) + 
+              (filters.searchTerm.length > 20 ? '...' : '')) : undefined 
+        })
       });
 
       if (error instanceof ApiError) throw error;
@@ -491,16 +822,25 @@ export class ChallengeService extends BaseService {
     });
 
     try {
-      // Validate IDs
-      if (!Types.ObjectId.isValid(challengeId) || !Types.ObjectId.isValid(companyId)) {
-        throw ApiError.badRequest('Invalid ID format', 'INVALID_ID_FORMAT');
-      }
+      // Validate IDs using MongoSanitizer
+      const sanitizedChallengeId = MongoSanitizer.validateObjectId(
+        challengeId, 
+        'challenge', 
+        { errorStatus: 400, additionalContext: 'When closing challenge' }
+      );
+      
+      const sanitizedCompanyId = MongoSanitizer.validateObjectId(
+        companyId, 
+        'company', 
+        { errorStatus: 400, additionalContext: 'When closing challenge' }
+      );
 
       return await this.withTransaction(async (session) => {
         // Find challenge with company verification (security check)
+        // Use $eq operator to prevent NoSQL injection
         const challenge = await Challenge.findOne({
-          _id: challengeId,
-          company: companyId
+          _id: { $eq: sanitizedChallengeId },
+          company: { $eq: sanitizedCompanyId }
         }).session(session);
 
         if (!challenge) {
@@ -522,8 +862,8 @@ export class ChallengeService extends BaseService {
         await challenge.save({ session });
 
         logger.info('[closeChallenge] Challenge closed successfully', {
-          challengeId,
-          companyId
+          challengeId: sanitizedChallengeId,
+          companyId: sanitizedCompanyId
         });
 
         return challenge;
@@ -555,18 +895,24 @@ export class ChallengeService extends BaseService {
     });
 
     try {
-      // Validate challenge ID
-      if (!Types.ObjectId.isValid(challengeId)) {
-        throw ApiError.badRequest('Invalid challenge ID format', 'INVALID_ID_FORMAT');
-      }
-  
+      // Validate challenge ID using MongoSanitizer
+      const sanitizedChallengeId = MongoSanitizer.validateObjectId(
+        challengeId, 
+        'challenge', 
+        { errorStatus: 400, additionalContext: 'When deleting challenge' }
+      );
+
       await this.withTransaction(async (session) => {
         // Find the challenge first to verify it exists
-        const challenge = await Challenge.findById(challengeId).session(session);
+        // Use $eq operator to prevent NoSQL injection
+        const challenge = await Challenge.findOne({ 
+          _id: { $eq: sanitizedChallengeId } 
+        }).session(session);
+        
         if (!challenge) {
           throw ApiError.notFound('Challenge not found', 'CHALLENGE_NOT_FOUND');
         }
-  
+
         // Business validation - moved from validateChallengeCanBeDeleted
         if (challenge.status !== ChallengeStatus.DRAFT && challenge.currentParticipants > 0) {
           throw ApiError.forbidden(
@@ -574,22 +920,25 @@ export class ChallengeService extends BaseService {
             'CHALLENGE_DELETION_FORBIDDEN'
           );
         }
-        
+
         // Delete the challenge
-        const deleteResult = await Challenge.findByIdAndDelete(challengeId).session(session);
-  
+        const deleteResult = await Challenge.findOneAndDelete({
+          _id: { $eq: sanitizedChallengeId }
+        }).session(session);
+
         if (!deleteResult) {
           throw ApiError.notFound('Challenge not found', 'CHALLENGE_NOT_FOUND');
         }
-  
+
         // Delete all solutions for this challenge
-        const solutionDeleteResult = await Solution.deleteMany({ 
-          challenge: challengeId 
+        // Use $eq operator to prevent NoSQL injection
+        const solutionDeleteResult = await Solution.deleteMany({
+          challenge: { $eq: sanitizedChallengeId }
         }).session(session);
-  
-        logger.info('[deleteChallenge] Challenge and solutions deleted successfully', { 
-          challengeId, 
-          deletedSolutions: solutionDeleteResult.deletedCount 
+
+        logger.info('[deleteChallenge] Challenge and solutions deleted successfully', {
+          challengeId: sanitizedChallengeId,
+          deletedSolutions: solutionDeleteResult.deletedCount
         });
       });
     } catch (error) {
@@ -598,7 +947,7 @@ export class ChallengeService extends BaseService {
         stack: error instanceof Error ? error.stack : undefined,
         challengeId
       });
-      
+
       if (error instanceof ApiError) throw error;
       throw ApiError.internal(
         'Failed to delete challenge',
@@ -950,12 +1299,33 @@ export class ChallengeService extends BaseService {
     });
 
     try {
-      // Validate challenge ID
-      if (!Types.ObjectId.isValid(challengeId)) {
-        throw ApiError.badRequest('Invalid challenge ID format', 'INVALID_ID_FORMAT');
+      // Validate challenge ID using MongoSanitizer
+      const sanitizedChallengeId = MongoSanitizer.validateObjectId(
+        challengeId, 
+        'challenge', 
+        { errorStatus: 400, additionalContext: 'When fetching challenge with visibility' }
+      );
+
+      // Sanitize profileId if provided
+      let sanitizedProfileId: string | undefined = undefined;
+      if (profileId) {
+        try {
+          sanitizedProfileId = MongoSanitizer.validateObjectId(
+            profileId, 
+            'profile', 
+            { required: false, errorStatus: 400, additionalContext: 'When fetching challenge with visibility' }
+          );
+        } catch (error) {
+          logger.warn('[getChallengeByIdWithVisibility] Invalid profile ID, ignoring', {
+            profileId,
+            error: error instanceof Error ? error.message : String(error)
+          });
+          // Continue with undefined profileId
+        }
       }
 
-      const challenge = await Challenge.findById(challengeId)
+      // Use $eq operator to prevent NoSQL injection
+      const challenge = await Challenge.findOne({ _id: { $eq: sanitizedChallengeId } })
         .populate('company', '-user -__v');
 
       if (!challenge) {
@@ -964,19 +1334,27 @@ export class ChallengeService extends BaseService {
 
       // Check company ownership for company users
       const isCompanyOwner = userRole === UserRole.COMPANY &&
-        profileId &&
+        sanitizedProfileId &&
         challenge.company &&
         typeof challenge.company !== 'string' &&
         challenge.company._id &&
-        profileId === challenge.company._id.toString();
+        sanitizedProfileId === challenge.company._id.toString();
 
       // For private challenges, check institution access for students
       if (challenge.visibility === 'private' && userRole === UserRole.STUDENT) {
-        if (!studentProfile?.university ||
-          !challenge.allowedInstitutions?.includes(studentProfile.university)) {
+        // Sanitize university name if present
+        const universityName = studentProfile?.university ? 
+          MongoSanitizer.sanitizeString(studentProfile.university, {
+            fieldName: 'University',
+            maxLength: 200,
+            required: false
+          }) : undefined;
+
+        if (!universityName ||
+          !challenge.allowedInstitutions?.includes(universityName)) {
           logger.warn('[getChallengeByIdWithVisibility] Student access denied to private challenge', {
-            challengeId,
-            studentUniversity: studentProfile?.university,
+            challengeId: sanitizedChallengeId,
+            studentUniversity: universityName,
             allowedInstitutions: challenge.allowedInstitutions
           });
 
@@ -997,7 +1375,7 @@ export class ChallengeService extends BaseService {
           const { company, ...restChallenge } = challengeObj;
 
           logger.info('[getChallengeByIdWithVisibility] Removed company data for anonymous challenge', {
-            challengeId
+            challengeId: sanitizedChallengeId
           });
 
           return restChallenge;
@@ -1005,7 +1383,7 @@ export class ChallengeService extends BaseService {
       }
 
       logger.info('[getChallengeByIdWithVisibility] Challenge retrieved successfully', {
-        challengeId
+        challengeId: sanitizedChallengeId
       });
 
       return challengeObj;
@@ -1066,6 +1444,87 @@ export class ChallengeService extends BaseService {
   }
 
   /**
+   * Recursively sanitizes filter objects to prevent NoSQL injection
+   * @param filters - Raw filter object that might contain malicious data
+   * @returns Sanitized filter object safe to use in MongoDB queries
+   */
+  private sanitizeFilters(filters: Record<string, any>): Record<string, any> {
+    const safeFilters: Record<string, any> = {};
+
+    // Skip empty filters
+    if (!filters || typeof filters !== 'object') {
+      return safeFilters;
+    }
+
+    // Process each filter field
+    for (const [key, value] of Object.entries(filters)) {
+      // Skip undefined or null values
+      if (value === undefined || value === null) continue;
+
+      // Handle special cases like $or arrays
+      if (key === '$or' && Array.isArray(value)) {
+        safeFilters.$or = value.map(condition => this.sanitizeFilters(condition));
+        continue;
+      }
+
+      if (key === '$and' && Array.isArray(value)) {
+        safeFilters.$and = value.map(condition => this.sanitizeFilters(condition));
+        continue;
+      }
+
+      // For normal fields, use $eq operator to ensure value is treated as literal
+      if (typeof value === 'string') {
+        safeFilters[key] = { $eq: String(value).trim() };
+      } else if (typeof value === 'number' || typeof value === 'boolean') {
+        safeFilters[key] = { $eq: value };
+      } else if (value instanceof Types.ObjectId) {
+        safeFilters[key] = { $eq: value };
+      } else if (value instanceof Date) {
+        safeFilters[key] = { $eq: value };
+      } else if (typeof value === 'object') {
+        // For objects that might already contain MongoDB operators
+        // Only allow specific safe operators and recursively sanitize their values
+        const safeOps: Record<string, any> = {};
+        const allowedOperators = ['$eq', '$gt', '$gte', '$lt', '$lte', '$in', '$nin', '$regex', '$options'];
+        
+        // Check if it's a MongoDB query operator object
+        const hasOperators = Object.keys(value).some(k => k.startsWith('$'));
+        
+        if (hasOperators) {
+          // If it has operators, only allow whitelisted ones
+          for (const [op, opValue] of Object.entries(value)) {
+            if (allowedOperators.includes(op)) {
+              // Special handling for regex to prevent ReDoS
+              if (op === '$regex' && typeof opValue === 'string') {
+                try {
+                  // Use MongoSanitizer for safe regex
+                  const safeRegex = MongoSanitizer.buildSafeRegexCondition(opValue);
+                  safeOps.$regex = safeRegex.$regex;
+                  safeOps.$options = safeRegex.$options;
+                } catch (error) {
+                  logger.warn(`Invalid regex pattern rejected: ${opValue}`);
+                  // Skip this operator if regex is invalid
+                }
+              } else {
+                safeOps[op] = opValue;
+              }
+            }
+          }
+          
+          if (Object.keys(safeOps).length > 0) {
+            safeFilters[key] = safeOps;
+          }
+        } else {
+          // If not an operator object, treat as literal value
+          safeFilters[key] = { $eq: value };
+        }
+      }
+    }
+
+    return safeFilters;
+  }
+
+  /**
    * Get challenges with user-specific visibility
    */
   async getChallengesForUser(
@@ -1088,59 +1547,140 @@ export class ChallengeService extends BaseService {
         filters
       });
 
-      // Build query filters
+      // Sanitize userId if provided
+      let sanitizedUserId: string | undefined = undefined;
+      if (userId) {
+        try {
+          sanitizedUserId = MongoSanitizer.validateObjectId(
+            userId, 
+            'user', 
+            { required: false, errorStatus: 400, additionalContext: 'When fetching challenges for user' }
+          );
+        } catch (error) {
+          logger.warn('[getChallengesForUser] Invalid user ID, ignoring', {
+            userId,
+            error: error instanceof Error ? error.message : String(error)
+          });
+          // Continue with undefined userId
+        }
+      }
+
+      // Build query filters with sanitization
       const queryFilters: Record<string, any> = {};
 
-      if (filters.difficulty) queryFilters.difficulty = filters.difficulty;
+      // Sanitize difficulty
+      if (filters.difficulty) {
+        const difficulty = MongoSanitizer.sanitizeString(filters.difficulty, {
+          fieldName: 'Difficulty', 
+          maxLength: 50
+        });
+        
+        // Validate against enum
+        if (!Object.values(ChallengeDifficulty).includes(difficulty as ChallengeDifficulty)) {
+          throw ApiError.badRequest(
+            `Invalid difficulty value. Allowed values: ${Object.values(ChallengeDifficulty).join(', ')}`,
+            'INVALID_DIFFICULTY'
+          );
+        }
+        
+        queryFilters.difficulty = { $eq: difficulty };
+      }
+
+      // Sanitize category
       if (filters.category) {
-        queryFilters.category = {
-          $in: Array.isArray(filters.category) ? filters.category : [filters.category]
-        };
+        if (Array.isArray(filters.category)) {
+          // Sanitize each category
+          const sanitizedCategories = filters.category.map(cat => 
+            MongoSanitizer.sanitizeString(cat, {
+              fieldName: 'Category',
+              maxLength: 100
+            })
+          );
+          queryFilters.category = { $in: sanitizedCategories };
+        } else {
+          // Sanitize single category
+          const sanitizedCategory = MongoSanitizer.sanitizeString(filters.category, {
+            fieldName: 'Category',
+            maxLength: 100
+          });
+          queryFilters.category = { $eq: sanitizedCategory };
+        }
       }
 
-      // Search in title and description
+      // Search in title and description with enhanced security
       if (filters.searchTerm) {
-        const searchRegex = new RegExp(String(filters.searchTerm), 'i');
-        queryFilters.$or = [
-          { title: searchRegex },
-          { description: searchRegex },
-          { tags: searchRegex }
-        ];
+        // Security: Validate search term to prevent DoS attacks
+        if (typeof filters.searchTerm !== 'string') {
+          logger.warn('[getChallengesForUser] Invalid search term type', {
+            searchTermType: typeof filters.searchTerm
+          });
+          throw ApiError.badRequest('Search term must be a string', 'INVALID_SEARCH_TERM');
+        }
+
+        try {
+          // Use MongoSanitizer for safe regex construction
+          const titleRegex = MongoSanitizer.buildSafeRegexCondition(filters.searchTerm);
+          const descRegex = MongoSanitizer.buildSafeRegexCondition(filters.searchTerm);
+          const tagRegex = MongoSanitizer.buildSafeRegexCondition(filters.searchTerm);
+
+          // Apply search filters using MongoDB's native string operators
+          queryFilters.$or = [
+            { title: titleRegex },
+            { description: descRegex },
+            { tags: tagRegex }
+          ];
+
+          logger.debug('[getChallengesForUser] Applied search filter', {
+            searchPattern: filters.searchTerm.substring(0, 20) + 
+              (filters.searchTerm.length > 20 ? '...' : '')
+          });
+        } catch (error) {
+          logger.error('[getChallengesForUser] Error processing search term', {
+            error: error instanceof Error ? error.message : String(error),
+            searchTerm: filters.searchTerm.substring(0, 20) + 
+              (filters.searchTerm.length > 20 ? '...' : '')
+          });
+
+          throw ApiError.badRequest(
+            'Invalid search term format',
+            'INVALID_SEARCH_FORMAT'
+          );
+        }
       }
 
-      // Handle draft challenge visibility
+      // Handle draft challenge visibility with proper sanitization
       if (filters.status === 'draft') {
         // Only company users can see their own draft challenges
-        if (userRole === UserRole.COMPANY && userId) {
+        if (userRole === UserRole.COMPANY && sanitizedUserId) {
           // Get the company profile ID for the current user
-          const companyProfile = await this.getCompanyProfileForUser(userId);
+          const companyProfile = await this.getCompanyProfileForUser(sanitizedUserId);
           if (companyProfile) {
-            queryFilters.status = ChallengeStatus.DRAFT;
-            queryFilters.company = companyProfile._id;
+            queryFilters.status = { $eq: ChallengeStatus.DRAFT };
+            queryFilters.company = { $eq: companyProfile._id };
           } else {
             // If company profile not found, return empty result
             return createPaginationResult([], 0, filters.page || 1, filters.limit || 10);
           }
         } else if (userRole === UserRole.ADMIN) {
           // Admins can see all draft challenges
-          queryFilters.status = ChallengeStatus.DRAFT;
+          queryFilters.status = { $eq: ChallengeStatus.DRAFT };
         } else {
           // Non-company/admin users can't see draft challenges
           return createPaginationResult([], 0, filters.page || 1, filters.limit || 10);
         }
       } else if (filters.status === 'all') {
         // For 'all' status requests:
-        if (userRole === UserRole.COMPANY && userId) {
+        if (userRole === UserRole.COMPANY && sanitizedUserId) {
           // Companies can see all their own challenges plus active/closed/completed public challenges
-          const companyProfile = await this.getCompanyProfileForUser(userId);
+          const companyProfile = await this.getCompanyProfileForUser(sanitizedUserId);
           if (companyProfile) {
             queryFilters.$or = [
               // Their own challenges of any status
-              { company: companyProfile._id },
+              { company: { $eq: companyProfile._id } },
               // Active, closed, or completed public challenges
               {
                 status: { $in: [ChallengeStatus.ACTIVE, ChallengeStatus.CLOSED, ChallengeStatus.COMPLETED] },
-                visibility: 'public'
+                visibility: { $eq: 'public' }
               }
             ];
           } else {
@@ -1154,26 +1694,45 @@ export class ChallengeService extends BaseService {
           queryFilters.status = { $ne: ChallengeStatus.DRAFT };
         }
       } else if (filters.status) {
-        // For specific non-draft status
-        queryFilters.status = filters.status;
+        // Validate if status is a valid enum value
+        const status = MongoSanitizer.sanitizeString(filters.status, {
+          fieldName: 'Status', 
+          maxLength: 20
+        });
+        
+        if (Object.values(ChallengeStatus).includes(status as ChallengeStatus)) {
+          queryFilters.status = { $eq: status };
+        } else {
+          throw ApiError.badRequest(
+            `Invalid status value. Allowed values: ${Object.values(ChallengeStatus).join(', ')}`,
+            'INVALID_STATUS'
+          );
+        }
       } else {
         // Apply default filter if status not specified
-        queryFilters.status = ChallengeStatus.ACTIVE;
+        queryFilters.status = { $eq: ChallengeStatus.ACTIVE };
       }
 
-      // Apply visibility filters based on user role
+      // Apply visibility filters based on user role with proper sanitization
       if (userRole === UserRole.STUDENT || !userRole) {
         // Initial visibility filter
-        const visibilityFilter: Record<string, any> = { visibility: 'public' };
+        const visibilityFilter: Record<string, any> = { visibility: { $eq: 'public' } };
 
         // For authenticated students, also include private challenges they can access
-        if (userRole === UserRole.STUDENT && userId && studentProfile?.university) {
+        if (userRole === UserRole.STUDENT && sanitizedUserId && studentProfile?.university) {
+          // Sanitize university name
+          const university = MongoSanitizer.sanitizeString(studentProfile.university, {
+            fieldName: 'University', 
+            maxLength: 200,
+            required: false
+          });
+          
           visibilityFilter.$or = [
-            { visibility: 'public' },
-            { visibility: 'anonymous' },
+            { visibility: { $eq: 'public' } },
+            { visibility: { $eq: 'anonymous' } },
             {
-              visibility: 'private',
-              allowedInstitutions: { $in: [studentProfile.university] }
+              visibility: { $eq: 'private' },
+              allowedInstitutions: { $in: [university] }
             }
           ];
         }
@@ -1182,13 +1741,23 @@ export class ChallengeService extends BaseService {
         queryFilters.$and.push(visibilityFilter);
       }
 
+      // Sanitize pagination parameters
+      const page = filters.page ? 
+        Math.max(1, parseInt(String(filters.page))) : 1;
+        
+      const limit = filters.limit ? 
+        Math.min(Math.max(1, parseInt(String(filters.limit))), 50) : 10;
+
+      // Apply final sanitization to the entire query object
+      const safeQueryFilters = this.sanitizeFilters(queryFilters);
+
       // Use pagination utilities for standardized handling
       const result = await executePaginatedQuery(
         Challenge,
-        queryFilters,
+        safeQueryFilters,
         {
-          page: filters.page || 1,
-          limit: filters.limit || 10,
+          page,
+          limit,
           sortBy: 'createdAt',
           sortOrder: 'desc'
         },
@@ -1313,17 +1882,26 @@ export class ChallengeService extends BaseService {
     action: string
   ): Promise<IChallenge> {
     try {
-      // Validate challenge ID
-      if (!Types.ObjectId.isValid(challengeId)) {
-        throw ApiError.badRequest(`Invalid challenge ID format: ${challengeId}`, 'INVALID_ID_FORMAT');
-      }
+      // Validate challenge ID using MongoSanitizer
+      const sanitizedChallengeId = MongoSanitizer.validateObjectId(
+        challengeId, 
+        'challenge', 
+        { errorStatus: 400, additionalContext: `During ${action} authorization` }
+      );
+      
+      // Sanitize user/profile ID
+      const sanitizedUserIdOrProfileId = MongoSanitizer.validateObjectId(
+        userIdOrProfileId, 
+        userRole === UserRole.COMPANY ? 'company profile' : 'user',
+        { errorStatus: 400, additionalContext: `During ${action} authorization` }
+      );
 
       // Get the challenge
-      const challenge = await this.getChallengeById(challengeId);
+      const challenge = await this.getChallengeById(sanitizedChallengeId);
 
       if (!challenge) {
         throw ApiError.notFound(
-          `Challenge not found with id: ${challengeId}`,
+          `Challenge not found with id: ${sanitizedChallengeId}`,
           'CHALLENGE_NOT_FOUND'
         );
       }
@@ -1338,7 +1916,8 @@ export class ChallengeService extends BaseService {
         }
 
         // For company users, verify they own the challenge
-        if (challenge.company.toString() !== userIdOrProfileId) {
+        // Use strict comparison after sanitization
+        if (challenge.company.toString() !== sanitizedUserIdOrProfileId) {
           throw ApiError.forbidden(
             `You do not have permission to ${action} this challenge`,
             'NOT_CHALLENGE_OWNER'
@@ -1348,9 +1927,9 @@ export class ChallengeService extends BaseService {
 
       // Log successful authorization
       logger.info('[authorizeChallengeOwner] Challenge access authorized', {
-        challengeId,
+        challengeId: sanitizedChallengeId,
         action,
-        userIdOrProfileId,
+        userIdOrProfileId: sanitizedUserIdOrProfileId,
         role: userRole
       });
 
