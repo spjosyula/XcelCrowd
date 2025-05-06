@@ -825,7 +825,8 @@ export class SpamFilteringAgent extends AIAgentBase<ISpamFilteringResult> {
     }
 
     // Check for GitHub URL pattern
-    if (!solution.submissionUrl.includes('github.com')) {
+    const sanitizedUrl = MongoSanitizer.sanitizeGitHubUrl(solution.submissionUrl);
+    if (!solution.submissionUrl || !sanitizedUrl) {
       throw new ApiError(
         HTTP_STATUS.BAD_REQUEST,
         'Submission URL must be a GitHub repository',

@@ -11,6 +11,8 @@ import { ApiError } from '../../../utils/api.error';
 import { HTTP_STATUS } from '../../../models/interfaces';
 import { setTimeout } from 'timers/promises';
 import * as crypto from 'crypto';
+import { MongoSanitizer } from '../../../utils/mongo.sanitize';
+import { GitHubService } from '../../../services/github.service';
 
 // Cache TTL - 30 minutes
 const CACHE_TTL = 30 * 60 * 1000;
@@ -331,39 +333,7 @@ export class CodeQualityAgent extends AIAgentBase<ICodeQualityResult> {
     repo: string;
     url: string
   }> {
-    try {
-      const url = new URL(submissionUrl);
-
-      // Check if this is a GitHub URL
-      if (!url.hostname.includes('github.com')) {
-        throw new Error('Not a GitHub repository URL');
-      }
-
-      const pathParts = url.pathname.split('/').filter(part => part.length > 0);
-
-      // Ensure we have at least owner and repo parts
-      if (pathParts.length < 2) {
-        throw new Error('Invalid GitHub repository URL format');
-      }
-
-      return {
-        owner: pathParts[0],
-        repo: pathParts[1],
-        url: `https://github.com/${pathParts[0]}/${pathParts[1]}`
-      };
-    } catch (error) {
-      logger.error(`Error extracting GitHub repo information`, {
-        submissionUrl,
-        error: error instanceof Error ? error.message : String(error)
-      });
-
-      throw new ApiError(
-        HTTP_STATUS.BAD_REQUEST,
-        `Invalid GitHub repository URL: ${error instanceof Error ? error.message : 'parsing error'}`,
-        true,
-        'INVALID_GITHUB_URL'
-      );
-    }
+    return GitHubService.extractGitHubRepoInfo(submissionUrl);
   }
 
   /**

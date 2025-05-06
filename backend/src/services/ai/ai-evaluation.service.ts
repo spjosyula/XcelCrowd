@@ -61,6 +61,7 @@ export class AIEvaluationService extends BaseService {
         'MISSING_SOLUTION_ID'
       );
     }
+    
 
     const sanitizedSolutionId = MongoSanitizer.sanitizeObjectId(solutionId);
     if (!Types.ObjectId.isValid(sanitizedSolutionId)) {
@@ -107,7 +108,8 @@ export class AIEvaluationService extends BaseService {
         }
 
         // Validate GitHub repository URL
-        if (!solution.submissionUrl || !solution.submissionUrl.includes('github.com')) {
+        const sanitizedGitHubUrl = MongoSanitizer.sanitizeGitHubUrl(solution.submissionUrl);
+        if (!solution.submissionUrl || !sanitizedGitHubUrl) {
           logger.warn(`Invalid GitHub repository URL`, {
             solutionId: sanitizedSolutionId,
             submissionUrl: solution.submissionUrl,
@@ -120,6 +122,7 @@ export class AIEvaluationService extends BaseService {
             'INVALID_GITHUB_URL'
           );
         }
+        
 
         // Check if evaluation already exists
         const existingEvaluation = await AIEvaluation.findOne({
@@ -1065,7 +1068,8 @@ export class AIEvaluationService extends BaseService {
       }
       
       // Validate GitHub repository URL
-      if (!solution.submissionUrl || !solution.submissionUrl.includes('github.com')) {
+      const sanitizedGitHubUrl = MongoSanitizer.sanitizeGitHubUrl(solution.submissionUrl);
+      if (!solution.submissionUrl || !sanitizedGitHubUrl) {
         logger.warn(`Invalid GitHub repository URL`, {
           solutionId: sanitizedSolutionId,
           submissionUrl: solution.submissionUrl
