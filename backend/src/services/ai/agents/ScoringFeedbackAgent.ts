@@ -67,6 +67,8 @@ export class ScoringFeedbackAgent extends AIAgentBase<IScoringFeedbackResult> {
     ACCEPTABLE: 60,          // Acceptable in this area
     WEAK: 40                 // Weak in this area
   };
+
+  
   
   /**
    * Evaluate a solution for final scoring and feedback generation

@@ -196,10 +196,11 @@ export class CodeQualityAgent extends AIAgentBase<ICodeQualityResult> {
     },
     // Security misconfiguration
     {
-      pattern: /(cors|CORS)(\s|\n)*{(\s|\n)*origin(\s|\n)*:(\s|\n)*['"]\*/g,
+      pattern: /(cors|CORS)[\s\n]*\{[\s\n]*origin[\s\n]*:[\s\n]*['"][*]['"]?/g,
       severity: 'medium',
       description: 'Overly permissive CORS configuration',
       language: 'all'
+
     }
   ];
 
@@ -384,7 +385,7 @@ export class CodeQualityAgent extends AIAgentBase<ICodeQualityResult> {
     // Unless explicitly instructed otherwise in the challenge requirements,
     // code quality issues should never cause a failure
     // We assume code quality requirements are not part of the challenge by default
-    
+
     // Scores below 40 should be reviewed but not failed
     if (result.score < 40) {
       return EvaluationDecision.REVIEW;

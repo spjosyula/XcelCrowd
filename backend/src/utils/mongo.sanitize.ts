@@ -3,6 +3,7 @@ import { escapeRegExp } from 'lodash';
 import { ApiError } from './api.error';
 import { HTTP_STATUS } from '../constants';
 import { logger } from './logger';
+import SPAM_PATTERNS from '../constants/spam.patterns';
 
 /**
  * Enterprise-grade utility class for MongoDB query sanitization
@@ -805,6 +806,69 @@ export class MongoSanitizer {
         true,
         'INVALID_URL_FORMAT'
       );
+    }
+  }
+
+  /**
+ * Sanitize and validate GitHub URL with comprehensive security
+ * @param urlString - The URL to sanitize
+ * @returns Sanitized URL or null if invalid
+ */
+  static sanitizeGitHubUrl(urlString: string): string | null {
+    if (!urlString) return null;
+
+    // Check for common URL shorteners - we don't allow these for security reasons
+    for (const domain of SPAM_PATTERNS.SUSPICIOUS_DOMAINS) {
+      if (urlString.includes(domain)) {
+        logger.warn(`Submission URL contains suspicious domain: ${domain}`, {
+          submissionUrl: urlString
+        });
+        return null;
+      }
+    }
+
+    try {
+      // Handle URLs without protocol
+      let urlWithProtocol = urlString;
+      if (!urlString.startsWith('http://') && !urlString.startsWith('https://')) {
+        urlWithProtocol = `https://${urlString}`;
+      }
+
+      // Parse and validate URL
+      const url = new URL(urlWithProtocol);
+
+      // Only allow http and https protocols
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+        logger.warn(`URL protocol not allowed: ${url.protocol}`, {
+          submissionUrl: urlString
+        });
+        return null;
+      }
+
+      // Always use HTTPS for security
+      url.protocol = 'https:';
+
+      // Convert hostname to lowercase for consistent validation
+      url.hostname = url.hostname.toLowerCase();
+
+      // Check for potentially dangerous content in URL parameters
+      const hasScriptInParams = /[?&].*script.*=/.test(url.search) ||
+        /[?&].*<.*>.*=/.test(url.search);
+      if (hasScriptInParams) {
+        logger.warn(`Potentially malicious script content in URL params`, {
+          submissionUrl: urlString,
+          search: url.search
+        });
+        return null;
+      }
+
+      return url.toString();
+    } catch (error) {
+      logger.warn(`Invalid URL format`, {
+        submissionUrl: urlString,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return null;
     }
   }
 
