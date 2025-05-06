@@ -10,7 +10,7 @@ import { connectDB } from './utils/database';
 import routes from './routes';
 import { errorHandler, notFoundHandler } from './middlewares/errorhandler.middleware';
 import { logger, logRequest } from './utils/logger';
-import { validateEnv, config } from './utils/config';
+import { validateEnv, config } from './config/config.env.validation';
 import { xssProtection, configureCSP, enhancedCsrfProtection } from './middlewares/security.middleware';
 import { authenticate, conditionalAuthenticate } from './middlewares/auth.middleware';
 import swaggerUi from 'swagger-ui-express';

@@ -72,7 +72,7 @@ export const authenticate = async (req: Request, res: Response, next: NextFuncti
     }
     
     // 2) Validate token
-    const jwtSecret = process.env.JWT_SECRET || 'fallback-secret-key-for-development';
+    const jwtSecret = process.env.JWT_SECRET;
     if (!jwtSecret) {
       logger.error('JWT_SECRET is not defined in environment variables');
       return next(new ApiError(HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Authentication service configuration error'));

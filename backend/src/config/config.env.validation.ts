@@ -1,7 +1,7 @@
 /**
  * Configuration utility for validating and providing access to environment variables
  */
-import { logger } from './logger';
+import { logger } from '../utils/logger';
 import dotenv from 'dotenv';
 
 // Load environment variables
