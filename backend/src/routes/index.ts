@@ -6,6 +6,7 @@ import architectRoutes from './architect.routes';
 import challengeRoutes from './challenge.routes';
 import solutionRoutes from './solution.routes';
 import dashboardRoutes from './dashboard.routes';
+import aiEvaluationRoutes from './ai-evaluation.routes';
 
 const router = express.Router();
 
@@ -26,5 +27,6 @@ router.use('/architect', architectRoutes);
 router.use('/challenges', challengeRoutes);
 router.use('/solutions', solutionRoutes);
 router.use('/dashboard', dashboardRoutes);
+router.use('/ai-evaluation', aiEvaluationRoutes);
 
 export default router;

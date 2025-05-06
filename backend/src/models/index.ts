@@ -5,3 +5,8 @@ export { default as ArchitectProfile } from './ArchitectProfile';
 export { default as Challenge } from './Challenge';
 export { default as Solution } from './Solution';
 export * from './interfaces';
+import AIEvaluation from './AIEvaluation';
+
+export {
+  AIEvaluation,
+};
