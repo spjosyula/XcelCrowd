@@ -2,79 +2,12 @@ import { AIAgentBase } from '../AIAgentBase';
 import {
   IRequirementsComplianceResult,
   ISolution,
-  EvaluationDecision
+  EvaluationDecision,
+  IChallengeRequirement
 } from '../../../models/interfaces';
 import { logger } from '../../../utils/logger';
-import axios from 'axios';
-import { githubTokenManager } from '../../../config/GitHubTokenManager';
-// import * as path from 'path'; // Not needed, use custom extension extraction below
-import { ApiError } from '../../../utils/api.error';
-import { HTTP_STATUS } from '../../../models/interfaces';
-import { setTimeout } from 'timers/promises';
-import * as crypto from 'crypto';
-import { MongoSanitizer } from '../../../utils/mongo.sanitize';
-import { GitHubService } from '../../github.service';
-
-// Cache TTL - 30 minutes
-const CACHE_TTL = 30 * 60 * 1000;
-
-// Response cache to avoid duplicate API calls
-interface ICachedRepositoryData {
-  timestamp: number;
-  structure: IRepositoryStructure;
-  fileContents: Map<string, string>;
-}
-
-// Structure analysis result
-interface IRepositoryStructure {
-  hasRequiredFiles: boolean;
-  missingFiles: string[];
-  hasReadme: boolean;
-  hasProperStructure: boolean;
-  fileExtensions: Set<string>;
-  files: IFileInfo[];
-  directories: string[];
-  totalSize: number;
-  readmeContent?: string;
-  packageFiles: IPackageFile[];
-}
-
-// File information
-interface IFileInfo {
-  path: string;
-  name: string;
-  extension: string;
-  size: number;
-  url: string;
-  type: 'file' | 'dir' | 'symlink' | 'submodule';
-}
-
-// Package file (package.json, requirements.txt, etc.)
-interface IPackageFile {
-  type: 'npm' | 'python' | 'ruby' | 'other';
-  path: string;
-  dependencies: string[];
-  devDependencies?: string[];
-}
-
-// Challenge requirement structure
-interface IChallengeRequirement {
-  id: string;
-  name: string;
-  description: string;
-  type: 'file' | 'feature' | 'package' | 'structure' | 'other' | 'quality';
-  importance: 'critical' | 'important' | 'nice-to-have';
-  // For file requirements
-  filePath?: string;
-  filePattern?: string;
-  extensions?: string[];
-  // For code requirements
-  codePattern?: string;
-  // For package requirements
-  packageName?: string;
-  packageType?: 'npm' | 'python' | 'ruby' | 'other';
-  packageVersion?: string;
-}
+import { GitHubService, IRepositoryStructure } from '../../../services/github.service';
+import { commonTechnologies } from '../../../constants/common.tech.things';
 
 /**
  * Requirements Compliance Agent
@@ -83,12 +16,6 @@ interface IChallengeRequirement {
 export class RequirementsComplianceAgent extends AIAgentBase<IRequirementsComplianceResult> {
   public name = 'RequirementsComplianceAgent';
   public description = 'Verifies challenge requirements adherence in GitHub submissions';
-
-  // Cache for repository analysis
-  private static repositoryCache: Map<string, ICachedRepositoryData> = new Map();
-
-  // File content cache for repository
-  private static fileContentCache: Map<string, { timestamp: number, content: string }> = new Map();
 
   /**
    * Evaluate a GitHub solution for requirements compliance
@@ -117,8 +44,8 @@ export class RequirementsComplianceAgent extends AIAgentBase<IRequirementsCompli
         repository: `${repoInfo.owner}/${repoInfo.repo}`
       });
 
-      // Analyze repository structure
-      const repoStructure = await this.analyzeRepositoryStructure(repoInfo);
+      // Analyze repository structure using GitHubService
+      const repoStructure = await GitHubService.analyzeRepositoryStructure(repoInfo.owner, repoInfo.repo);
 
       // Extract requirements from the challenge
       const requirements = this.extractRequirementsFromChallenge(challenge);
@@ -193,380 +120,16 @@ export class RequirementsComplianceAgent extends AIAgentBase<IRequirementsCompli
   }
 
   /**
- * Extract GitHub repository information from URL with enterprise-level security
- * @param submissionUrl - The URL submitted by the student
- * @returns Object containing repository information
- */
+   * Extract GitHub repository information from URL with enterprise-level security
+   * @param submissionUrl - The URL submitted by the student
+   * @returns Object containing repository information
+   */
   private async extractGitHubRepoInfo(submissionUrl: string): Promise<{
     owner: string;
     repo: string;
     url: string
   }> {
     return GitHubService.extractGitHubRepoInfo(submissionUrl);
-  }
-
-  /**
-   * Analyze GitHub repository structure
-   * @param repoInfo - Repository information (owner and name)
-   * @returns Structure analysis results
-   */
-  private async analyzeRepositoryStructure(repoInfo: {
-    owner: string;
-    repo: string;
-    url: string
-  }): Promise<IRepositoryStructure> {
-    const cacheKey = `${repoInfo.owner}/${repoInfo.repo}`;
-
-    // Check cache first
-    const cachedData = RequirementsComplianceAgent.repositoryCache.get(cacheKey);
-    if (cachedData && (Date.now() - cachedData.timestamp) < CACHE_TTL) {
-      logger.debug(`Using cached repository structure for ${cacheKey}`);
-      return cachedData.structure;
-    }
-
-    try {
-      logger.debug(`Fetching repository structure for ${cacheKey}`);
-
-      // Initialize structure
-      const structure: IRepositoryStructure = {
-        hasRequiredFiles: false,
-        missingFiles: [],
-        hasReadme: false,
-        hasProperStructure: false,
-        fileExtensions: new Set<string>(),
-        files: [],
-        directories: [],
-        totalSize: 0,
-        packageFiles: []
-      };
-
-      // Get repository contents recursively
-      await this.getRepositoryContentsRecursive(repoInfo.owner, repoInfo.repo, '', structure);
-
-      // Process the files to determine features
-      structure.hasReadme = structure.files.some(file =>
-        file.name.toLowerCase() === 'readme.md' ||
-        file.name.toLowerCase() === 'readme.txt' ||
-        file.name.toLowerCase() === 'readme'
-      );
-
-      // If README exists, get its content
-      if (structure.hasReadme) {
-        const readmeFile = structure.files.find(file =>
-          file.name.toLowerCase() === 'readme.md' ||
-          file.name.toLowerCase() === 'readme.txt' ||
-          file.name.toLowerCase() === 'readme'
-        );
-
-        if (readmeFile) {
-          structure.readmeContent = await this.getFileContent(
-            repoInfo.owner,
-            repoInfo.repo,
-            readmeFile.path
-          );
-        }
-      }
-
-      // Process package files
-      for (const file of structure.files) {
-        if (file.name === 'package.json') {
-          try {
-            const content = await this.getFileContent(repoInfo.owner, repoInfo.repo, file.path);
-            const packageJson = JSON.parse(content);
-
-            structure.packageFiles.push({
-              type: 'npm',
-              path: file.path,
-              dependencies: Object.keys(packageJson.dependencies || {}),
-              devDependencies: Object.keys(packageJson.devDependencies || {})
-            });
-          } catch (error) {
-            logger.warn(`Error parsing package.json in ${file.path}`, {
-              error: error instanceof Error ? error.message : String(error),
-              repository: cacheKey
-            });
-          }
-        } else if (file.name === 'requirements.txt') {
-          try {
-            const content = await this.getFileContent(repoInfo.owner, repoInfo.repo, file.path);
-            const dependencies = content
-              .split('\n')
-              .map(line => line.trim())
-              .filter(line => line && !line.startsWith('#'))
-              .map(line => {
-                // Handle version specifiers
-                const parts = line.split('==');
-                return parts[0].trim();
-              });
-
-            structure.packageFiles.push({
-              type: 'python',
-              path: file.path,
-              dependencies
-            });
-          } catch (error) {
-            logger.warn(`Error parsing requirements.txt in ${file.path}`, {
-              error: error instanceof Error ? error.message : String(error),
-              repository: cacheKey
-            });
-          }
-        } else if (file.name === 'Gemfile') {
-          try {
-            const content = await this.getFileContent(repoInfo.owner, repoInfo.repo, file.path);
-            const dependencies = content
-              .split('\n')
-              .map(line => line.trim())
-              .filter(line => line.startsWith('gem '))
-              .map(line => {
-                // Extract gem name
-                const match = line.match(/gem\s+['"]([^'"]+)['"]/);
-                return match ? match[1] : line;
-              });
-
-            structure.packageFiles.push({
-              type: 'ruby',
-              path: file.path,
-              dependencies
-            });
-          } catch (error) {
-            logger.warn(`Error parsing Gemfile in ${file.path}`, {
-              error: error instanceof Error ? error.message : String(error),
-              repository: cacheKey
-            });
-          }
-        }
-      }
-
-      // Check if structure is proper (basic requirements)
-      structure.hasProperStructure = structure.hasReadme &&
-        structure.files.length > 3 &&
-        structure.packageFiles.length > 0;
-
-      // Cache the result
-      RequirementsComplianceAgent.repositoryCache.set(cacheKey, {
-        timestamp: Date.now(),
-        structure,
-        fileContents: new Map()
-      });
-
-      return structure;
-    } catch (error) {
-      logger.error(`Error analyzing repository structure`, {
-        repoOwner: repoInfo.owner,
-        repoName: repoInfo.repo,
-        error: error instanceof Error ? error.message : String(error),
-        stack: error instanceof Error ? error.stack : undefined
-      });
-
-      throw error;
-    }
-  }
-
-  /**
-   * Get repository contents recursively
-   * @param owner - Repository owner
-   * @param repo - Repository name
-   * @param path - Current path within repository
-   * @param structure - Structure object to update
-   */
-  private async getRepositoryContentsRecursive(
-    owner: string,
-    repo: string,
-    path: string,
-    structure: IRepositoryStructure
-  ): Promise<void> {
-    try {
-      // Get GitHub API token
-      const token = githubTokenManager.getNextToken();
-
-      // Prepare API request
-      const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
-      const headers: Record<string, string> = {
-        'Accept': 'application/vnd.github.v3+json',
-        'User-Agent': 'XcelCrowd-AI-Evaluation'
-      };
-
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`;
-      }
-
-      // Make the request
-      const response = await axios.get(apiUrl, { headers });
-      let rateLimitRemaining: number | undefined;
-      let rateLimitReset: number | undefined;
-
-      // Extract rate limit info
-      if (response.headers && response.headers['x-ratelimit-remaining']) {
-        rateLimitRemaining = parseInt(response.headers['x-ratelimit-remaining'], 10);
-      }
-
-      if (response.headers && response.headers['x-ratelimit-reset']) {
-        rateLimitReset = parseInt(response.headers['x-ratelimit-reset'], 10);
-      }
-
-      // Update token metrics
-      if (token) {
-        githubTokenManager.updateTokenMetrics(
-          token,
-          true,
-          rateLimitRemaining,
-          rateLimitReset
-        );
-      }
-
-      // Process the response
-      const contents = Array.isArray(response.data) ? response.data : [response.data];
-
-      // Process each item
-      for (const item of contents) {
-        if (item.type === 'file') {
-          // Add file info
-          const extension = (() => {
-            const idx = item.name.lastIndexOf('.');
-            return idx !== -1 ? item.name.substring(idx).toLowerCase() : '';
-          })();
-          structure.fileExtensions.add(extension);
-
-          const fileInfo: IFileInfo = {
-            path: item.path,
-            name: item.name,
-            extension,
-            size: item.size,
-            url: item.html_url,
-            type: 'file'
-          };
-
-          structure.files.push(fileInfo);
-          structure.totalSize += item.size;
-        } else if (item.type === 'dir') {
-          // Add directory
-          structure.directories.push(item.path);
-
-          // Recursively process directory
-          await this.getRepositoryContentsRecursive(owner, repo, item.path, structure);
-
-          // Avoid hitting rate limits
-          await setTimeout(100);
-        } else if (item.type === 'symlink' || item.type === 'submodule') {
-          // Add with special type
-          const fileInfo: IFileInfo = {
-            path: item.path,
-            name: item.name,
-            extension: '',
-            size: 0,
-            url: item.html_url,
-            type: item.type as 'symlink' | 'submodule'
-          };
-
-          structure.files.push(fileInfo);
-        }
-      }
-    } catch (error) {
-      if (axios.isAxiosError(error) && error.response && error.response.status === 404) {
-        logger.debug(`Path not found in repository: ${path}`, {
-          owner,
-          repo
-        });
-        // This is not a critical error, just means the path doesn't exist
-        return;
-      }
-
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      logger.error(`Error fetching repository contents`, {
-        owner,
-        repo,
-        path,
-        error: errorMessage
-      });
-
-      throw error;
-    }
-  }
-
-  /**
-   * Get file content from GitHub API
-   * @param owner - Repository owner
-   * @param repo - Repository name
-   * @param filePath - Path to the file
-   * @returns File content as string
-   */
-  private async getFileContent(
-    owner: string,
-    repo: string,
-    filePath: string
-  ): Promise<string> {
-    const cacheKey = `${owner}/${repo}/${filePath}`;
-
-    // Check cache first
-    const cachedContent = RequirementsComplianceAgent.fileContentCache.get(cacheKey);
-    if (cachedContent && (Date.now() - cachedContent.timestamp) < CACHE_TTL) {
-      return cachedContent.content;
-    }
-
-    try {
-      // Get GitHub API token
-      const token = githubTokenManager.getNextToken();
-
-      // Prepare API request
-      const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${filePath}`;
-      const headers: Record<string, string> = {
-        'Accept': 'application/vnd.github.v3+json',
-        'User-Agent': 'XcelCrowd-AI-Evaluation'
-      };
-
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`;
-      }
-
-      // Make the request
-      const response = await axios.get(apiUrl, { headers });
-      let rateLimitRemaining: number | undefined;
-      let rateLimitReset: number | undefined;
-
-      // Extract rate limit info
-      if (response.headers && response.headers['x-ratelimit-remaining']) {
-        rateLimitRemaining = parseInt(response.headers['x-ratelimit-remaining'], 10);
-      }
-
-      if (response.headers && response.headers['x-ratelimit-reset']) {
-        rateLimitReset = parseInt(response.headers['x-ratelimit-reset'], 10);
-      }
-
-      // Update token metrics
-      if (token) {
-        githubTokenManager.updateTokenMetrics(
-          token,
-          true,
-          rateLimitRemaining,
-          rateLimitReset
-        );
-      }
-
-      // Decode content
-      if (response.data && response.data.content) {
-        const content = Buffer.from(response.data.content, 'base64').toString('utf-8');
-
-        // Cache the content
-        RequirementsComplianceAgent.fileContentCache.set(cacheKey, {
-          timestamp: Date.now(),
-          content
-        });
-
-        return content;
-      }
-
-      throw new Error('File content not available');
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      logger.error(`Error fetching file content`, {
-        owner,
-        repo,
-        filePath,
-        error: errorMessage
-      });
-
-      throw error;
-    }
   }
 
   /**
@@ -904,15 +467,6 @@ export class RequirementsComplianceAgent extends AIAgentBase<IRequirementsCompli
       }
     }
 
-    // Check for technology/framework requirements
-    const commonTechnologies = [
-      'react', 'vue', 'angular', 'node', 'express', 'mongodb', 'mysql',
-      'postgresql', 'django', 'flask', 'laravel', 'spring', 'dotnet', '.net',
-      'javascript', 'typescript', 'python', 'java', 'c#', 'php', 'ruby',
-      'docker', 'kubernetes', 'aws', 'azure', 'firebase', 'redux', 'bootstrap',
-      'tailwind', 'material-ui', 'jest', 'pytest', 'junit'
-    ];
-
     for (const tech of commonTechnologies) {
       if (lowerText.includes(tech.toLowerCase())) {
         requirements.push({
@@ -1014,15 +568,7 @@ export class RequirementsComplianceAgent extends AIAgentBase<IRequirementsCompli
   private extractTechnologyRequirements(description: string): string[] {
     const technologies: string[] = [];
 
-    // Common technologies to look for
-    const commonTechs = [
-      'React', 'Angular', 'Vue', 'Node.js', 'Express', 'MongoDB', 'MySQL',
-      'PostgreSQL', 'GraphQL', 'TypeScript', 'JavaScript', 'Python', 'Django',
-      'Flask', 'Ruby', 'Rails', 'Java', 'Spring', 'PHP', 'Laravel', 'Go',
-      'Docker', 'Kubernetes', 'AWS', 'Azure', 'GCP', 'Firebase'
-    ];
-
-    for (const tech of commonTechs) {
+    for (const tech of commonTechnologies) {
       // Check for exact tech names surrounded by spaces, punctuation, or line boundaries
       const regex = new RegExp(`(^|\\s|[.,;:!?])${tech}(\\s|[.,;:!?]|$)`, 'i');
       if (regex.test(description)) {

@@ -221,3 +221,4 @@ export enum HTTP_STATUS {
 }
 
 export * from './ai-agent';
+export * from './ai-agent-shared';

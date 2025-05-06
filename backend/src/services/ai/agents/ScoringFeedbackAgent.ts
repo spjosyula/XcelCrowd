@@ -5,33 +5,13 @@ import {
   ISpamFilteringResult,
   IRequirementsComplianceResult,
   ICodeQualityResult,
-  EvaluationDecision
+  EvaluationDecision,
+  IExtendedScoringFeedbackMetadata
 } from '../../../models/interfaces';
 import { logger } from '../../../utils/logger';
 import { Types } from 'mongoose';
 import { AIEvaluation } from '../../../models';
-
-// Extended metadata interface to include decision
-interface IExtendedScoringFeedbackMetadata {
-  componentScores: {
-    spamFilter: number;
-    requirements: number;
-    codeQuality: number;
-  };
-  weightedScore: number;
-  confidence: number;
-  humanReviewRecommended: boolean;
-  strengths: string[];
-  weaknesses: string[];
-  suggestedFeedback: string;
-  suggestedArchitects: Array<{
-    architectId: Types.ObjectId;
-    matchScore: number;
-    expertise: string[];
-  }>;
-  priorityLevel: 'low' | 'medium' | 'high';
-  decision: EvaluationDecision; // Added decision to metadata
-}
+import { GitHubService } from '../../../services/github.service';
 
 // Extended result interface that includes the decision
 interface IExtendedScoringFeedbackResult extends IScoringFeedbackResult {
@@ -543,5 +523,18 @@ export class ScoringFeedbackAgent extends AIAgentBase<IScoringFeedbackResult> {
     
     // Otherwise, keep the existing decision (PASS or REVIEW)
     return currentDecision;
+  }
+
+  /**
+   * Extract GitHub repository information from URL
+   * @param submissionUrl - The URL submitted by the student
+   * @returns Object containing repository information
+   */
+  private async extractGitHubRepoInfo(submissionUrl: string): Promise<{
+    owner: string;
+    repo: string;
+    url: string
+  }> {
+    return GitHubService.extractGitHubRepoInfo(submissionUrl);
   }
 } 

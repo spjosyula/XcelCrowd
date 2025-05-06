@@ -5,66 +5,14 @@ import {
   EvaluationDecision
 } from '../../../models/interfaces';
 import { logger } from '../../../utils/logger';
-import axios from 'axios';
-import { githubTokenManager } from '../../../config/GitHubTokenManager';
 import { ApiError } from '../../../utils/api.error';
 import { HTTP_STATUS } from '../../../models/interfaces';
 import * as crypto from 'crypto';
 
 // Define common patterns for spam repositories
 import SPAM_PATTERNS from '../../../constants/spam.patterns';
-import { MongoSanitizer } from '../../../utils/mongo.sanitize';
+import { GitHubService, IGitHubRepoDetails } from '../../../services/github.service';
 
-
-// Security configurations
-const SECURITY_CONFIG = {
-  MAX_REDIRECT_COUNT: 3,
-  TIMEOUT_MS: 5000
-};
-
-interface IGitHubRepoDetails {
-  name: string;
-  description: string;
-  owner: {
-    login: string;
-    type: string;
-  };
-  private: boolean;
-  fork: boolean;
-  created_at: string;
-  updated_at: string;
-  pushed_at: string;
-  size: number;
-  stargazers_count: number;
-  watchers_count: number;
-  forks_count: number;
-  open_issues_count: number;
-  default_branch: string;
-  topics: string[];
-  has_issues: boolean;
-  has_projects: boolean;
-  has_wiki: boolean;
-  has_downloads: boolean;
-  archived: boolean;
-  disabled: boolean;
-  license?: {
-    key: string;
-    name: string;
-    url: string;
-  };
-}
-
-interface IGitHubRepoContent {
-  type: string;
-  name: string;
-  path: string;
-  sha: string;
-  size: number;
-  url: string;
-  html_url: string;
-  git_url: string;
-  download_url: string | null;
-}
 
 /**
  * Spam/Bad Submission Filtering Agent
@@ -74,31 +22,8 @@ export class SpamFilteringAgent extends AIAgentBase<ISpamFilteringResult> {
   public name = 'SpamFilteringAgent';
   public description = 'Filters out spam or invalid GitHub submissions';
 
-  // Cache of recently checked repositories to avoid duplicate API calls
-  private static repoCache: Map<string, {
-    timestamp: number;
-    repoDetails?: IGitHubRepoDetails;
-    exists: boolean;
-    accessible: boolean;
-    error?: string;
-  }> = new Map();
-
-  // Cache of repository content to avoid duplicate API calls
-  private static contentCache: Map<string, {
-    timestamp: number;
-    contents: IGitHubRepoContent[];
-  }> = new Map();
-
   // Cache of fingerprints for duplicate detection
   private static submissionFingerprints: Map<string, number> = new Map();
-
-  // Cache TTL in milliseconds (30 minutes)
-  private static CACHE_TTL = 30 * 60 * 1000;
-
-  private static readonly ALLOWED_GITHUB_DOMAINS = [
-    'github.com',
-    'www.github.com'
-  ];
 
   /**
    * Evaluate a solution for spam or invalid submission
@@ -141,10 +66,13 @@ export class SpamFilteringAgent extends AIAgentBase<ISpamFilteringResult> {
         };
       }
 
-      // Generate owner and repo from URL
-      const { owner, repo } = this.extractOwnerAndRepo(repoUrl) || { owner: null, repo: null };
-
-      if (!owner || !repo) {
+      // Use GitHubService to extract owner and repo from URL
+      let owner, repo;
+      try {
+        const repoInfo = GitHubService.extractGitHubRepoInfo(repoUrl);
+        owner = repoInfo.owner;
+        repo = repoInfo.repo;
+      } catch (error) {
         return {
           score: 0,
           feedback: 'Could not extract repository owner and name from URL.',
@@ -169,8 +97,8 @@ export class SpamFilteringAgent extends AIAgentBase<ISpamFilteringResult> {
         spamIndicators.push(`Repository has been submitted ${duplicateCount} times, exceeding the limit of ${SPAM_PATTERNS.MAX_IDENTICAL_SUBMISSIONS}`);
       }
 
-      // Verify repository exists and is accessible
-      const repoStatus = await this.verifyGitHubRepository(owner, repo);
+      // Verify repository exists and is accessible using GitHubService
+      const repoStatus = await GitHubService.verifyGitHubRepository(owner, repo);
 
       if (!repoStatus.exists) {
         return {
@@ -349,241 +277,22 @@ export class SpamFilteringAgent extends AIAgentBase<ISpamFilteringResult> {
   }
 
   /**
- * Extract owner and repo name from GitHub URL with enhanced security
- * @param repoUrl - The GitHub repository URL
- * @returns Object with owner and repo properties, or null if invalid
- */
-  private extractOwnerAndRepo(repoUrl: string): { owner: string, repo: string } | null {
-    try {
-      // Use MongoSanitizer for initial URL validation
-      const sanitizedUrl = MongoSanitizer.sanitizeGitHubUrl(repoUrl);
-      if (!sanitizedUrl) return null;
-
-      const url = new URL(sanitizedUrl);
-
-      // Strict hostname validation against whitelist
-      if (!SpamFilteringAgent.ALLOWED_GITHUB_DOMAINS.includes(url.hostname.toLowerCase())) {
-        logger.warn(`URL hostname validation failed: ${url.hostname} not in allowed GitHub domains`, {
-          providedUrl: repoUrl,
-          hostname: url.hostname
-        });
-        return null;
-      }
-
-      // Extract path components with additional validation
-      const pathParts = url.pathname.split('/').filter(part => part.length > 0);
-
-      // A valid GitHub repo URL has at least username/repo
-      if (pathParts.length < 2) {
-        return null;
-      }
-
-      // Validate username and repo format
-      const owner = pathParts[0];
-      const repo = pathParts[1];
-
-      // GitHub usernames and repo names follow specific patterns
-      const namePattern = /^[a-zA-Z0-9][\w.-]*$/;
-      if (!namePattern.test(owner) || !namePattern.test(repo)) {
-        logger.warn(`Invalid GitHub username or repo format`, {
-          owner,
-          repo
-        });
-        return null;
-      }
-
-      return { owner, repo };
-    } catch (error) {
-      logger.error(`Error extracting owner and repo from URL`, {
-        repoUrl,
-        error: error instanceof Error ? error.message : String(error)
-      });
-      return null;
-    }
-  }
-
-  /**
- * Extract GitHub repository URL from submission URL with robust security validation
- * @param submissionUrl - The URL submitted by the student
- * @returns Normalized GitHub repository URL or null if invalid
- */
+   * Extract GitHub repository URL from submission URL with robust security validation
+   * @param submissionUrl - The URL submitted by the student
+   * @returns Normalized GitHub repository URL or null if invalid
+   */
   private extractGitHubUrl(submissionUrl: string): string | null {
     try {
-      // Sanitize the URL first (handles basic validation)
-      const sanitizedUrl = MongoSanitizer.sanitizeGitHubUrl(submissionUrl);
-      if (!sanitizedUrl) return null;
-
-      const url = new URL(sanitizedUrl);
-
-      // Strict hostname validation against whitelist (case-insensitive)
-      if (!SpamFilteringAgent.ALLOWED_GITHUB_DOMAINS.includes(url.hostname.toLowerCase())) {
-        logger.warn(`URL hostname validation failed: ${url.hostname} not in allowed GitHub domains`, {
-          providedUrl: submissionUrl,
-          hostname: url.hostname
-        });
-        return null;
-      }
-
-      // Handle URLs that might be GitHub but not repositories
-      if (url.hostname.toLowerCase() === 'gist.github.com') {
-        logger.warn(`GitHub Gists are not accepted as submissions`, {
-          submissionUrl
-        });
-        return null;
-      }
-
-      // Extract path components
-      const pathParts = url.pathname.split('/').filter(part => part.length > 0);
-
-      // A valid GitHub repo URL has at least username/repo
-      if (pathParts.length < 2) {
-        return null;
-      }
-
-      // Extract username and repo name only
-      const username = pathParts[0];
-      const repo = pathParts[1];
-
-      // Additional validation of username and repo format
-      const namePattern = /^[a-zA-Z0-9][\w.-]*$/;
-      if (!namePattern.test(username) || !namePattern.test(repo)) {
-        logger.warn(`Invalid GitHub username or repo format`, {
-          username,
-          repo
-        });
-        return null;
-      }
-
-      // Normalize to the repository root with secure construction
-      return `https://github.com/${encodeURIComponent(username)}/${encodeURIComponent(repo)}`;
+      // Try to extract GitHub repository info using GitHubService
+      const repoInfo = GitHubService.extractGitHubRepoInfo(submissionUrl);
+      return repoInfo.url;
     } catch (error) {
-      // URL parsing failed
+      // If extraction fails, log and return null
       logger.error(`Error extracting GitHub URL`, {
         submissionUrl,
         error: error instanceof Error ? error.message : String(error)
       });
       return null;
-    }
-  }
-
-  /**
-   * Verify if a GitHub repository exists and is accessible
-   * @param owner - The repository owner/username
-   * @param repo - The repository name
-   * @returns Object with exists, accessible flags, and repository details if available
-   */
-  private async verifyGitHubRepository(
-    owner: string,
-    repo: string
-  ): Promise<{ exists: boolean, accessible: boolean, repoDetails?: IGitHubRepoDetails }> {
-    // Check cache first
-    const cacheKey = `${owner}/${repo}`;
-    const cachedResult = SpamFilteringAgent.repoCache.get(cacheKey);
-
-    if (cachedResult && (Date.now() - cachedResult.timestamp < SpamFilteringAgent.CACHE_TTL)) {
-      logger.debug(`Using cached repository verification result for ${cacheKey}`);
-      return {
-        exists: cachedResult.exists,
-        accessible: cachedResult.accessible,
-        repoDetails: cachedResult.repoDetails
-      };
-    }
-
-    // Get GitHub API token from token manager
-    const token = githubTokenManager.getNextToken();
-
-    try {
-      // Use GitHub API to check repository
-      const response = await axios.get<IGitHubRepoDetails>(
-        `https://api.github.com/repos/${owner}/${repo}`,
-        {
-          timeout: SECURITY_CONFIG.TIMEOUT_MS,
-          maxRedirects: SECURITY_CONFIG.MAX_REDIRECT_COUNT,
-          headers: {
-            'Accept': 'application/vnd.github.v3+json',
-            'User-Agent': 'XcelCrowd-AI-Evaluation',
-            ...(token ? { 'Authorization': `Bearer ${token}` } : {})
-          }
-        }
-      );
-
-      // Extract rate limit information from response headers
-      let rateLimitRemaining: number | undefined;
-      let rateLimitReset: number | undefined;
-
-      if (response.headers && response.headers['x-ratelimit-remaining']) {
-        rateLimitRemaining = parseInt(response.headers['x-ratelimit-remaining'], 10);
-      }
-
-      if (response.headers && response.headers['x-ratelimit-reset']) {
-        rateLimitReset = parseInt(response.headers['x-ratelimit-reset'], 10);
-      }
-
-      // Update token metrics if token was used
-      if (token) {
-        githubTokenManager.updateTokenMetrics(
-          token,
-          true,
-          rateLimitRemaining,
-          rateLimitReset
-        );
-      }
-
-      // Cache the result
-      SpamFilteringAgent.repoCache.set(cacheKey, {
-        timestamp: Date.now(),
-        exists: true,
-        accessible: true,
-        repoDetails: response.data
-      });
-
-      return {
-        exists: true,
-        accessible: true,
-        repoDetails: response.data
-      };
-    } catch (error) {
-      // Handle error and update token metrics if needed
-      if (token) {
-        githubTokenManager.updateTokenMetrics(token, false);
-      }
-
-      if (axios.isAxiosError(error) && error.response) {
-        // 404 means repo doesn't exist, 403 means no access
-        const exists = error.response.status !== 404;
-        const accessible = false;
-
-        // Cache the result
-        SpamFilteringAgent.repoCache.set(cacheKey, {
-          timestamp: Date.now(),
-          exists,
-          accessible,
-          error: error.message
-        });
-
-        return { exists, accessible };
-      }
-
-      // Network error or other problem
-      logger.error(`Error verifying GitHub repository`, {
-        owner,
-        repo,
-        error: error instanceof Error ? error.message : String(error)
-      });
-
-      // Cache the error result
-      SpamFilteringAgent.repoCache.set(cacheKey, {
-        timestamp: Date.now(),
-        exists: false,
-        accessible: false,
-        error: error instanceof Error ? error.message : String(error)
-      });
-
-      // Default to assuming it might exist but is inaccessible
-      return {
-        exists: false,
-        accessible: false
-      };
     }
   }
 
@@ -604,126 +313,66 @@ export class SpamFilteringAgent extends AIAgentBase<ISpamFilteringResult> {
     fileCount: number;
     hasCodeFiles: boolean;
   }> {
-    // Check cache first
-    const cacheKey = `${owner}/${repo}/contents`;
-    const cachedContents = SpamFilteringAgent.contentCache.get(cacheKey);
+    try {
+      // Use GitHubService to get repository contents
+      const contents = await GitHubService.getRepositoryContents(owner, repo);
 
-    let contents: IGitHubRepoContent[] = [];
+      // Check if repository is empty
+      const isEmpty = contents.length === 0;
 
-    if (cachedContents && (Date.now() - cachedContents.timestamp < SpamFilteringAgent.CACHE_TTL)) {
-      logger.debug(`Using cached repository contents for ${cacheKey}`);
-      contents = cachedContents.contents;
-    } else {
-      // Get GitHub API token from token manager
-      const token = githubTokenManager.getNextToken();
+      // Check for README file
+      const hasReadme = contents.some(file =>
+        file.name.toLowerCase().includes('readme')
+      );
 
-      try {
-        // Get root directory contents
-        const response = await axios.get<IGitHubRepoContent[]>(
-          `https://api.github.com/repos/${owner}/${repo}/contents`,
-          {
-            timeout: SECURITY_CONFIG.TIMEOUT_MS,
-            maxRedirects: SECURITY_CONFIG.MAX_REDIRECT_COUNT,
-            headers: {
-              'Accept': 'application/vnd.github.v3+json',
-              'User-Agent': 'XcelCrowd-AI-Evaluation',
-              ...(token ? { 'Authorization': `Bearer ${token}` } : {})
-            }
-          }
-        );
+      // Count files and check for code files
+      const fileCount = contents.length;
+      const hasLowFileCount = fileCount < SPAM_PATTERNS.MIN_FILES_COUNT;
 
-        contents = response.data;
+      // Check if repository contains real code files or just template files
+      const codeExtensions = ['.js', '.ts', '.py', '.java', '.c', '.cpp', '.h', '.cs', '.go', '.rb', '.php', '.html', '.css'];
+      const hasCodeFiles = contents.some(file =>
+        codeExtensions.some(ext => file.name.toLowerCase().endsWith(ext))
+      );
 
-        // Extract rate limit information from response headers
-        let rateLimitRemaining: number | undefined;
-        let rateLimitReset: number | undefined;
+      // Check if it's just a template repository
+      // Template repos often have specific files like LICENSE, .github/*, etc.
+      const templateOnlyFiles = [
+        'license', '.github', 'contributing.md', 'code_of_conduct.md',
+        '.gitignore', '.gitattributes', 'package.json', 'package-lock.json'
+      ];
 
-        if (response.headers && response.headers['x-ratelimit-remaining']) {
-          rateLimitRemaining = parseInt(response.headers['x-ratelimit-remaining'], 10);
-        }
+      const nonTemplateFiles = contents.filter(file =>
+        !templateOnlyFiles.some(template => file.name.toLowerCase().includes(template))
+      );
 
-        if (response.headers && response.headers['x-ratelimit-reset']) {
-          rateLimitReset = parseInt(response.headers['x-ratelimit-reset'], 10);
-        }
+      const isTemplateOnly = nonTemplateFiles.length <= 1 && !hasCodeFiles;
 
-        // Update token metrics if token was used
-        if (token) {
-          githubTokenManager.updateTokenMetrics(
-            token,
-            true,
-            rateLimitRemaining,
-            rateLimitReset
-          );
-        }
+      return {
+        isEmpty,
+        isMissingReadme: !hasReadme,
+        hasLowFileCount,
+        isTemplateOnly,
+        fileCount,
+        hasCodeFiles
+      };
+    } catch (error) {
+      logger.error(`Error analyzing repository contents`, {
+        owner,
+        repo,
+        error: error instanceof Error ? error.message : String(error)
+      });
 
-        // Cache the contents
-        SpamFilteringAgent.contentCache.set(cacheKey, {
-          timestamp: Date.now(),
-          contents
-        });
-      } catch (error) {
-        // Handle error and update token metrics if needed
-        if (token) {
-          githubTokenManager.updateTokenMetrics(token, false);
-        }
-
-        logger.error(`Error fetching repository contents`, {
-          owner,
-          repo,
-          error: error instanceof Error ? error.message : String(error)
-        });
-
-        // Return default values on error
-        return {
-          isEmpty: false,
-          isMissingReadme: false,
-          hasLowFileCount: false,
-          isTemplateOnly: false,
-          fileCount: 0,
-          hasCodeFiles: false
-        };
-      }
+      // Return default values on error
+      return {
+        isEmpty: false,
+        isMissingReadme: false,
+        hasLowFileCount: false,
+        isTemplateOnly: false,
+        fileCount: 0,
+        hasCodeFiles: false
+      };
     }
-
-    // Check if repository is empty
-    const isEmpty = contents.length === 0;
-
-    // Check for README file
-    const hasReadme = contents.some(file =>
-      file.name.toLowerCase().includes('readme')
-    );
-
-    // Count files and check for code files
-    const fileCount = contents.length;
-    const hasLowFileCount = fileCount < SPAM_PATTERNS.MIN_FILES_COUNT;
-
-    // Check if repository contains real code files or just template files
-    const codeExtensions = ['.js', '.ts', '.py', '.java', '.c', '.cpp', '.h', '.cs', '.go', '.rb', '.php', '.html', '.css'];
-    const hasCodeFiles = contents.some(file =>
-      codeExtensions.some(ext => file.name.toLowerCase().endsWith(ext))
-    );
-
-    // Check if it's just a template repository
-    // Template repos often have specific files like LICENSE, .github/*, etc.
-    const templateOnlyFiles = [
-      'license', '.github', 'contributing.md', 'code_of_conduct.md',
-      '.gitignore', '.gitattributes', 'package.json', 'package-lock.json'
-    ];
-
-    const nonTemplateFiles = contents.filter(file =>
-      !templateOnlyFiles.some(template => file.name.toLowerCase().includes(template))
-    );
-
-    const isTemplateOnly = nonTemplateFiles.length <= 1 && !hasCodeFiles;
-
-    return {
-      isEmpty,
-      isMissingReadme: !hasReadme,
-      hasLowFileCount,
-      isTemplateOnly,
-      fileCount,
-      hasCodeFiles
-    };
   }
 
   /**
@@ -825,8 +474,7 @@ export class SpamFilteringAgent extends AIAgentBase<ISpamFilteringResult> {
     }
 
     // Check for GitHub URL pattern
-    const sanitizedUrl = MongoSanitizer.sanitizeGitHubUrl(solution.submissionUrl);
-    if (!solution.submissionUrl || !sanitizedUrl) {
+    if (!solution.submissionUrl || !this.extractGitHubUrl(solution.submissionUrl)) {
       throw new ApiError(
         HTTP_STATUS.BAD_REQUEST,
         'Submission URL must be a GitHub repository',

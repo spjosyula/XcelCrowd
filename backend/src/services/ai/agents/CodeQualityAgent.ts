@@ -2,134 +2,23 @@ import { AIAgentBase } from '../AIAgentBase';
 import {
   ICodeQualityResult,
   ISolution,
-  EvaluationDecision
+  EvaluationDecision,
+  IFileInfo,
+  IFileMetrics,
+  ICodeIssue,
+  IVulnerabilityResult,
+  IRepositoryAnalysis,
+  IVulnerabilityPattern,
+  ICachedRepositoryAnalysis
 } from '../../../models/interfaces';
 import { logger } from '../../../utils/logger';
-import axios from 'axios';
-import { githubTokenManager } from '../../../config/GitHubTokenManager';
-import { ApiError } from '../../../utils/api.error';
-import { HTTP_STATUS } from '../../../models/interfaces';
 import { setTimeout } from 'timers/promises';
 import * as crypto from 'crypto';
-import { MongoSanitizer } from '../../../utils/mongo.sanitize';
-import { GitHubService } from '../../../services/github.service';
+import { GitHubService} from '../../../services/github.service';
+import { ProgrammingLanguage, FILE_EXTENSION_TO_LANGUAGE } from '../../../constants/common.tech.things';
 
 // Cache TTL - 30 minutes
 const CACHE_TTL = 30 * 60 * 1000;
-
-// Supported programming languages for analysis
-enum ProgrammingLanguage {
-  JAVASCRIPT = 'javascript',
-  TYPESCRIPT = 'typescript',
-  PYTHON = 'python',
-  JAVA = 'java',
-  CSHARP = 'csharp',
-  GO = 'go',
-  RUBY = 'ruby',
-  PHP = 'php',
-  SWIFT = 'swift',
-  KOTLIN = 'kotlin',
-  RUST = 'rust',
-  UNKNOWN = 'unknown'
-}
-
-// File extension to language mapping
-const FILE_EXTENSION_TO_LANGUAGE: Record<string, ProgrammingLanguage> = {
-  '.js': ProgrammingLanguage.JAVASCRIPT,
-  '.jsx': ProgrammingLanguage.JAVASCRIPT,
-  '.ts': ProgrammingLanguage.TYPESCRIPT,
-  '.tsx': ProgrammingLanguage.TYPESCRIPT,
-  '.py': ProgrammingLanguage.PYTHON,
-  '.java': ProgrammingLanguage.JAVA,
-  '.cs': ProgrammingLanguage.CSHARP,
-  '.go': ProgrammingLanguage.GO,
-  '.rb': ProgrammingLanguage.RUBY,
-  '.php': ProgrammingLanguage.PHP,
-  '.swift': ProgrammingLanguage.SWIFT,
-  '.kt': ProgrammingLanguage.KOTLIN,
-  '.rs': ProgrammingLanguage.RUST
-};
-
-// Known security vulnerabilities by language
-interface IVulnerabilityPattern {
-  pattern: RegExp;
-  severity: 'low' | 'medium' | 'high' | 'critical';
-  description: string;
-  language: ProgrammingLanguage | 'all';
-}
-
-// Repository analysis result
-interface IRepositoryAnalysis {
-  files: IFileInfo[];
-  directories: string[];
-  languages: Map<ProgrammingLanguage, number>; // Language to byte count
-  primaryLanguage: ProgrammingLanguage;
-  testFiles: IFileInfo[];
-  configFiles: IFileInfo[];
-  readmeFile?: IFileInfo;
-  vulnScanResults: IVulnerabilityResult[];
-  totalSize: number;
-  issueCount: number;
-  commitCount: number;
-  contributorCount: number;
-  branchCount: number;
-  // Code metrics
-  linesOfCode: number;
-  commentLines: number;
-  complexity: number;
-  duplication: number;
-  testCoverage: number;
-}
-
-// File information
-interface IFileInfo {
-  path: string;
-  name: string;
-  extension: string;
-  language: ProgrammingLanguage;
-  size: number;
-  url: string;
-  content?: string;
-  hash?: string;
-  metrics?: IFileMetrics;
-}
-
-// Per-file metrics
-interface IFileMetrics {
-  linesOfCode: number;
-  commentLines: number;
-  complexity: number;
-  functions: number;
-  classes: number;
-  issues: ICodeIssue[];
-  // Language-specific metrics can be added here
-}
-
-// Code issue in a file
-interface ICodeIssue {
-  type: 'style' | 'security' | 'performance' | 'maintainability';
-  severity: 'info' | 'warning' | 'error' | 'critical';
-  line: number;
-  column?: number;
-  message: string;
-  rule?: string;
-}
-
-// Vulnerability scan result
-interface IVulnerabilityResult {
-  severity: 'low' | 'medium' | 'high' | 'critical';
-  description: string;
-  location?: string;
-  languageSpecific: boolean;
-  cwe?: string; // Common Weakness Enumeration ID
-  remediation?: string;
-}
-
-// Cache structure
-interface ICachedRepositoryAnalysis {
-  timestamp: number;
-  analysis: IRepositoryAnalysis;
-}
 
 /**
  * Code Quality Agent
@@ -202,7 +91,6 @@ export class CodeQualityAgent extends AIAgentBase<ICodeQualityResult> {
       severity: 'medium',
       description: 'Overly permissive CORS configuration',
       language: 'all'
-
     }
   ];
 
@@ -435,7 +323,7 @@ export class CodeQualityAgent extends AIAgentBase<ICodeQualityResult> {
       for (const batch of fileBatches) {
         await Promise.all(batch.map(async file => {
           try {
-            const content = await this.fetchFileContent(repoInfo.owner, repoInfo.repo, file.path);
+            const content = await GitHubService.getFileContent(repoInfo.owner, repoInfo.repo, file.path);
             file.content = content;
 
             // Hash the content for duplication detection
@@ -516,46 +404,8 @@ export class CodeQualityAgent extends AIAgentBase<ICodeQualityResult> {
     analysis: IRepositoryAnalysis
   ): Promise<void> {
     try {
-      // Get GitHub API token
-      const token = githubTokenManager.getNextToken();
-
-      // Prepare API request
-      const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
-      const headers: Record<string, string> = {
-        'Accept': 'application/vnd.github.v3+json',
-        'User-Agent': 'XcelCrowd-AI-Evaluation'
-      };
-
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`;
-      }
-
-      // Make the request
-      const response = await axios.get(apiUrl, { headers, timeout: 10000 });
-      let rateLimitRemaining: number | undefined;
-      let rateLimitReset: number | undefined;
-
-      // Extract rate limit info
-      if (response.headers && response.headers['x-ratelimit-remaining']) {
-        rateLimitRemaining = parseInt(response.headers['x-ratelimit-remaining'], 10);
-      }
-
-      if (response.headers && response.headers['x-ratelimit-reset']) {
-        rateLimitReset = parseInt(response.headers['x-ratelimit-reset'], 10);
-      }
-
-      // Update token metrics
-      if (token) {
-        githubTokenManager.updateTokenMetrics(
-          token,
-          true,
-          rateLimitRemaining,
-          rateLimitReset
-        );
-      }
-
-      // Process the response
-      const contents = Array.isArray(response.data) ? response.data : [response.data];
+      // Get repository contents using GitHubService
+      const contents = await GitHubService.getRepositoryContents(owner, repo, path);
 
       // Process each item
       for (const item of contents) {
@@ -611,7 +461,11 @@ export class CodeQualityAgent extends AIAgentBase<ICodeQualityResult> {
         }
       }
     } catch (error) {
-      if (axios.isAxiosError(error) && error.response && error.response.status === 404) {
+      // Handle 404 errors gracefully
+      if (error instanceof Error && 
+          typeof error === 'object' && 
+          error.hasOwnProperty('response') && 
+          (error as any).response?.status === 404) {
         logger.debug(`Path not found in repository: ${path}`, {
           owner,
           repo
@@ -627,74 +481,6 @@ export class CodeQualityAgent extends AIAgentBase<ICodeQualityResult> {
         error: error instanceof Error ? error.message : String(error)
       });
 
-      throw error;
-    }
-  }
-
-  /**
-   * Fetch and analyze file content
-   * @param owner - Repository owner
-   * @param repo - Repository name
-   * @param path - File path
-   * @returns File content as string
-   */
-  private async fetchFileContent(
-    owner: string,
-    repo: string,
-    path: string
-  ): Promise<string> {
-    try {
-      // Get GitHub API token
-      const token = githubTokenManager.getNextToken();
-
-      // Prepare API request
-      const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
-      const headers: Record<string, string> = {
-        'Accept': 'application/vnd.github.v3+json',
-        'User-Agent': 'XcelCrowd-AI-Evaluation'
-      };
-
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`;
-      }
-
-      // Make the request
-      const response = await axios.get(apiUrl, { headers, timeout: 10000 });
-
-      // Update token metrics if available
-      if (token && response.headers) {
-        let rateLimitRemaining: number | undefined;
-        let rateLimitReset: number | undefined;
-
-        if (response.headers['x-ratelimit-remaining']) {
-          rateLimitRemaining = parseInt(response.headers['x-ratelimit-remaining'], 10);
-        }
-
-        if (response.headers['x-ratelimit-reset']) {
-          rateLimitReset = parseInt(response.headers['x-ratelimit-reset'], 10);
-        }
-
-        githubTokenManager.updateTokenMetrics(
-          token,
-          true,
-          rateLimitRemaining,
-          rateLimitReset
-        );
-      }
-
-      // Decode content
-      if (response.data && response.data.content) {
-        return Buffer.from(response.data.content, 'base64').toString('utf-8');
-      }
-
-      throw new Error('File content not available');
-    } catch (error) {
-      logger.error(`Error fetching file content`, {
-        owner,
-        repo,
-        path,
-        error: error instanceof Error ? error.message : String(error)
-      });
       throw error;
     }
   }
@@ -961,7 +747,12 @@ export class CodeQualityAgent extends AIAgentBase<ICodeQualityResult> {
     const filesByLanguage = new Map<ProgrammingLanguage, IFileInfo[]>();
 
     for (const file of analysis.files) {
-      if (file.content && file.hash) {
+      if (
+        file.content &&
+        file.hash &&
+        file.language !== undefined &&
+        file.language !== ProgrammingLanguage.UNKNOWN
+      ) {
         const files = filesByLanguage.get(file.language) || [];
         files.push(file);
         filesByLanguage.set(file.language, files);
@@ -1390,7 +1181,7 @@ export class CodeQualityAgent extends AIAgentBase<ICodeQualityResult> {
    * Fetch repository statistics from GitHub API
    * @param owner - Repository owner
    * @param repo - Repository name
-   * @param analysis - Analysis to update with stats
+   * @param analysis - Analysis object to update with stats
    */
   private async fetchRepositoryStats(
     owner: string,
@@ -1398,74 +1189,21 @@ export class CodeQualityAgent extends AIAgentBase<ICodeQualityResult> {
     analysis: IRepositoryAnalysis
   ): Promise<void> {
     try {
-      // Get GitHub API token
-      const token = githubTokenManager.getNextToken();
-
-      // Prepare API request headers
-      const headers: Record<string, string> = {
-        'Accept': 'application/vnd.github.v3+json',
-        'User-Agent': 'XcelCrowd-AI-Evaluation'
-      };
-
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`;
-      }
-
-      // Get commit count (limited to 100 for performance)
-      const commitsUrl = `https://api.github.com/repos/${owner}/${repo}/commits?per_page=100`;
-      const commitsResponse = await axios.get(commitsUrl, { headers, timeout: 10000 });
-
-      if (Array.isArray(commitsResponse.data)) {
-        analysis.commitCount = commitsResponse.data.length;
-      }
-
-      // Get contributors count
-      const contributorsUrl = `https://api.github.com/repos/${owner}/${repo}/contributors?per_page=100`;
-      const contributorsResponse = await axios.get(contributorsUrl, { headers, timeout: 10000 });
-
-      if (Array.isArray(contributorsResponse.data)) {
-        analysis.contributorCount = contributorsResponse.data.length;
-      }
-
-      // Get branches count
-      const branchesUrl = `https://api.github.com/repos/${owner}/${repo}/branches?per_page=100`;
-      const branchesResponse = await axios.get(branchesUrl, { headers, timeout: 10000 });
-
-      if (Array.isArray(branchesResponse.data)) {
-        analysis.branchCount = branchesResponse.data.length;
-      }
-
-      // Update token metrics if provided
-      if (token) {
-        let rateLimitRemaining: number | undefined;
-        let rateLimitReset: number | undefined;
-
-        const lastResponse = branchesResponse;
-
-        if (lastResponse.headers && lastResponse.headers['x-ratelimit-remaining']) {
-          rateLimitRemaining = parseInt(lastResponse.headers['x-ratelimit-remaining'], 10);
-        }
-
-        if (lastResponse.headers && lastResponse.headers['x-ratelimit-reset']) {
-          rateLimitReset = parseInt(lastResponse.headers['x-ratelimit-reset'], 10);
-        }
-
-        githubTokenManager.updateTokenMetrics(
-          token,
-          true,
-          rateLimitRemaining,
-          rateLimitReset
-        );
-      }
+      const stats = await GitHubService.getRepositoryStats(owner, repo);
+      
+      // Update analysis with stats
+      analysis.commitCount = stats.commitCount;
+      analysis.contributorCount = stats.contributorCount;
+      analysis.branchCount = stats.branchCount;
     } catch (error) {
-      // Log but don't fail - stats are non-critical
+      // Log error but continue - stats are non-critical
       logger.warn(`Error fetching repository stats`, {
         owner,
         repo,
         error: error instanceof Error ? error.message : String(error)
       });
-
-      // Default values
+      
+      // Use default values
       analysis.commitCount = 1;
       analysis.contributorCount = 1;
       analysis.branchCount = 1;
