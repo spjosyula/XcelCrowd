@@ -304,14 +304,20 @@ export class SolutionController extends BaseController {
       const companyId = await this.getUserProfileId(req, UserRole.COMPANY);
       
       const { id } = req.params;
+      const { companyFeedback, selectionReason } = req.body;
       
       // Delegate to service which handles all validation and business logic
-      const updatedSolution = await this.solutionService.selectSolutionAsWinner(id, companyId);
+      const updatedSolution = await this.solutionService.selectSolutionAsWinner(
+        id, 
+        companyId,
+        { companyFeedback, selectionReason }
+      );
       
       // Log action and send response
       this.logAction('select-solution', req.user!.userId, { 
         solutionId: id,
-        companyId
+        companyId,
+        hasFeedback: !!companyFeedback
       });
 
       this.sendSuccess(res, updatedSolution, 'Solution selected as winner successfully');

@@ -1190,6 +1190,105 @@ export class ChallengeService extends BaseService {
   }
 
   /**
+   * Mark a challenge as completed with final solution selections
+   * @param challengeId - The ID of the challenge
+   * @param companyId - The ID of the company completing the challenge
+   * @returns The completed challenge and selected solutions
+   */
+  async markChallengeAsCompleted(
+    challengeId: string, 
+    companyId: string
+  ): Promise<{ 
+    challenge: IChallenge; 
+    selectedSolutions: ISolution[];
+  }> {
+    logger.info('[markChallengeAsCompleted] Marking challenge as completed with final solutions', {
+      challengeId,
+      companyId
+    });
+
+    try {
+      // Validate IDs using MongoSanitizer
+      const sanitizedChallengeId = MongoSanitizer.validateObjectId(
+        challengeId, 
+        'challenge'
+      );
+      const sanitizedCompanyId = MongoSanitizer.validateObjectId(
+        companyId, 
+        'company'
+      );
+
+      return await this.withTransaction(async (session) => {
+        // Find the challenge and verify ownership
+        const challenge = await Challenge.findOne({
+          _id: { $eq: sanitizedChallengeId },
+          company: { $eq: sanitizedCompanyId }
+        }).session(session);
+
+        if (!challenge) {
+          throw ApiError.notFound(
+            'Challenge not found or you do not have permission to complete it',
+            'CHALLENGE_NOT_FOUND_OR_FORBIDDEN'
+          );
+        }
+
+        // Verify challenge is in CLOSED status
+        if (challenge.status !== ChallengeStatus.CLOSED) {
+          throw ApiError.badRequest(
+            'Only closed challenges can be marked as completed',
+            'CHALLENGE_NOT_CLOSED'
+          );
+        }
+
+        // Find all selected solutions for this challenge
+        const selectedSolutions = await Solution.find({
+          challenge: sanitizedChallengeId,
+          status: SolutionStatus.SELECTED
+        })
+        .populate('student')
+        .session(session);
+
+        // If no solutions have been selected, we cannot complete the challenge
+        if (selectedSolutions.length === 0) {
+          throw ApiError.badRequest(
+            'Cannot complete challenge without selecting at least one winning solution',
+            'NO_SELECTED_SOLUTIONS'
+          );
+        }
+
+        // Update challenge status
+        challenge.status = ChallengeStatus.COMPLETED;
+        challenge.completedAt = new Date();
+        await challenge.save({ session });
+
+        logger.info('[markChallengeAsCompleted] Challenge completed successfully', {
+          challengeId: sanitizedChallengeId,
+          companyId: sanitizedCompanyId,
+          selectedSolutionsCount: selectedSolutions.length
+        });
+
+        return {
+          challenge,
+          selectedSolutions
+        };
+      });
+    } catch (error) {
+      logger.error('[markChallengeAsCompleted] Failed to complete challenge', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        challengeId,
+        companyId
+      });
+
+      if (error instanceof ApiError) throw error;
+      throw ApiError.internal(
+        'Failed to complete challenge with final selections',
+        'CHALLENGE_COMPLETION_ERROR'
+      );
+    }
+  }
+
+  /**
    * Get all solutions for a particular challenge
    * @param challengeId - The ID of the challenge
    * @param companyId - The ID of the company requesting the solutions

@@ -1,3 +1,5 @@
+import 'reflect-metadata';
+
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';

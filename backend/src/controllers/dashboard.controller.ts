@@ -3,7 +3,6 @@ import { BaseController } from './BaseController';
 import { DashboardService } from '../services/dashboard.service';
 import { AuthRequest } from '../types/request.types';
 import { catchAsync } from '../utils/catch.async';
-import { ArchitectService } from '../services/architect.service';
 import { UserRole } from '../models/interfaces';
 
 /**
@@ -12,12 +11,10 @@ import { UserRole } from '../models/interfaces';
  */
 export class DashboardController extends BaseController {
   private dashboardService: DashboardService;
-  private architectService: ArchitectService;
 
   constructor() {
     super();
     this.dashboardService = new DashboardService();
-    this.architectService = new ArchitectService();
   }
 
   public getStudentDashboard = catchAsync(
@@ -53,7 +50,7 @@ export class DashboardController extends BaseController {
       // Verify user has architect role
       this.verifyAuthorization(req, [UserRole.ARCHITECT], 'accessing architect dashboard');
       
-      const stats = await this.architectService.getDashboardStats(req.user!.userId);
+      const stats = await this.dashboardService.getArchitectDashboardMetrics(req.user!.userId);
       
       // Log the action
       this.logAction('architect-dashboard-access', req.user!.userId);

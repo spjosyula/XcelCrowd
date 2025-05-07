@@ -12,7 +12,9 @@ import {
   UserRole,
   ISolution,
   IStudentProfile,
-  IChallenge
+  IChallenge,
+  ChallengeDifficulty,
+  EvaluationDecision
 } from '../models/interfaces';
 import { ApiError } from '../utils/api.error';
 import { logger } from '../utils/logger';
@@ -36,6 +38,18 @@ interface SolutionSubmissionData {
  * Contains all business logic for solution management
  */
 export class SolutionService extends BaseService {
+
+  private getDocumentId(doc: any): string {
+    if (!doc) return 'unknown-id';
+    if (doc._id) {
+      return doc._id instanceof Types.ObjectId
+        ? doc._id.toString()
+        : typeof doc._id === 'string'
+          ? doc._id
+          : String(doc._id);
+    }
+    return typeof doc === 'string' ? doc : 'unknown-id';
+  }
 
   /**
    * Submit a solution to a challenge
@@ -71,7 +85,7 @@ export class SolutionService extends BaseService {
       const sanitizedTitle = String(solutionData.title).trim();
       const sanitizedDescription = String(solutionData.description).trim();
       const sanitizedSubmissionUrl = String(solutionData.submissionUrl).trim();
-      
+
       // Validate and sanitize tags if provided
       const sanitizedTags = solutionData.tags?.map(tag => String(tag).trim()) || [];
 
@@ -237,7 +251,7 @@ export class SolutionService extends BaseService {
         const { status } = filters;
         const pageRaw = filters.page === undefined ? 1 : Number(filters.page);
         const limitRaw = filters.limit === undefined ? 10 : Number(filters.limit);
-        
+
         // Validate and sanitize page/limit values
         const page = isNaN(pageRaw) || pageRaw < 1 ? 1 : Math.floor(pageRaw);
         const limit = isNaN(limitRaw) || limitRaw < 1 ? 10 : Math.min(Math.floor(limitRaw), 100);
@@ -265,14 +279,14 @@ export class SolutionService extends BaseService {
         // Validate and sanitize sort parameters
         const allowedSortFields = ['createdAt', 'updatedAt', 'title', 'status', 'score'];
         let sortBy = 'updatedAt'; // Default sort field
-        
+
         if (filters.sortBy && allowedSortFields.includes(filters.sortBy)) {
           sortBy = filters.sortBy;
         }
-        
+
         // Sanitize sort order
         const sortOrder = filters.sortOrder === 'asc' ? 1 : -1;
-        
+
         const sort: Record<string, 1 | -1> = {};
         sort[sortBy] = sortOrder;
 
@@ -346,7 +360,7 @@ export class SolutionService extends BaseService {
     try {
       // Sanitize challenge ID
       const sanitizedChallengeId = MongoSanitizer.validateObjectId(challengeId, 'challenge');
-      
+
       // Sanitize userId for use in authorization
       const sanitizedUserId = String(userId).trim();
 
@@ -872,7 +886,7 @@ export class SolutionService extends BaseService {
         for (const field of allowedFields) {
           if (field in updateData && updateData[field as keyof typeof updateData] !== undefined) {
             const value = updateData[field as keyof typeof updateData];
-            
+
             // Sanitize based on field type
             if (field === 'tags' && Array.isArray(value)) {
               // Sanitize each tag 
@@ -1146,7 +1160,7 @@ export class SolutionService extends BaseService {
 
       // Validate review data
       const validatedData = this.validateReviewData(reviewData);
-      
+
       // Sanitize feedback
       const sanitizedFeedback = String(validatedData.feedback).trim();
 
@@ -1298,12 +1312,16 @@ export class SolutionService extends BaseService {
    * Select a solution as winning (by company) with transaction support
    * @param solutionId - The ID of the solution
    * @param companyId - The ID of the company
+   * @param selectionData - Optional data about the selection (feedback, reason)
    * @returns The updated solution
    */
   async selectSolutionAsWinner(
     solutionId: string,
     companyId: string,
-   // verificationToken: string -> TODO: Implement verification token logic to prevent cross-site request forgery (CSRF) attacks
+    selectionData?: {
+      companyFeedback?: string;
+      selectionReason?: string;
+    }
   ): Promise<ISolution> {
     try {
       // Sanitize and validate IDs using MongoSanitizer
@@ -1391,6 +1409,15 @@ export class SolutionService extends BaseService {
         solution.status = SolutionStatus.SELECTED;
         solution.selectedAt = new Date();
         solution.selectedBy = new Types.ObjectId(sanitizedCompanyId);
+
+        // Add company feedback and selection reason if provided
+        if (selectionData?.companyFeedback) {
+          solution.companyFeedback = selectionData.companyFeedback;
+        }
+
+        if (selectionData?.selectionReason) {
+          solution.selectionReason = selectionData.selectionReason;
+        }
 
         await solution.save({ session });
 
@@ -1600,7 +1627,7 @@ export class SolutionService extends BaseService {
    */
   private validateAndSanitizePaginationOptions(options: PaginationOptions): PaginationOptions {
     const sanitizedOptions: PaginationOptions = {};
-    
+
     // Sanitize page
     if (options.page !== undefined) {
       const page = Number(options.page);
@@ -1612,7 +1639,7 @@ export class SolutionService extends BaseService {
     } else {
       sanitizedOptions.page = 1; // Default
     }
-    
+
     // Sanitize limit
     if (options.limit !== undefined) {
       const limit = Number(options.limit);
@@ -1625,13 +1652,13 @@ export class SolutionService extends BaseService {
     } else {
       sanitizedOptions.limit = 10; // Default
     }
-    
+
     // Sanitize status if provided
     if (options.status) {
       // Options.status will be validated in the method that uses it
       sanitizedOptions.status = options.status;
     }
-    
+
     // Sanitize sort options
     if (options.sortBy) {
       // Allow only certain fields for sorting
@@ -1644,15 +1671,261 @@ export class SolutionService extends BaseService {
     } else {
       sanitizedOptions.sortBy = 'reviewedAt'; // Default
     }
-    
+
     // Sanitize sort order
     if (options.sortOrder && ['asc', 'desc'].includes(options.sortOrder)) {
       sanitizedOptions.sortOrder = options.sortOrder;
     } else {
       sanitizedOptions.sortOrder = 'desc'; // Default
     }
-    
+
     return sanitizedOptions;
+  }
+
+  /**
+   * Submit a solution to the AI evaluation pipeline and then to architect review
+   * This method serves as the main integration point between AI evaluation and architect review
+   * @param solutionId - ID of the solution to process
+   * @returns The updated solution with evaluation results
+   */
+  async submitSolutionForAIEvaluationAndArchitectReview(
+    solutionId: string
+  ): Promise<ISolution> {
+    try {
+      logger.info(`Starting AI evaluation and architect review workflow for solution`, {
+        solutionId
+      });
+
+      // Validate solution ID
+      const sanitizedSolutionId = MongoSanitizer.validateObjectId(solutionId, 'solution');
+
+      // Get solution with challenge details
+      const solution = await Solution.findById(sanitizedSolutionId)
+        .populate('challenge')
+        .populate('student');
+
+      if (!solution) {
+        throw new ApiError(
+          HTTP_STATUS.NOT_FOUND,
+          'Solution not found',
+          true,
+          'SOLUTION_NOT_FOUND'
+        );
+      }
+
+      // Only process solutions in SUBMITTED status
+      if (solution.status !== SolutionStatus.SUBMITTED) {
+        throw new ApiError(
+          HTTP_STATUS.BAD_REQUEST,
+          `Cannot process solution in ${solution.status} status, must be in SUBMITTED status`,
+          true,
+          'INVALID_SOLUTION_STATUS'
+        );
+      }
+
+      // Get the evaluation pipeline controller
+      const { evaluationPipelineController } = await import('./ai/EvaluationPipelineController');
+
+      // Set the appropriate number of evaluation passes based on challenge difficulty
+      const challengeObj = solution.challenge as IChallenge;
+      let maxPasses = 1; // Default for standard evaluation
+
+      if (challengeObj && challengeObj.difficulty) {
+        // More passes for more difficult challenges
+        if (challengeObj.difficulty === ChallengeDifficulty.INTERMEDIATE) {
+          maxPasses = 2;
+        } else if (challengeObj.difficulty === ChallengeDifficulty.ADVANCED ||
+          challengeObj.difficulty === ChallengeDifficulty.EXPERT) {
+          maxPasses = 3;
+        }
+      }
+
+      logger.info(`Executing evaluation pipeline with ${maxPasses} passes`, {
+        solutionId: solution._id?.toString(),
+        challengeId: challengeObj?._id?.toString(),
+        difficulty: challengeObj?.difficulty
+      });
+
+      // Run the evaluation pipeline with appropriate number of passes
+      const pipelineResult = await evaluationPipelineController.executeIterativePipeline(
+        solution,
+        maxPasses
+      );
+
+      // Process and format solution for architect review
+      const preparedSolution = evaluationPipelineController.prepareSolutionForArchitectReview(
+        solution,
+        pipelineResult
+      );
+
+      // Determine if the solution should go to architect review based on final decision
+      let newStatus = SolutionStatus.SUBMITTED;
+
+      if (pipelineResult.finalDecision === EvaluationDecision.FAIL) {
+        // If AI has determined the solution is clearly failing, mark it as rejected
+        // Architects can still review these in their dashboard if needed
+        newStatus = SolutionStatus.REJECTED;
+
+        // Log the automatic rejection
+        logger.info(`Solution automatically rejected by AI evaluation`, {
+          solutionId: this.getDocumentId(solution),
+          score: solution.score,
+          finalDecision: pipelineResult.finalDecision
+        });
+      } else {
+        // For PASS or REVIEW decisions, keep as SUBMITTED for architect review
+        newStatus = SolutionStatus.SUBMITTED;
+
+        // Log the submission to architect review
+        logger.info(`Solution ready for architect review after AI evaluation`, {
+          solutionId: this.getDocumentId(solution),
+          score: solution.score,
+          finalDecision: pipelineResult.finalDecision
+        });
+      }
+
+      // Update solution with evaluation results and status
+      preparedSolution.status = newStatus;
+
+      // Save the updated solution
+      await preparedSolution.save();
+
+      return preparedSolution;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const errorStack = error instanceof Error ? error.stack : undefined;
+
+      logger.error(`Error in AI evaluation and architect review workflow`, {
+        solutionId,
+        error: errorMessage,
+        stack: errorStack
+      });
+
+      if (error instanceof ApiError) throw error;
+
+      throw new ApiError(
+        HTTP_STATUS.INTERNAL_SERVER_ERROR,
+        `Error processing solution evaluation: ${errorMessage}`,
+        true,
+        'EVALUATION_PROCESSING_ERROR'
+      );
+    }
+  }
+
+  /**
+   * Process solutions for a specific challenge in bulk
+   * This will evaluate all solutions for the challenge and prepare them for architect review
+   * @param challengeId - ID of the challenge
+   * @returns Summary of processed solutions
+   */
+  async processChallengeForArchitectReview(
+    challengeId: string
+  ): Promise<{
+    totalSolutions: number;
+    processedSolutions: number;
+    failedSolutions: number;
+    processingTimeMs: number;
+  }> {
+    try {
+      const startTime = Date.now();
+      logger.info(`Processing all solutions for challenge`, { challengeId });
+
+      // Validate challenge ID
+      const sanitizedChallengeId = MongoSanitizer.validateObjectId(challengeId, 'challenge');
+
+      // Find all submitted solutions for this challenge
+      const solutions = await Solution.find({
+        challenge: sanitizedChallengeId,
+        status: SolutionStatus.SUBMITTED
+      });
+
+      logger.info(`Found ${solutions.length} submitted solutions for challenge`, {
+        challengeId,
+        solutionCount: solutions.length
+      });
+
+      // Process solutions in parallel using Promise.all
+      // Limit concurrency to avoid overwhelming the AI services
+      const batchSize = 5; // Process 5 solutions at a time
+      const results = {
+        totalSolutions: solutions.length,
+        processedSolutions: 0,
+        failedSolutions: 0,
+        processingTimeMs: 0
+      };
+
+      // Process in batches
+      for (let i = 0; i < solutions.length; i += batchSize) {
+        const batch = solutions.slice(i, i + batchSize);
+
+        // Process batch in parallel
+        const batchResults = await Promise.allSettled(
+          batch.map((solution: ISolution) =>
+            this.submitSolutionForAIEvaluationAndArchitectReview(
+              (solution._id as mongoose.Types.ObjectId | string).toString()
+            )
+          )
+        );
+
+        // Count successes and failures
+        batchResults.forEach(result => {
+          if (result.status === 'fulfilled') {
+            results.processedSolutions++;
+          } else {
+            results.failedSolutions++;
+            logger.error(`Failed to process solution in batch`, {
+              challengeId,
+              error: result.reason instanceof Error ? result.reason.message : String(result.reason)
+            });
+          }
+        });
+
+        // Log batch progress
+        logger.info(`Processed batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(solutions.length / batchSize)}`, {
+          challengeId,
+          batchSize: batch.length,
+          successCount: batchResults.filter(r => r.status === 'fulfilled').length,
+          failureCount: batchResults.filter(r => r.status === 'rejected').length
+        });
+      }
+
+      // Update processing time
+      results.processingTimeMs = Date.now() - startTime;
+
+      // Update challenge status to CLOSED if all solutions are processed
+      if (results.processedSolutions > 0) {
+        const challenge = await Challenge.findById(sanitizedChallengeId);
+        if (challenge && challenge.status !== ChallengeStatus.CLOSED) {
+          challenge.status = ChallengeStatus.CLOSED;
+          await challenge.save();
+
+          logger.info(`Challenge status updated to CLOSED`, { challengeId });
+        }
+      }
+
+      logger.info(`Challenge processing completed`, {
+        challengeId,
+        ...results
+      });
+
+      return results;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error(`Error processing challenge solutions`, {
+        challengeId,
+        error: errorMessage,
+        stack: error instanceof Error ? error.stack : undefined
+      });
+
+      if (error instanceof ApiError) throw error;
+
+      throw new ApiError(
+        HTTP_STATUS.INTERNAL_SERVER_ERROR,
+        `Error processing challenge solutions: ${errorMessage}`,
+        true,
+        'CHALLENGE_PROCESSING_ERROR'
+      );
+    }
   }
 }
 

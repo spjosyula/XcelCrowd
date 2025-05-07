@@ -8,7 +8,8 @@ import {
   HTTP_STATUS,
   UserRole,
   IUser,
-  IChallenge
+  IChallenge,
+  ICompanyProfile
 } from '../models/interfaces';
 import { ApiError } from '../utils/api.error';
 import { logger } from '../utils/logger';
@@ -1871,7 +1872,7 @@ export class ArchitectService extends BaseService {
    * Select solutions to forward to the company
    * @param challengeId - The ID of the challenge
    * @param solutionIds - Array of solution IDs to select
-   * @param architectId - The ID of the architect making the selection
+   * @param architectId - The ID of the architect
    * @returns The selected solutions
    */
   async selectSolutionsForCompany(
@@ -1902,7 +1903,7 @@ export class ArchitectService extends BaseService {
               filter: { _id: id },
               update: {
                 $set: {
-                  status: SolutionStatus.SELECTED,
+                  status: SolutionStatus.APPROVED,
                   selectedAt: new Date(),
                   selectedBy: new Types.ObjectId(architectId)
                 }
@@ -1924,15 +1925,34 @@ export class ArchitectService extends BaseService {
           throw ApiError.internal('Not all solutions could be updated to SELECTED status');
         }
       
-        // Update challenge status
-        challenge.status = ChallengeStatus.COMPLETED;
-        await challenge.save({ session });
+        // Update challenge status to CLOSED if not already
+        if (challenge.status !== ChallengeStatus.CLOSED) {
+          challenge.status = ChallengeStatus.CLOSED;
+          await challenge.save({ session });
+        }
+        
+        // Notify company about the selected solutions
+        // We'll implement a notification system in a separate PR
+        if (challenge.company) {
+          // Handle both ObjectId and ICompanyProfile types safely
+          const companyId = typeof challenge.company === 'string' 
+            ? challenge.company 
+            : challenge.company._id instanceof Types.ObjectId 
+              ? challenge.company._id.toString() 
+              : String(challenge.company._id);
+              
+          logger.info(`Solutions forwarded to company for final review`, {
+            challengeId,
+            companyId,
+            solutionCount: validatedSolutionIds.length
+          });
+        }
       
         logger.info(`Solutions selected for company`, {
           challengeId,
           architectId,
           solutionCount: validatedSolutionIds.length,
-          challengeStatus: ChallengeStatus.COMPLETED
+          challengeStatus: challenge.status
         });
       
         // Return the updated solutions with optimized population

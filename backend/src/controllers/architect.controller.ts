@@ -7,6 +7,7 @@ import { catchAsync } from '../utils/catch.async';
 import { logger } from '../utils/logger';
 import { ApiError } from '../utils/api.error';
 import { Types } from 'mongoose';
+import { dashboardService } from '../services/dashboard.service';
 
 
 /********
@@ -722,6 +723,75 @@ export class ArchitectController extends BaseController {
         res,
         selectedSolutions,
         'Solutions have been successfully selected for the company'
+      );
+    }
+  );
+
+  /**
+   * Get comprehensive dashboard metrics for architect
+   * @route GET /api/architect/dashboard/metrics
+   * @access Private - Architect only
+   */
+  public getDashboardMetrics = catchAsync(
+    async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      // Verify architect authorization
+      this.verifyAuthorization(req, [UserRole.ARCHITECT], 'accessing dashboard metrics');
+      
+      // Get architect profile ID
+      const architectId = await this.getUserProfileId(req, UserRole.ARCHITECT);
+      
+      // Get dashboard metrics from service
+      const metrics = await dashboardService.getArchitectDashboardMetrics(architectId);
+      
+      // Log the action
+      this.logAction('view-dashboard-metrics', req.user!.userId, {
+        architectId
+      });
+      
+      // Send response
+      this.sendSuccess(
+        res,
+        metrics,
+        'Dashboard metrics retrieved successfully'
+      );
+    }
+  );
+  
+  /**
+   * Get detailed solution analytics with AI evaluation details
+   * @route GET /api/architect/solutions/:id/analytics
+   * @access Private - Architect only
+   */
+  public getSolutionAnalytics = catchAsync(
+    async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      // Verify architect authorization
+      this.verifyAuthorization(req, [UserRole.ARCHITECT], 'viewing solution analytics');
+      
+      const { id } = req.params;
+      
+      // Validate solution ID format
+      if (!id || !Types.ObjectId.isValid(id)) {
+        throw new ApiError(
+          HTTP_STATUS.BAD_REQUEST,
+          'Invalid solution ID format',
+          true,
+          'INVALID_ID_FORMAT'
+        );
+      }
+      
+      // Get solution analytics from dashboard service
+      const analytics = await dashboardService.getSolutionAnalytics(id);
+      
+      // Log the action
+      this.logAction('view-solution-analytics', req.user!.userId, {
+        solutionId: id
+      });
+      
+      // Send response
+      this.sendSuccess(
+        res,
+        analytics,
+        'Solution analytics retrieved successfully'
       );
     }
   );

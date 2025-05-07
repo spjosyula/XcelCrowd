@@ -6,7 +6,8 @@ import { AuthPattern } from '../types/authorization.types';
 import { 
   submitSolutionSchema, 
   updateSolutionSchema,
-  reviewSolutionSchema 
+  reviewSolutionSchema,
+  selectSolutionAsWinnerSchema
 } from '../validations/solution.validation';
 
 const router = Router();
@@ -143,6 +144,7 @@ router.patch(
   '/:id/select',
   authenticate,
   authorizePattern(AuthPattern.COMPANY_ONLY),
+  validateRequest(selectSolutionAsWinnerSchema),
   solutionController.selectSolution
 );
 

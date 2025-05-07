@@ -70,26 +70,26 @@ export interface IRepositoryAnalysis {
   complexity: number;
   duplication: number;
   testCoverage: number;
+  // LLM-enhanced analysis results
+  llmAnalysis?: {
+    fileAnalysis: Record<string, {
+      advancedIssues: ICodeIssue[];
+      complexity: number;
+      maintainability: number;
+      bestPractices: string[];
+      securityInsights: string[];
+    }>;
+    architectureAnalysis: {
+      architectureScore: number;
+      designPatterns: string[];
+      architectureRecommendations: string[];
+      strengths: string[];
+      weaknesses: string[];
+    } | null;
+    enhancedVulnerabilities: boolean;
+  };
 }
 
-// Challenge requirement structure
-export interface IChallengeRequirement {
-  id: string;
-  name: string;
-  description: string;
-  type: 'file' | 'feature' | 'package' | 'structure' | 'other' | 'quality';
-  importance: 'critical' | 'important' | 'nice-to-have';
-  // For file requirements
-  filePath?: string;
-  filePattern?: string;
-  extensions?: string[];
-  // For code requirements
-  codePattern?: string;
-  // For package requirements
-  packageName?: string;
-  packageType?: 'npm' | 'python' | 'ruby' | 'other';
-  packageVersion?: string;
-}
 
 // Extended scoring feedback metadata
 export interface IExtendedScoringFeedbackMetadata {

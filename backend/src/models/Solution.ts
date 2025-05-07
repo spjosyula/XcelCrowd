@@ -1,6 +1,7 @@
 import mongoose, { Schema, model, Model } from 'mongoose';
 import { ISolution, SolutionStatus } from './interfaces';
 import validator from 'validator';
+import { MongoSanitizer } from '../utils/mongo.sanitize';
 
 /**
  * Solution schema definition
@@ -34,19 +35,18 @@ const solutionSchema = new Schema<ISolution>({
     trim: true,
     validate: {
       validator: function(v: string) {
-        // URL validation with 3rd party library for security
-        // and input length check to prevent DoS attacks
-        return v.length <= 2048 && validator.isURL(v, {
-          protocols: ['http', 'https'],
-          require_protocol: true,
-          require_valid_protocol: true,
-          require_tld: true,
-          allow_trailing_dot: false,
-          allow_protocol_relative_urls: false,
-          disallow_auth: true
-        });
+        // This includes protection against ReDoS and other URL-based attacks
+        const sanitized = MongoSanitizer.sanitizeGitHubUrl(v);    
+        if (!sanitized) {
+          return false;
+        }
+        // Additional GitHub repository format validation
+        // Match only github.com/username/repository format
+        const safeGithubRepoRegex = /^https:\/\/(?:www\.)?github\.com\/[a-zA-Z0-9_-]{1,39}\/[a-zA-Z0-9_.-]{1,100}(?:\/)?(?:\?.*)?$/;
+        
+        return safeGithubRepoRegex.test(sanitized);
       },
-      message: props => `${props.value} is not a valid URL or exceeds maximum length`
+      message: props => `${props.value} is not a valid GitHub repository URL. Please provide a direct link to a GitHub repository.`
     }
   },
   status: {
@@ -78,6 +78,14 @@ const solutionSchema = new Schema<ISolution>({
   selectedBy: {
     type: Schema.Types.ObjectId,
     ref: 'CompanyProfile'
+  },
+  companyFeedback: {
+    type: String,
+    trim: true
+  },
+  selectionReason: {
+    type: String,
+    trim: true
   }
 }, {
   timestamps: true,

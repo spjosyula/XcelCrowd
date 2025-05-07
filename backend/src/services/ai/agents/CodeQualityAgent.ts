@@ -16,6 +16,9 @@ import { setTimeout } from 'timers/promises';
 import * as crypto from 'crypto';
 import { GitHubService} from '../../../services/github.service';
 import { ProgrammingLanguage, FILE_EXTENSION_TO_LANGUAGE } from '../../../constants/common.tech.things';
+import { LLMService } from '../../llm/LLMService';
+import { ILLMTextRequest, ILLMMessage } from '../../llm/interfaces/ILLMRequest';
+import { ILLMService } from '../../llm/interfaces/ILLMService';
 
 // Cache TTL - 30 minutes
 const CACHE_TTL = 30 * 60 * 1000;
@@ -25,11 +28,34 @@ const CACHE_TTL = 30 * 60 * 1000;
  * Evaluates code quality of GitHub repository submissions
  */
 export class CodeQualityAgent extends AIAgentBase<ICodeQualityResult> {
+  private static instance: CodeQualityAgent;
   public name = 'CodeQualityAgent';
   public description = 'Analyzes code quality metrics for GitHub submissions';
 
   // Cache for repository analysis results
   private static repositoryCache: Map<string, ICachedRepositoryAnalysis> = new Map();
+
+  // LLM service for advanced code analysis
+  private readonly llmService: ILLMService;
+
+  /**
+   * Private constructor to enforce singleton pattern
+   */
+  private constructor() {
+    super();
+    this.llmService = LLMService.getInstance();
+  }
+
+  /**
+   * Get the singleton instance
+   * @returns The CodeQualityAgent instance
+   */
+  public static getInstance(): CodeQualityAgent {
+    if (!CodeQualityAgent.instance) {
+      CodeQualityAgent.instance = new CodeQualityAgent();
+    }
+    return CodeQualityAgent.instance;
+  }
 
   // Common security vulnerability patterns
   private static readonly VULNERABILITY_PATTERNS: IVulnerabilityPattern[] = [
@@ -104,13 +130,16 @@ export class CodeQualityAgent extends AIAgentBase<ICodeQualityResult> {
       // Extract GitHub repository information
       const repoInfo = await this.extractGitHubRepoInfo(solution.submissionUrl);
 
+      // Get any previous agent results from the solution object
+      const previousResults = this.extractPreviousAgentResults(solution);
+
       logger.debug(`Starting code quality analysis for repository`, {
         solutionId: solution._id?.toString(),
         repo: `${repoInfo.owner}/${repoInfo.repo}`
       });
 
       // Analyze code quality metrics
-      const repoAnalysis = await this.analyzeRepository(repoInfo);
+      const repoAnalysis = await this.analyzeRepository(repoInfo, previousResults);
 
       // Calculate scores from the metrics
       const [scores, improvementAreas] = this.calculateScores(repoAnalysis);
@@ -161,7 +190,9 @@ export class CodeQualityAgent extends AIAgentBase<ICodeQualityResult> {
             commitCount: repoAnalysis.commitCount,
             contributorCount: repoAnalysis.contributorCount,
             branchCount: repoAnalysis.branchCount
-          }
+          },
+          // Store LLM-specific analysis results
+          llmAnalysis: repoAnalysis.llmAnalysis || undefined
         },
         evaluatedAt: new Date()
       };
@@ -178,6 +209,48 @@ export class CodeQualityAgent extends AIAgentBase<ICodeQualityResult> {
       // Return a default result on error
       return this.createErrorResult('Unable to analyze code quality: ' + errorMessage);
     }
+  }
+
+  /**
+   * Extract previous agent results from the solution context
+   * @param solution - The solution being evaluated
+   * @returns Object containing previous agent results
+   */
+  private extractPreviousAgentResults(solution: ISolution): {
+    spamFiltering?: any;
+    requirementsCompliance?: any;
+  } {
+    const results: { 
+      spamFiltering?: any;
+      requirementsCompliance?: any;
+    } = {};
+
+    // In a production pipeline, we would have access to previous results
+    // via a shared pipeline context or extracted from a database record
+    // For this implementation, we'll look for previous results in the solution context
+    if (solution.context && typeof solution.context === 'object') {
+      if (solution.context.pipelineResults) {
+        const pipelineResults = solution.context.pipelineResults;
+        
+        // Extract spam filtering results if available
+        if (pipelineResults.spamFiltering) {
+          results.spamFiltering = pipelineResults.spamFiltering;
+        }
+        
+        // Extract requirements compliance results if available
+        if (pipelineResults.requirementsCompliance) {
+          results.requirementsCompliance = pipelineResults.requirementsCompliance;
+        }
+      } else if (solution.context.evaluationId) {
+        // If we have an evaluationId, we could potentially fetch the results
+        // from the database, but that would require database access
+        logger.debug(`Evaluation ID found in solution context: ${solution.context.evaluationId}, but direct database access not implemented`);
+      }
+    }
+
+    logger.debug(`Extracted previous agent results: ${Object.keys(results).length > 0 ? 'found data' : 'no data'}`);
+    
+    return results;
   }
 
   /**
@@ -256,12 +329,16 @@ export class CodeQualityAgent extends AIAgentBase<ICodeQualityResult> {
   /**
    * Analyze a GitHub repository for code quality metrics
    * @param repoInfo - Repository information
+   * @param previousResults - Results from previous agents in the pipeline
    * @returns Comprehensive repository analysis
    */
   private async analyzeRepository(repoInfo: {
     owner: string;
     repo: string;
     url: string;
+  }, previousResults?: {
+    spamFiltering?: any;
+    requirementsCompliance?: any;
   }): Promise<IRepositoryAnalysis> {
     const cacheKey = `${repoInfo.owner}/${repoInfo.repo}`;
 
@@ -293,7 +370,12 @@ export class CodeQualityAgent extends AIAgentBase<ICodeQualityResult> {
         testCoverage: 0,
         commitCount: 0,
         contributorCount: 0,
-        branchCount: 0
+        branchCount: 0,
+        llmAnalysis: {
+          fileAnalysis: {},
+          architectureAnalysis: null,
+          enhancedVulnerabilities: false
+        }
       };
 
       // Get repository structure first
@@ -365,6 +447,91 @@ export class CodeQualityAgent extends AIAgentBase<ICodeQualityResult> {
       // Estimate test coverage
       analysis.testCoverage = this.estimateTestCoverage(analysis);
 
+      // Enhanced analysis with LLM - analyze a subset of important files
+      if (significantFiles.length > 0) {
+        // Select most important files for LLM analysis
+        const mostImportantFiles = significantFiles
+          .filter(file => file.content && file.content.length > 0)
+          .sort((a, b) => (b.metrics?.complexity || 0) - (a.metrics?.complexity || 0))
+          .slice(0, 3); // Analyze top 3 most complex files
+
+        // Ensure llmAnalysis is initialized
+        if (!analysis.llmAnalysis) {
+          analysis.llmAnalysis = {
+            fileAnalysis: {},
+            architectureAnalysis: null,
+            enhancedVulnerabilities: false
+          };
+        }
+
+        // Process files with LLM in parallel
+        const llmFileResults = await Promise.all(
+          mostImportantFiles.map(async file => {
+            const fileAnalysis = await this.analyzeSingleFileWithLLM(file, repoInfo);
+            return { file, analysis: fileAnalysis };
+          })
+        );
+
+        // Store results and update metrics
+        for (const result of llmFileResults) {
+          // Ensure llmAnalysis.fileAnalysis exists
+          if (analysis.llmAnalysis && !analysis.llmAnalysis.fileAnalysis) {
+            analysis.llmAnalysis.fileAnalysis = {};
+          }
+          
+          // Store LLM analysis
+          if (analysis.llmAnalysis && analysis.llmAnalysis.fileAnalysis) {
+            analysis.llmAnalysis.fileAnalysis[result.file.path] = result.analysis;
+          }
+          
+          // Merge LLM-detected issues with file issues
+          if (result.file.metrics) {
+            result.file.metrics.issues = [
+              ...result.file.metrics.issues,
+              ...result.analysis.advancedIssues.filter(issue => 
+                // Filter out potential duplicates
+                !result.file.metrics?.issues.some(existing => 
+                  existing.line === issue.line && 
+                  existing.type === issue.type
+                )
+              )
+            ];
+            
+            // Update file complexity considering LLM analysis
+            result.file.metrics.complexity = Math.max(
+              result.file.metrics.complexity,
+              Math.round(result.analysis.complexity / 10)  // Scale LLM complexity to our metrics
+            );
+            
+            // Update issue count
+            analysis.issueCount += result.analysis.advancedIssues.length;
+          }
+        }
+
+        // Perform architecture analysis if llmAnalysis is defined
+        if (analysis.llmAnalysis) {
+          analysis.llmAnalysis.architectureAnalysis = await this.analyzeRepositoryArchitectureWithLLM(
+            repoInfo,
+            analysis,
+            previousResults
+          );
+
+          // Enhance vulnerability analysis if we have initial vulnerabilities
+          if (analysis.vulnScanResults.length > 0) {
+            const enhancedVulnerabilities = await this.enhanceVulnerabilityAnalysisWithLLM(
+              repoInfo,
+              analysis
+            );
+            
+            // Update vulnerabilities with enhanced results
+            if (enhancedVulnerabilities.length > analysis.vulnScanResults.length && analysis.llmAnalysis) {
+              analysis.vulnScanResults = enhancedVulnerabilities;
+              analysis.llmAnalysis.enhancedVulnerabilities = true;
+            }
+          }
+        }
+      }
+
       // Cache the analysis
       CodeQualityAgent.repositoryCache.set(cacheKey, {
         timestamp: Date.now(),
@@ -375,7 +542,8 @@ export class CodeQualityAgent extends AIAgentBase<ICodeQualityResult> {
         files: analysis.files.length,
         primaryLanguage: analysis.primaryLanguage,
         issueCount: analysis.issueCount,
-        vulnerabilities: analysis.vulnScanResults.length
+        vulnerabilities: analysis.vulnScanResults.length,
+        llmEnhanced: analysis.llmAnalysis ? Object.keys(analysis.llmAnalysis.fileAnalysis || {}).length > 0 : false
       });
 
       return analysis;
@@ -968,6 +1136,84 @@ export class CodeQualityAgent extends AIAgentBase<ICodeQualityResult> {
       }
     }
 
+    // Incorporate LLM analysis if available
+    if (analysis.llmAnalysis) {
+      // Adjust security score based on LLM-enhanced vulnerability analysis
+      if (analysis.llmAnalysis.enhancedVulnerabilities) {
+        // If LLM found additional vulnerabilities, adjust security score
+        // but don't decrease it below current level
+        const llmVulnCount = analysis.vulnScanResults.filter(v => 'source' in v && v.source === 'llm-analysis').length;
+        if (llmVulnCount > 0) {
+          // Adjust score based on number of additional vulnerabilities found
+          if (llmVulnCount >= 3) {
+            scores.security = Math.min(scores.security, 40); // More severe adjustment for multiple issues
+            improvementAreas.push('LLM-detected security concerns');
+          } else {
+            scores.security = Math.min(scores.security, 60); // Minor adjustment
+          }
+        }
+      }
+
+      // Incorporate architecture analysis
+      if (analysis.llmAnalysis.architectureAnalysis) {
+        const archAnalysis = analysis.llmAnalysis.architectureAnalysis;
+        
+        // Adjust maintainability score based on architecture quality
+        // Use a weighted average with the existing maintainability score
+        scores.maintainability = Math.round(
+          scores.maintainability * 0.7 + (archAnalysis.architectureScore * 0.3)
+        );
+        
+        // Add architecture-related improvement areas if score is low
+        if (archAnalysis.architectureScore < 50) {
+          improvementAreas.push('Architecture design');
+          
+          // Add specific recommendations if available
+          if (archAnalysis.architectureRecommendations?.length > 0) {
+            improvementAreas.push(archAnalysis.architectureRecommendations[0]);
+          }
+        }
+      }
+      
+      // Incorporate file-level analysis
+      const fileAnalysisKeys = Object.keys(analysis.llmAnalysis.fileAnalysis || {});
+      if (fileAnalysisKeys.length > 0) {
+        // Calculate average LLM-detected complexity across analyzed files
+        let totalComplexity = 0;
+        let totalMaintainability = 0;
+        let filesWithAnalysis = 0;
+        
+        for (const key of fileAnalysisKeys) {
+          const fileAnalysis = analysis.llmAnalysis.fileAnalysis[key];
+          totalComplexity += fileAnalysis.complexity;
+          totalMaintainability += fileAnalysis.maintainability;
+          filesWithAnalysis++;
+        }
+        
+        if (filesWithAnalysis > 0) {
+          const avgComplexity = totalComplexity / filesWithAnalysis;
+          const avgMaintainability = totalMaintainability / filesWithAnalysis;
+          
+          // Adjust performance score based on LLM-detected complexity
+          // Use a weighted average with the existing performance score
+          if (avgComplexity > 0) {
+            const llmComplexityScore = 100 - avgComplexity; // Convert complexity to score (higher is better)
+            scores.performance = Math.round(
+              scores.performance * 0.7 + (llmComplexityScore * 0.3)
+            );
+          }
+          
+          // Adjust maintainability score based on LLM-detected maintainability
+          // Use a weighted average with the existing maintainability score
+          if (avgMaintainability > 0) {
+            scores.maintainability = Math.round(
+              scores.maintainability * 0.7 + (avgMaintainability * 0.3)
+            );
+          }
+        }
+      }
+    }
+
     // Return scores and improvement areas
     return [scores, improvementAreas];
   }
@@ -1015,6 +1261,49 @@ export class CodeQualityAgent extends AIAgentBase<ICodeQualityResult> {
     // Add language-specific feedback
     if (analysis.primaryLanguage !== ProgrammingLanguage.UNKNOWN) {
       feedback += ` Primary language detected: ${analysis.primaryLanguage}.`;
+    }
+
+    // Incorporate LLM analysis insights if available
+    if (analysis.llmAnalysis) {
+      // Add architecture insights
+      if (analysis.llmAnalysis.architectureAnalysis) {
+        const archAnalysis = analysis.llmAnalysis.architectureAnalysis;
+        
+        // Add architecture score
+        feedback += ` Architecture quality score: ${archAnalysis.architectureScore}/100.`;
+        
+        // Add design patterns if detected
+        if (archAnalysis.designPatterns && archAnalysis.designPatterns.length > 0) {
+          feedback += ` Design patterns identified: ${archAnalysis.designPatterns.slice(0, 3).join(', ')}${archAnalysis.designPatterns.length > 3 ? '...' : ''}.`;
+        }
+        
+        // Add strengths
+        if (archAnalysis.strengths && archAnalysis.strengths.length > 0) {
+          feedback += ` Key strengths: ${archAnalysis.strengths[0]}${archAnalysis.strengths.length > 1 ? '...' : ''}.`;
+        }
+        
+        // Add top recommendation
+        if (archAnalysis.architectureRecommendations && archAnalysis.architectureRecommendations.length > 0) {
+          feedback += ` Top recommendation: ${archAnalysis.architectureRecommendations[0]}.`;
+        }
+      }
+      
+      // Add insights from file analysis
+      const fileAnalysisKeys = Object.keys(analysis.llmAnalysis.fileAnalysis || {});
+      if (fileAnalysisKeys.length > 0) {
+        // Collect best practices across all analyzed files
+        const allBestPractices = new Set<string>();
+        for (const key of fileAnalysisKeys) {
+          const fileAnalysis = analysis.llmAnalysis.fileAnalysis[key];
+          fileAnalysis.bestPractices.forEach(practice => allBestPractices.add(practice));
+        }
+        
+        // Add best practices if found
+        if (allBestPractices.size > 0) {
+          const practices = Array.from(allBestPractices).slice(0, 2);
+          feedback += ` Positive practices: ${practices.join(', ')}${allBestPractices.size > 2 ? '...' : ''}.`;
+        }
+      }
     }
 
     return feedback;
@@ -1209,4 +1498,392 @@ export class CodeQualityAgent extends AIAgentBase<ICodeQualityResult> {
       analysis.branchCount = 1;
     }
   }
+
+  /**
+   * Perform deep code analysis using LLM for a specific file
+   * @param file - File to analyze
+   * @param repoInfo - Repository information
+   * @returns Enhanced code analysis with LLM insights
+   */
+  private async analyzeSingleFileWithLLM(
+    file: IFileInfo,
+    repoInfo: { owner: string; repo: string }
+  ): Promise<{
+    advancedIssues: ICodeIssue[];
+    complexity: number;
+    maintainability: number;
+    bestPractices: string[];
+    securityInsights: string[];
+  }> {
+    if (!file.content || file.content.trim().length === 0) {
+      return {
+        advancedIssues: [],
+        complexity: 0,
+        maintainability: 0,
+        bestPractices: [],
+        securityInsights: []
+      };
+    }
+
+    try {
+      // Prepare system prompt
+      const systemPrompt = `You are a code quality analysis expert. Analyze the following ${file.language} code and provide:
+1. A list of code issues with line numbers, severity (info/warning/error/critical), and explanations
+2. A complexity score from 0-100 (higher means more complex)
+3. A maintainability score from 0-100 (higher means more maintainable)
+4. Best practices that are followed in the code
+5. Security insights and potential vulnerabilities
+
+Format your response as valid JSON with the following structure:
+{
+  "issues": [{"line": number, "severity": "info|warning|error|critical", "message": "string", "type": "style|performance|maintainability|security"}],
+  "complexity": number,
+  "maintainability": number,
+  "bestPractices": ["string"],
+  "securityInsights": ["string"]
+}`;
+
+      // Prepare the LLM request
+      const request: ILLMTextRequest = {
+        model: "gpt-4o", // Using most capable model for code analysis
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: `File: ${file.path}\n\nCode:\n\`\`\`${file.language}\n${file.content}\n\`\`\`` }
+        ],
+        temperature: 0.1,
+        maxTokens: 2048,
+        jsonMode: true,
+        metadata: {
+          source: "CodeQualityAgent",
+          file: file.path,
+          repo: `${repoInfo.owner}/${repoInfo.repo}`
+        }
+      };
+
+      // Call LLM service
+      const response = await this.llmService.generateText(request);
+      
+      // Parse response
+      try {
+        const result = JSON.parse(response.text);
+        
+        // Convert LLM response issues to our internal format
+        const advancedIssues = (result.issues || []).map((issue: any) => ({
+          type: issue.type || "maintainability",
+          severity: issue.severity || "info",
+          line: issue.line || 1,
+          message: issue.message || "Code issue detected",
+          rule: `llm-${issue.type || "code-quality"}`
+        }));
+        
+        return {
+          advancedIssues,
+          complexity: result.complexity || 50,
+          maintainability: result.maintainability || 50,
+          bestPractices: result.bestPractices || [],
+          securityInsights: result.securityInsights || []
+        };
+      } catch (parseError) {
+        logger.warn(`Error parsing LLM response for file ${file.path}`, {
+          error: parseError instanceof Error ? parseError.message : String(parseError),
+          text: response.text.substring(0, 200) + "..."
+        });
+        
+        return {
+          advancedIssues: [],
+          complexity: 50,
+          maintainability: 50,
+          bestPractices: [],
+          securityInsights: []
+        };
+      }
+    } catch (error) {
+      logger.warn(`Error in LLM code analysis for file ${file.path}`, {
+        error: error instanceof Error ? error.message : String(error)
+      });
+      
+      return {
+        advancedIssues: [],
+        complexity: 50,
+        maintainability: 50,
+        bestPractices: [],
+        securityInsights: []
+      };
+    }
+  }
+
+  /**
+   * Analyze overall repository architecture using LLM
+   * @param repoInfo - Repository information
+   * @param analysis - Current repository analysis
+   * @param previousResults - Results from previous agents in the pipeline
+   * @returns Enhanced architecture analysis
+   */
+  private async analyzeRepositoryArchitectureWithLLM(
+    repoInfo: { owner: string; repo: string },
+    analysis: IRepositoryAnalysis,
+    previousResults?: {
+      spamFiltering?: any;
+      requirementsCompliance?: any;
+    }
+  ): Promise<{
+    architectureScore: number;
+    designPatterns: string[];
+    architectureRecommendations: string[];
+    strengths: string[];
+    weaknesses: string[];
+  }> {
+    try {
+      // Create a repository structure summary
+      const directoryStructure = analysis.directories.slice(0, 20).join('\n');
+      const fileTypes = Array.from(analysis.languages.entries())
+        .map(([lang, size]) => `${lang}: ${size} bytes`)
+        .join('\n');
+      
+      // Get important file summaries
+      const importantFiles = this.getSignificantFiles(analysis.files).slice(0, 5);
+      const fileSummaries = importantFiles.map(file => 
+        `${file.path} (${file.language}): ${file.content ? file.content.substring(0, 150) + '...' : 'No content'}`
+      ).join('\n\n');
+      
+      // Create system prompt
+      let systemPrompt = `You are a software architecture expert. Analyze the following repository structure and provide insights on the architecture quality:
+
+1. An overall architecture score from 0-100
+2. Identified design patterns
+3. Architecture recommendations
+4. Architectural strengths
+5. Architectural weaknesses
+
+Format your response as JSON:
+{
+  "architectureScore": number,
+  "designPatterns": ["string"],
+  "architectureRecommendations": ["string"],
+  "strengths": ["string"],
+  "weaknesses": ["string"]
+}`;
+
+      // Include previous analysis results if available
+      let previousAnalysisInsights = "";
+      if (previousResults?.requirementsCompliance?.result) {
+        const reqResults = previousResults.requirementsCompliance.result;
+        previousAnalysisInsights += `\nRequirements compliance score: ${reqResults.score}/100\n`;
+        if (reqResults.metadata?.requirements) {
+          previousAnalysisInsights += `Requirements met: ${reqResults.metadata.requirements.join(", ")}\n`;
+        }
+      }
+
+      // Prepare the LLM request
+      const request: ILLMTextRequest = {
+        model: "gpt-4o", // Using most capable model for architecture analysis
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: `Repository: ${repoInfo.owner}/${repoInfo.repo}
+
+Directory Structure:
+${directoryStructure}
+
+Languages:
+${fileTypes}
+
+${previousAnalysisInsights}
+
+Key File Samples:
+${fileSummaries}
+` }
+        ],
+        temperature: 0.2,
+        maxTokens: 2048,
+        jsonMode: true,
+        metadata: {
+          source: "CodeQualityAgent",
+          analysisType: "architecture",
+          repo: `${repoInfo.owner}/${repoInfo.repo}`
+        }
+      };
+
+      // Call LLM service
+      const response = await this.llmService.generateText(request);
+      
+      // Parse response
+      try {
+        const result = JSON.parse(response.text);
+        return {
+          architectureScore: result.architectureScore || 50,
+          designPatterns: result.designPatterns || [],
+          architectureRecommendations: result.architectureRecommendations || [],
+          strengths: result.strengths || [],
+          weaknesses: result.weaknesses || []
+        };
+      } catch (parseError) {
+        logger.warn(`Error parsing LLM architecture analysis`, {
+          error: parseError instanceof Error ? parseError.message : String(parseError),
+          text: response.text.substring(0, 200) + "..."
+        });
+        
+        return {
+          architectureScore: 50,
+          designPatterns: [],
+          architectureRecommendations: [],
+          strengths: [],
+          weaknesses: []
+        };
+      }
+    } catch (error) {
+      logger.warn(`Error in LLM architecture analysis`, {
+        repo: `${repoInfo.owner}/${repoInfo.repo}`,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      
+      return {
+        architectureScore: 50,
+        designPatterns: [],
+        architectureRecommendations: [],
+        strengths: [],
+        weaknesses: []
+      };
+    }
+  }
+
+  /**
+   * Enhanced vulnerability scan with LLM
+   * @param repoInfo - Repository information
+   * @param analysis - Current repository analysis
+   * @returns Enhanced vulnerability results
+   */
+  private async enhanceVulnerabilityAnalysisWithLLM(
+    repoInfo: { owner: string; repo: string },
+    analysis: IRepositoryAnalysis
+  ): Promise<IVulnerabilityResult[]> {
+    // Start with static analysis results
+    const staticResults = [...analysis.vulnScanResults];
+    
+    // Only process if we have significant vulnerabilities or a complex project
+    if (staticResults.length < 2 && analysis.files.length < 20) {
+      return staticResults;
+    }
+    
+    try {
+      // Create vulnerability summary
+      const vulnSummary = staticResults.map(vuln => 
+        `Location: ${vuln.location}, Severity: ${vuln.severity}, Description: ${vuln.description}`
+      ).join('\n');
+      
+      // Get security-relevant files
+      const securityFiles = analysis.files.filter(file => {
+        const path = file.path.toLowerCase();
+        return path.includes('auth') || 
+               path.includes('secur') || 
+               path.includes('login') || 
+               path.includes('password') ||
+               path.includes('crypt') ||
+               path.includes('permission');
+      });
+      
+      // Get content of security-relevant files
+      const securityFileContents = securityFiles.slice(0, 3).map(file => 
+        `${file.path}:\n${file.content ? file.content.substring(0, 500) + '...' : 'No content'}`
+      ).join('\n\n');
+      
+      // Create system prompt
+      const systemPrompt = `You are a security expert specializing in code security. Review the detected vulnerabilities and security-relevant files in this repository. Identify any additional security concerns or provide deeper insights on existing vulnerabilities.
+
+Format your response as JSON:
+{
+  "enhancedVulnerabilities": [
+    {
+      "severity": "low|medium|high|critical",
+      "description": "string",
+      "location": "string (file:line)",
+      "remediation": "string",
+      "cwe": "string (optional CWE ID)"
+    }
+  ]
+}`;
+
+      // Prepare the LLM request
+      const request: ILLMTextRequest = {
+        model: "gpt-4o", // Using most capable model for security analysis
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: `Repository: ${repoInfo.owner}/${repoInfo.repo}
+
+Detected Vulnerabilities:
+${vulnSummary || "No vulnerabilities detected by static analysis."}
+
+Security-Relevant Files:
+${securityFileContents || "No security-relevant files found."}
+
+Primary language: ${analysis.primaryLanguage}
+` }
+        ],
+        temperature: 0.2,
+        maxTokens: 2048,
+        jsonMode: true,
+        metadata: {
+          source: "CodeQualityAgent",
+          analysisType: "security",
+          repo: `${repoInfo.owner}/${repoInfo.repo}`
+        }
+      };
+
+      // Call LLM service
+      const response = await this.llmService.generateText(request);
+      
+      // Parse response
+      try {
+        const result = JSON.parse(response.text);
+        
+        if (result.enhancedVulnerabilities && Array.isArray(result.enhancedVulnerabilities)) {
+          // Convert LLM response to our internal format
+          const llmVulns = result.enhancedVulnerabilities.map((vuln: any) => ({
+            severity: vuln.severity || "medium",
+            description: `${vuln.description}${vuln.cwe ? ` (${vuln.cwe})` : ''}`,
+            location: vuln.location || "Unknown",
+            remediation: vuln.remediation || "Review and fix security issue",
+            languageSpecific: false,
+            source: "llm-analysis"
+          }));
+          
+          // Merge with static results (avoid duplicates)
+          const allVulns = [...staticResults];
+          
+          for (const llmVuln of llmVulns) {
+            // Check if this might be duplicate
+            const isDuplicate = staticResults.some(
+              staticVuln => 
+                staticVuln.location === llmVuln.location || 
+                staticVuln.description.includes(llmVuln.description.substring(0, 10))
+            );
+            
+            if (!isDuplicate) {
+              allVulns.push(llmVuln);
+            }
+          }
+          
+          return allVulns;
+        }
+        
+        return staticResults;
+      } catch (parseError) {
+        logger.warn(`Error parsing LLM vulnerability analysis`, {
+          error: parseError instanceof Error ? parseError.message : String(parseError),
+          text: response.text.substring(0, 200) + "..."
+        });
+        
+        return staticResults;
+      }
+    } catch (error) {
+      logger.warn(`Error in LLM vulnerability analysis`, {
+        repo: `${repoInfo.owner}/${repoInfo.repo}`,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      
+      return staticResults;
+    }
+  }
 } 
+
+// Export singleton instance for use in routes
+export const codeQualityAgent = CodeQualityAgent.getInstance();

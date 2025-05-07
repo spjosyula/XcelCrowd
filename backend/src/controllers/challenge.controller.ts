@@ -361,51 +361,45 @@ export class ChallengeController extends BaseController {
   );
 
   /**
-   * Mark challenge as completed
-   * @route PATCH /api/challenges/:id/complete
-   * @access Private - Company only (owner)
+   * Complete a challenge with final selections
+   * @route POST /api/challenges/:id/complete
+   * @access Private - Company only
    */
   completeChallenge = catchAsync(
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      // Verify user has company role
+      this.verifyAuthorization(req, [UserRole.COMPANY]);
+
       const { id } = req.params;
-
-      // Verify user has appropriate role
-      this.verifyAuthorization(req, [UserRole.COMPANY, UserRole.ADMIN], `complete a challenge`);
-
-      // Get company profile ID for authorization
-      const profileId = req.user!.role === UserRole.COMPANY ?
-        await this.getUserProfileId(req, UserRole.COMPANY) : req.user!.userId;
-
-      // Authorize challenge owner using service
-      const challenge = await this.challengeService.authorizeChallengeOwner(
-        profileId,
-        req.user!.role as UserRole,
-        id,
-        'complete'
-      );
-
-      // Verify business rules
-      if (challenge.status !== ChallengeStatus.CLOSED) {
-        throw ApiError.badRequest(
-          `Cannot complete a challenge that is ${challenge.status}. Challenge must be closed first.`,
-          'INVALID_CHALLENGE_STATUS'
-        );
-      }
-
+      
       // Get company profile ID
-      const companyId = req.user!.role === UserRole.COMPANY ?
-        profileId : challenge.company.toString();
+      const companyId = await this.getUserProfileId(req, UserRole.COMPANY);
 
-      // Complete via service
-      const updatedChallenge = await this.challengeService.completeChallenge(id, companyId);
-
-      this.logAction('challenge-complete', req.user!.userId, {
+      // Log the request
+      logger.info(`Completing challenge with final selections`, {
         challengeId: id,
-        previousStatus: challenge.status,
-        newStatus: ChallengeStatus.COMPLETED
+        userId: req.user!.userId,
+        companyId
       });
 
-      this.sendSuccess(res, updatedChallenge, 'Challenge marked as completed successfully');
+      // Mark challenge as completed and get the selected solutions
+      const result = await this.challengeService.markChallengeAsCompleted(id, companyId);
+
+      // Log the completion
+      this.logAction('complete-challenge', req.user!.userId, {
+        challengeId: id,
+        companyId,
+        selectedSolutions: result.selectedSolutions.length,
+        challengeStatus: result.challenge.status
+      });
+
+      // Send success response
+      this.sendSuccess(
+        res,
+        result,
+        `Challenge completed successfully with ${result.selectedSolutions.length} winning solutions`,
+        HTTP_STATUS.OK
+      );
     }
   );
 
@@ -496,6 +490,48 @@ export class ChallengeController extends BaseController {
       });
 
       this.sendSuccess(res, statistics, 'Challenge statistics retrieved successfully');
+    }
+  );
+
+  /**
+   * Process all solutions for a challenge and submit them to architect review
+   * This endpoint is used when a challenge deadline is reached
+   * @route POST /api/challenges/:id/process-for-review
+   * @access Private - Admin, Company
+   */
+  processChallengeForReview = catchAsync(
+    async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      // Verify user has appropriate role
+      this.verifyAuthorization(req, [UserRole.ADMIN, UserRole.COMPANY]);
+
+      const { id } = req.params;
+
+      // Log the request
+      logger.info(`Processing challenge for architect review`, {
+        challengeId: id,
+        userId: req.user!.userId
+      });
+
+      // Get solution service to process the challenge
+      const { solutionService } = await import('../services/solution.service');
+
+      // Process challenge solutions
+      const result = await solutionService.processChallengeForArchitectReview(id);
+
+      // Log the completion
+      this.logAction('process-challenge-for-review', req.user!.userId, {
+        challengeId: id,
+        processedSolutions: result.processedSolutions,
+        total: result.totalSolutions
+      });
+
+      // Send success response
+      this.sendSuccess(
+        res,
+        result,
+        `Successfully processed ${result.processedSolutions} out of ${result.totalSolutions} solutions for architect review`,
+        HTTP_STATUS.OK
+      );
     }
   );
 }

@@ -123,6 +123,12 @@ export class GitHubService {
     timestamp: number;
     contents: IGitHubRepoContent[];
   }> = new Map();
+  
+  // Repository files cache
+  private static repoFilesCache: Map<string, {
+    timestamp: number;
+    files: Array<{path: string; content: string}>;
+  }> = new Map();
 
   /**
    * Extract and validate GitHub repository information from URL
@@ -932,5 +938,201 @@ export class GitHubService {
     }
     
     logger.debug(`Cleared cache for repository ${cacheKey}`);
+  }
+
+  /**
+   * Get README content from a GitHub repository
+   * @param owner - Repository owner
+   * @param repo - Repository name
+   * @returns README file content as string
+   */
+  public static async getReadmeContent(
+    owner: string,
+    repo: string
+  ): Promise<string> {
+    // Check cache first
+    const cacheKey = `${owner}/${repo}/readme`;
+    const cachedContent = this.fileContentCache.get(cacheKey);
+    
+    if (cachedContent && (Date.now() - cachedContent.timestamp < this.CACHE_TTL)) {
+      logger.debug(`Using cached README content for ${cacheKey}`);
+      return cachedContent.content;
+    }
+    
+    // Get GitHub API token from token manager
+    const token = githubTokenManager.getNextToken();
+    
+    try {
+      // Prepare API request
+      const apiUrl = `https://api.github.com/repos/${owner}/${repo}/readme`;
+      const headers: Record<string, string> = {
+        'Accept': 'application/vnd.github.v3.raw',
+        'User-Agent': 'XcelCrowd-AI-Evaluation'
+      };
+      
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+      
+      // Make the request
+      const response = await axios.get(apiUrl, {
+        headers,
+        timeout: this.SECURITY_CONFIG.TIMEOUT_MS,
+        maxRedirects: this.SECURITY_CONFIG.MAX_REDIRECT_COUNT
+      });
+      
+      // Extract rate limit info
+      let rateLimitRemaining: number | undefined;
+      let rateLimitReset: number | undefined;
+      
+      if (response.headers && response.headers['x-ratelimit-remaining']) {
+        rateLimitRemaining = parseInt(response.headers['x-ratelimit-remaining'], 10);
+      }
+      
+      if (response.headers && response.headers['x-ratelimit-reset']) {
+        rateLimitReset = parseInt(response.headers['x-ratelimit-reset'], 10);
+      }
+      
+      // Update token metrics
+      if (token) {
+        githubTokenManager.updateTokenMetrics(
+          token,
+          true,
+          rateLimitRemaining,
+          rateLimitReset
+        );
+      }
+      
+      // Store the content in cache
+      const readmeContent = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
+      this.fileContentCache.set(cacheKey, {
+        timestamp: Date.now(),
+        content: readmeContent
+      });
+      
+      return readmeContent;
+    } catch (error) {
+      // If README is not found, that's fine - it could just be missing
+      if (axios.isAxiosError(error) && error.response && error.response.status === 404) {
+        logger.debug(`README not found for ${owner}/${repo}`);
+        
+        // Cache empty result to avoid repeated requests
+        this.fileContentCache.set(cacheKey, {
+          timestamp: Date.now(),
+          content: ''
+        });
+        
+        return '';
+      }
+      
+      // Handle other errors
+      logger.warn(`Error fetching README from GitHub repository`, {
+        owner,
+        repo,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      
+      // Update token metrics if token was used
+      if (token) {
+        githubTokenManager.updateTokenMetrics(token, false);
+      }
+      
+      // Return empty string rather than failing
+      return '';
+    }
+  }
+  
+  /**
+   * Get a sampling of repository files for analysis
+   * @param owner - Repository owner
+   * @param repo - Repository name
+   * @param maxFiles - Maximum number of files to retrieve
+   * @returns Array of files with their content
+   */
+  public static async getRepositoryFiles(
+    owner: string,
+    repo: string,
+    maxFiles: number = 5
+  ): Promise<Array<{path: string; content: string}>> {
+    // Check cache first
+    const cacheKey = `${owner}/${repo}/files/${maxFiles}`;
+    const cachedFiles = this.repoFilesCache.get(cacheKey);
+    
+    if (cachedFiles && (Date.now() - cachedFiles.timestamp < this.CACHE_TTL)) {
+      logger.debug(`Using cached repository files for ${cacheKey}`);
+      return cachedFiles.files;
+    }
+    
+    try {
+      // Get repository contents first
+      const contents = await this.getRepositoryContents(owner, repo);
+      
+      // Focus on code files for analysis
+      const codeExtensions = ['.js', '.ts', '.py', '.java', '.c', '.cpp', '.go', '.rs', '.php', '.rb', '.cs', '.html', '.css'];
+      
+      // Filter and prioritize code files
+      const codeFiles = contents.filter(file => {
+        if (file.type !== 'file') return false;
+        const ext = file.name.includes('.') ? `.${file.name.split('.').pop()?.toLowerCase()}` : '';
+        return codeExtensions.includes(ext);
+      });
+      
+      // Get a balanced sample - if we don't have enough code files, add other files
+      let filesToAnalyze = [...codeFiles];
+      
+      if (filesToAnalyze.length < maxFiles) {
+        const otherFiles = contents.filter(file => 
+          file.type === 'file' && !codeFiles.includes(file)
+        );
+        
+        filesToAnalyze = [...filesToAnalyze, ...otherFiles.slice(0, maxFiles - filesToAnalyze.length)];
+      }
+      
+      // Limit to max files
+      filesToAnalyze = filesToAnalyze.slice(0, maxFiles);
+      
+      // Fetch content for each file
+      const files: Array<{path: string; content: string}> = [];
+      
+      for (const file of filesToAnalyze) {
+        try {
+          const content = await this.getFileContent(owner, repo, file.path);
+          files.push({
+            path: file.path,
+            content
+          });
+        } catch (error) {
+          logger.debug(`Error fetching content for file ${file.path}`, {
+            error: error instanceof Error ? error.message : String(error)
+          });
+          
+          // Add file with empty content rather than failing
+          files.push({
+            path: file.path,
+            content: ''
+          });
+        }
+        
+        // Add slight delay between requests to respect rate limits
+        await setTimeout(100);
+      }
+      
+      // Cache the results
+      this.repoFilesCache.set(cacheKey, {
+        timestamp: Date.now(),
+        files
+      });
+      
+      return files;
+    } catch (error) {
+      logger.warn(`Error fetching repository files`, {
+        owner,
+        repo,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      
+      // Return empty array rather than failing
+      return [];
+    }
   }
 }

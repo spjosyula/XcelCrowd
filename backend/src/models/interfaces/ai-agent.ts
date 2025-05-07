@@ -102,6 +102,18 @@ export interface ICodeQualityResult extends IAgentEvaluationResult {
       contributorCount: number;
       branchCount: number;
     };
+    // LLM analysis results
+    llmAnalysis?: {
+      fileAnalysis?: Record<string, any>;
+      architectureAnalysis?: {
+        architectureScore: number;
+        designPatterns: string[];
+        architectureRecommendations: string[];
+        strengths: string[];
+        weaknesses: string[];
+      } | null;
+      enhancedVulnerabilities?: boolean;
+    };
   };
 }
 

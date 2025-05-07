@@ -1,10 +1,10 @@
 import { AIEvaluationService } from './ai-evaluation.service';
 import { AIAgentFactory } from './AIAgentFactory';
-import { SpamFilteringAgent } from './agents/SpamFilteringAgent';
-import { RequirementsComplianceAgent } from './agents/RequirementsComplianceAgent';
-import { CodeQualityAgent } from './agents/CodeQualityAgent';
-import { ScoringFeedbackAgent } from './agents/ScoringFeedbackAgent';
-import { EvaluationPipelineController, evaluationPipelineController } from './EvaluationPipelineController';
+import { spamFilteringAgent } from './agents/SpamFilteringAgent';
+import { requirementsComplianceAgent } from './agents/RequirementsComplianceAgent';
+import { codeQualityAgent } from './agents/CodeQualityAgent';
+import { scoringFeedbackAgent } from './agents/ScoringFeedbackAgent';
+import { evaluationPipelineController } from './EvaluationPipelineController';
 
 // Create and export singleton instance of the evaluation service
 const aiEvaluationService = new AIEvaluationService();
@@ -14,24 +14,27 @@ const registerAgents = () => {
   const factory = AIAgentFactory.getInstance();
   
   // Register the four evaluation agents
-  factory.registerAgent(new SpamFilteringAgent());
-  factory.registerAgent(new RequirementsComplianceAgent());
-  factory.registerAgent(new CodeQualityAgent());
-  factory.registerAgent(new ScoringFeedbackAgent());
+  factory.registerAgent(spamFilteringAgent);
+  factory.registerAgent(requirementsComplianceAgent);
+  factory.registerAgent(codeQualityAgent);
+  factory.registerAgent(scoringFeedbackAgent);
 };
 
-// Initialize the AI subsystem
+// Initialize AI services
 const initializeAI = () => {
-  // Register all AI agents
+  // Register all agents
   registerAgents();
+  
+  // Initialize the pipeline controller
+  // The controller is already initialized as a singleton in its own file
+  
+  // Log initialization
+  console.log('AI evaluation system initialized');
 };
 
+// Export services and initialization function
 export {
   aiEvaluationService,
-  AIEvaluationService,
-  AIAgentFactory,
-  registerAgents,
-  initializeAI,
   evaluationPipelineController,
-  EvaluationPipelineController
+  initializeAI
 }; 

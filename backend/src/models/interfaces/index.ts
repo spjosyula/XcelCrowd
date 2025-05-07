@@ -201,7 +201,20 @@ export interface ISolution extends Document, ITimestamps {
   score?: number;  // Numerical assessment of the solution quality
   tags: string[];  // Keywords or tags associated with the solution
   selectedAt?: Date;  // When the solution was selected as exemplary
-  selectedBy?: Types.ObjectId | IArchitectProfile;  // Architect who selected this solution
+  selectedBy?: Types.ObjectId | ICompanyProfile;  // Company who selected this solution
+  companyFeedback?: string;  // Feedback from company to the student when selected as winner
+  selectionReason?: string;  // Reason why the company selected this solution
+  // Internal runtime context for evaluation pipeline data sharing between agents
+  context?: {
+    evaluationId?: string;
+    pipelineResults?: {
+      spamFiltering?: any;
+      requirementsCompliance?: any;
+      codeQuality?: any;
+      scoringFeedback?: any;
+    };
+    [key: string]: any;  // Allow for other context data
+  };
 }
 
 /**
@@ -217,8 +230,20 @@ export enum HTTP_STATUS {
   NOT_FOUND = 404,  // Resource not found
   CONFLICT = 409,  // Request conflicts with current state of the server
   UNPROCESSABLE_ENTITY = 422,  // Request understood but semantically incorrect
-  INTERNAL_SERVER_ERROR = 500  // Server encountered an unexpected error
+  INTERNAL_SERVER_ERROR = 500,  // Server encountered an unexpected error
+  GATEWAY_TIMEOUT = 504,  // Server didn't receive a timely response from upstream server 
 }
 
 export * from './ai-agent';
 export * from './ai-agent-shared';
+
+/**
+ * Company solution selection response interface
+ */
+export interface ICompanySelectionResponse {
+  solutionId: string;  // ID of the selected solution
+  feedback?: string;   // Optional feedback from company to the student
+  selectionReason?: string; // Optional reason for selection
+  companyId: string;   // ID of the company making the selection
+  challengeId: string; // ID of the challenge
+}

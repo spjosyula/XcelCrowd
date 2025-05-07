@@ -79,6 +79,19 @@ export const reviewSolutionSchema = z.object({
   }
 });
 
+/**
+ * Zod schema for company selection of winning solution
+ */
+export const selectSolutionAsWinnerSchema = z.object({
+  companyFeedback: z.string()
+    .max(2000, 'Feedback cannot exceed 2000 characters')
+    .optional(),
+  
+  selectionReason: z.string()
+    .max(1000, 'Selection reason cannot exceed 1000 characters')
+    .optional()
+});
+
 // Type inference from zod schemas
 export type SubmitSolutionInput = z.infer<typeof submitSolutionSchema>;
 export type UpdateSolutionInput = z.infer<typeof updateSolutionSchema>;

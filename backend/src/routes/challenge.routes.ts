@@ -108,16 +108,16 @@ router.patch(
 );
 
 /**
- * @route   PATCH /api/challenges/:id/complete
- * @desc    Complete a challenge (finalize after review process)
- * @access  Private - Challenge owner (Company) or Admin only
+ * @route   POST /api/challenges/:id/complete
+ * @desc    Complete a challenge with final selection results
+ * @access  Private - Challenge owner (Company) only
  * @swagger
  * /challenges/{id}/complete:
  */
-router.patch(
+router.post(
   '/:id/complete',
   authenticate,
-  authorizePattern(AuthPattern.RESOURCE_OWNER),
+  authorizePattern(AuthPattern.COMPANY_ONLY),
   challengeController.completeChallenge
 );
 
@@ -147,6 +147,18 @@ router.patch(
   authenticate,
   authorizePattern(AuthPattern.RESOURCE_OWNER),
   challengeController.publishChallenge
+);
+
+/**
+ * @route POST /api/challenges/:id/process-for-review
+ * @desc Process all solutions for a challenge and submit to architect review
+ * @access Private - Admin, Company
+ */
+router.post(
+  '/:id/process-for-review',
+  authenticate,
+  authorizePattern(AuthPattern.COMPANY_OR_ADMIN),
+  challengeController.processChallengeForReview
 );
 
 export default router;

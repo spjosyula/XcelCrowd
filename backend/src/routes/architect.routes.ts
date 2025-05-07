@@ -84,6 +84,20 @@ router.get(
 );
 
 /**
+ * @route   GET /api/architect/solutions/:id/analytics
+ * @desc    Get detailed analytics for a solution including AI evaluation
+ * @access  Private - Architect only
+ * @swagger
+ * /architect/solutions/{id}/analytics:
+ */
+router.get(
+  '/solutions/:id/analytics',
+  authenticate,
+  authorizePattern(AuthPattern.ARCHITECT_ONLY),
+  architectController.getSolutionAnalytics
+);
+
+/**
  * @route   POST /api/architect/challenges/:challengeId/claim
  * @desc    Claim a challenge for review
  * @access  Private - Architect only
