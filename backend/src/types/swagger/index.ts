@@ -41,5 +41,6 @@ import './profile.swagger';
 import './architect.swagger';
 import './challenge.swagger';
 import './solution.swagger';
+import './ai-evaluation.swagger';
 // Later, you'll add more imports as you create those files:
 // import './dashboard.swagger';
