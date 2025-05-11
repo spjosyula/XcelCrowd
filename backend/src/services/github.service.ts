@@ -1,19 +1,34 @@
+import axios, { AxiosError, AxiosRequestConfig, AxiosResponse } from 'axios';
+import { setTimeout as setTimeoutPromise } from 'timers/promises';
+
+// Internal utilities
 import { MongoSanitizer } from '../utils/mongo.sanitize';
 import { ApiError } from '../utils/api.error';
 import { HTTP_STATUS } from '../models/interfaces';
 import { logger } from '../utils/logger';
-import axios from 'axios';
 import { githubTokenManager } from '../config/github.token.manager';
-import { setTimeout } from 'timers/promises';
+
+// Extend HTTP_STATUS with missing codes
+enum EXTENDED_HTTP_STATUS {
+  SERVICE_UNAVAILABLE = 503
+}
 
 // Common interfaces
+export interface IGitHubOwner {
+  login: string;
+  type: string;
+}
+
+export interface IGitHubLicense {
+  key: string;
+  name: string;
+  url: string;
+}
+
 export interface IGitHubRepoDetails {
   name: string;
   description: string;
-  owner: {
-    login: string;
-    type: string;
-  };
+  owner: IGitHubOwner;
   private: boolean;
   fork: boolean;
   created_at: string;
@@ -32,11 +47,7 @@ export interface IGitHubRepoDetails {
   has_downloads: boolean;
   archived: boolean;
   disabled: boolean;
-  license?: {
-    key: string;
-    name: string;
-    url: string;
-  };
+  license?: IGitHubLicense;
 }
 
 export interface IGitHubRepoContent {
@@ -49,19 +60,6 @@ export interface IGitHubRepoContent {
   html_url: string;
   git_url: string;
   download_url: string | null;
-}
-
-export interface IRepositoryStructure {
-  hasRequiredFiles: boolean;
-  missingFiles: string[];
-  hasReadme: boolean;
-  hasProperStructure: boolean;
-  fileExtensions: Set<string>;
-  files: IFileInfo[];
-  directories: string[];
-  totalSize: number;
-  readmeContent?: string;
-  packageFiles: IPackageFile[];
 }
 
 export interface IFileInfo {
@@ -80,6 +78,53 @@ export interface IPackageFile {
   devDependencies?: string[];
 }
 
+export interface IRepositoryStructure {
+  hasRequiredFiles: boolean;
+  missingFiles: string[];
+  hasReadme: boolean;
+  hasProperStructure: boolean;
+  fileExtensions: Set<string>;
+  files: IFileInfo[];
+  directories: string[];
+  totalSize: number;
+  readmeContent?: string;
+  packageFiles: IPackageFile[];
+}
+
+// Cache entry types
+interface CacheEntry<T> {
+  timestamp: number;
+  value: T;
+}
+
+interface RepoDetailsCacheEntry {
+  timestamp: number;
+  repoDetails?: IGitHubRepoDetails;
+  exists: boolean;
+  accessible: boolean;
+  error?: string;
+}
+
+interface StructureCacheEntry {
+  timestamp: number;
+  structure: IRepositoryStructure;
+}
+
+interface ContentCacheEntry {
+  timestamp: number;
+  content: string;
+}
+
+interface ContentsCacheEntry {
+  timestamp: number;
+  contents: IGitHubRepoContent[];
+}
+
+interface RepoFilesCacheEntry {
+  timestamp: number;
+  files: Array<{ path: string; content: string }>;
+}
+
 /**
  * Enterprise-grade GitHub service with robust security validation and caching
  * Provides utilities for GitHub repository operations
@@ -87,48 +132,58 @@ export interface IPackageFile {
 export class GitHubService {
   // Allowed GitHub domains whitelist
   private static readonly ALLOWED_GITHUB_DOMAINS = ['github.com', 'www.github.com'];
-  
+
   // Cache TTL - 30 minutes
   private static readonly CACHE_TTL = 30 * 60 * 1000;
-  
+
   // Security configurations
   private static readonly SECURITY_CONFIG = {
     MAX_REDIRECT_COUNT: 3,
-    TIMEOUT_MS: 5000
+    TIMEOUT_MS: 5000,
+    MAX_FILE_SIZE_BYTES: 5 * 1024 * 1024, // 5MB
+    MAX_TRAVERSAL_DEPTH: 10,
+    MAX_ENTRIES_PER_CACHE: 1000,
+    MAX_FILES_TO_ANALYZE: 100,
+    RETRY_ATTEMPTS: 3,
+    RETRY_DELAY_BASE_MS: 1000,
+    REQUEST_CONCURRENCY: 3
   };
-  
-  // Repository cache
-  private static repositoryCache: Map<string, {
-    timestamp: number;
-    repoDetails?: IGitHubRepoDetails;
-    exists: boolean;
-    accessible: boolean;
-    error?: string;
-  }> = new Map();
-  
+
+  // Repository cache with LRU implementation
+  private static repositoryCache = new Map<string, RepoDetailsCacheEntry>();
+  private static repositoryCacheKeys: string[] = [];
+
   // Repository structure cache
-  private static structureCache: Map<string, {
-    timestamp: number;
-    structure: IRepositoryStructure;
-  }> = new Map();
-  
+  private static structureCache = new Map<string, StructureCacheEntry>();
+  private static structureCacheKeys: string[] = [];
+
   // File content cache
-  private static fileContentCache: Map<string, {
-    timestamp: number;
-    content: string;
-  }> = new Map();
-  
+  private static fileContentCache = new Map<string, ContentCacheEntry>();
+  private static fileContentCacheKeys: string[] = [];
+
   // Repository contents cache
-  private static contentsCache: Map<string, {
-    timestamp: number;
-    contents: IGitHubRepoContent[];
-  }> = new Map();
-  
+  private static contentsCache = new Map<string, ContentsCacheEntry>();
+  private static contentsCacheKeys: string[] = [];
+
   // Repository files cache
-  private static repoFilesCache: Map<string, {
-    timestamp: number;
-    files: Array<{path: string; content: string}>;
-  }> = new Map();
+  private static repoFilesCache = new Map<string, RepoFilesCacheEntry>();
+  private static repoFilesCacheKeys: string[] = [];
+
+  // Circuit breaker state
+  private static circuitBreakerState = {
+    isOpen: false,
+    failureCount: 0,
+    lastFailureTime: 0,
+    resetThreshold: 5, // Number of failures before opening
+    resetTimeout: 60 * 1000, // 1 minute timeout before trying again
+  };
+
+  // Common code file extensions for priority analysis
+  private static readonly CODE_EXTENSIONS = [
+    '.js', '.ts', '.jsx', '.tsx', '.py', '.java',
+    '.c', '.cpp', '.h', '.hpp', '.go', '.rs',
+    '.php', '.rb', '.cs', '.html', '.css', '.scss'
+  ];
 
   /**
    * Extract and validate GitHub repository information from URL
@@ -276,49 +331,31 @@ export class GitHubService {
     const token = githubTokenManager.getNextToken();
 
     try {
-      // Use GitHub API to check repository
-      const response = await axios.get<IGitHubRepoDetails>(
+      // Prepare request headers
+      const headers: Record<string, string> = {
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'XcelCrowd-AI-Evaluation'
+      };
+
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
+      // Use common request method with retry logic
+      const response = await this.makeApiRequest<IGitHubRepoDetails>(
         `https://api.github.com/repos/${owner}/${repo}`,
-        {
-          timeout: this.SECURITY_CONFIG.TIMEOUT_MS,
-          maxRedirects: this.SECURITY_CONFIG.MAX_REDIRECT_COUNT,
-          headers: {
-            'Accept': 'application/vnd.github.v3+json',
-            'User-Agent': 'XcelCrowd-AI-Evaluation',
-            ...(token ? { 'Authorization': `Bearer ${token}` } : {})
-          }
-        }
+        { headers }
       );
 
-      // Extract rate limit information from response headers
-      let rateLimitRemaining: number | undefined;
-      let rateLimitReset: number | undefined;
-
-      if (response.headers && response.headers['x-ratelimit-remaining']) {
-        rateLimitRemaining = parseInt(response.headers['x-ratelimit-remaining'], 10);
-      }
-
-      if (response.headers && response.headers['x-ratelimit-reset']) {
-        rateLimitReset = parseInt(response.headers['x-ratelimit-reset'], 10);
-      }
-
-      // Update token metrics if token was used
-      if (token) {
-        githubTokenManager.updateTokenMetrics(
-          token,
-          true,
-          rateLimitRemaining,
-          rateLimitReset
-        );
-      }
-
-      // Cache the result
-      this.repositoryCache.set(cacheKey, {
+      // Cache successful result
+      const result = {
         timestamp: Date.now(),
         exists: true,
         accessible: true,
         repoDetails: response.data
-      });
+      };
+
+      this.addToRepositoryCache(cacheKey, result);
 
       return {
         exists: true,
@@ -326,28 +363,25 @@ export class GitHubService {
         repoDetails: response.data
       };
     } catch (error) {
-      // Handle error and update token metrics if needed
-      if (token) {
-        githubTokenManager.updateTokenMetrics(token, false);
-      }
-
+      // Handle 404 (repo doesn't exist) and 403 (no access)
       if (axios.isAxiosError(error) && error.response) {
-        // 404 means repo doesn't exist, 403 means no access
         const exists = error.response.status !== 404;
         const accessible = false;
 
         // Cache the result
-        this.repositoryCache.set(cacheKey, {
+        const result = {
           timestamp: Date.now(),
           exists,
           accessible,
           error: error.message
-        });
+        };
+
+        this.addToRepositoryCache(cacheKey, result);
 
         return { exists, accessible };
       }
 
-      // Network error or other problem
+      // For other errors, log and return a safe result
       logger.error(`Error verifying GitHub repository`, {
         owner,
         repo,
@@ -355,12 +389,14 @@ export class GitHubService {
       });
 
       // Cache the error result
-      this.repositoryCache.set(cacheKey, {
+      const result = {
         timestamp: Date.now(),
         exists: false,
         accessible: false,
         error: error instanceof Error ? error.message : String(error)
-      });
+      };
+
+      this.addToRepositoryCache(cacheKey, result);
 
       // Default to assuming it might exist but is inaccessible
       return {
@@ -391,12 +427,11 @@ export class GitHubService {
       return cachedContents.contents;
     }
 
-    // Get GitHub API token from token manager
-    const token = githubTokenManager.getNextToken();
-
     try {
-      // Prepare API request
-      const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
+      // Get GitHub API token from token manager
+      const token = githubTokenManager.getNextToken();
+
+      // Prepare API request headers
       const headers: Record<string, string> = {
         'Accept': 'application/vnd.github.v3+json',
         'User-Agent': 'XcelCrowd-AI-Evaluation'
@@ -406,51 +441,24 @@ export class GitHubService {
         headers['Authorization'] = `Bearer ${token}`;
       }
 
-      // Make the request
-      const response = await axios.get(apiUrl, { 
-        headers,
-        timeout: this.SECURITY_CONFIG.TIMEOUT_MS,
-        maxRedirects: this.SECURITY_CONFIG.MAX_REDIRECT_COUNT
-      });
-
-      // Extract rate limit info
-      let rateLimitRemaining: number | undefined;
-      let rateLimitReset: number | undefined;
-
-      if (response.headers && response.headers['x-ratelimit-remaining']) {
-        rateLimitRemaining = parseInt(response.headers['x-ratelimit-remaining'], 10);
-      }
-
-      if (response.headers && response.headers['x-ratelimit-reset']) {
-        rateLimitReset = parseInt(response.headers['x-ratelimit-reset'], 10);
-      }
-
-      // Update token metrics
-      if (token) {
-        githubTokenManager.updateTokenMetrics(
-          token,
-          true,
-          rateLimitRemaining,
-          rateLimitReset
-        );
-      }
+      // Use unified request method with retry logic
+      const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
+      const response = await this.makeApiRequest<IGitHubRepoContent | IGitHubRepoContent[]>(
+        apiUrl,
+        { headers }
+      );
 
       // Process the response
       const contents = Array.isArray(response.data) ? response.data : [response.data];
 
       // Cache the contents
-      this.contentsCache.set(cacheKey, {
+      this.addToContentsCache(cacheKey, {
         timestamp: Date.now(),
         contents
       });
 
       return contents;
     } catch (error) {
-      // Handle error and update token metrics if needed
-      if (token) {
-        githubTokenManager.updateTokenMetrics(token, false);
-      }
-
       if (axios.isAxiosError(error) && error.response && error.response.status === 404) {
         logger.debug(`Path not found in repository: ${path}`, {
           owner,
@@ -505,31 +513,21 @@ export class GitHubService {
         headers['Authorization'] = `Bearer ${token}`;
       }
 
-      // Make the request
-      const response = await axios.get(apiUrl, { 
-        headers,
-        timeout: this.SECURITY_CONFIG.TIMEOUT_MS,
-        maxRedirects: this.SECURITY_CONFIG.MAX_REDIRECT_COUNT
-      });
+      // Use unified request method with retry logic
+      const response = await this.makeApiRequest<{
+        content?: string;
+        encoding?: string;
+        size?: number;
+        name?: string;
+      }>(apiUrl, { headers });
 
-      // Update token metrics if available
-      if (token && response.headers) {
-        let rateLimitRemaining: number | undefined;
-        let rateLimitReset: number | undefined;
-
-        if (response.headers['x-ratelimit-remaining']) {
-          rateLimitRemaining = parseInt(response.headers['x-ratelimit-remaining'], 10);
-        }
-
-        if (response.headers['x-ratelimit-reset']) {
-          rateLimitReset = parseInt(response.headers['x-ratelimit-reset'], 10);
-        }
-
-        githubTokenManager.updateTokenMetrics(
-          token,
+      // Check file size before decoding
+      if (response.data.size && response.data.size > this.SECURITY_CONFIG.MAX_FILE_SIZE_BYTES) {
+        throw new ApiError(
+          HTTP_STATUS.UNPROCESSABLE_ENTITY,
+          `File size exceeds the maximum allowed size (${this.SECURITY_CONFIG.MAX_FILE_SIZE_BYTES / 1024 / 1024}MB)`,
           true,
-          rateLimitRemaining,
-          rateLimitReset
+          'FILE_TOO_LARGE'
         );
       }
 
@@ -538,7 +536,7 @@ export class GitHubService {
         const content = Buffer.from(response.data.content, 'base64').toString('utf-8');
 
         // Cache the content
-        this.fileContentCache.set(cacheKey, {
+        this.addToContentCache(cacheKey, {
           timestamp: Date.now(),
           content
         });
@@ -561,7 +559,7 @@ export class GitHubService {
   }
 
   /**
-   * Analyze repository structure recursively
+   * Analyze repository structure recursively with timeout
    * @param owner - Repository owner
    * @param repo - Repository name
    * @returns Repository structure analysis
@@ -595,8 +593,16 @@ export class GitHubService {
         packageFiles: []
       };
 
-      // Get repository contents recursively
-      await this.getRepositoryContentsRecursive(owner, repo, '', structure);
+      // Set a timeout for the analysis (30 seconds)
+      const analysisPromise = this.performRepositoryAnalysis(owner, repo, structure);
+      const analysisWithTimeout = this.executeWithTimeout(
+        analysisPromise,
+        30000,
+        'Repository analysis timed out'
+      );
+
+      // Execute with timeout
+      await analysisWithTimeout;
 
       // Process the files to determine features
       structure.hasReadme = structure.files.some(file =>
@@ -605,100 +611,13 @@ export class GitHubService {
         file.name.toLowerCase() === 'readme'
       );
 
-      // If README exists, get its content
-      if (structure.hasReadme) {
-        const readmeFile = structure.files.find(file =>
-          file.name.toLowerCase() === 'readme.md' ||
-          file.name.toLowerCase() === 'readme.txt' ||
-          file.name.toLowerCase() === 'readme'
-        );
-
-        if (readmeFile) {
-          structure.readmeContent = await this.getFileContent(
-            owner,
-            repo,
-            readmeFile.path
-          );
-        }
-      }
-
-      // Process package files
-      for (const file of structure.files) {
-        if (file.name === 'package.json') {
-          try {
-            const content = await this.getFileContent(owner, repo, file.path);
-            const packageJson = JSON.parse(content);
-
-            structure.packageFiles.push({
-              type: 'npm',
-              path: file.path,
-              dependencies: Object.keys(packageJson.dependencies || {}),
-              devDependencies: Object.keys(packageJson.devDependencies || {})
-            });
-          } catch (error) {
-            logger.warn(`Error parsing package.json in ${file.path}`, {
-              error: error instanceof Error ? error.message : String(error),
-              repository: cacheKey
-            });
-          }
-        } else if (file.name === 'requirements.txt') {
-          try {
-            const content = await this.getFileContent(owner, repo, file.path);
-            const dependencies = content
-              .split('\n')
-              .map(line => line.trim())
-              .filter(line => line && !line.startsWith('#'))
-              .map(line => {
-                // Handle version specifiers
-                const parts = line.split('==');
-                return parts[0].trim();
-              });
-
-            structure.packageFiles.push({
-              type: 'python',
-              path: file.path,
-              dependencies
-            });
-          } catch (error) {
-            logger.warn(`Error parsing requirements.txt in ${file.path}`, {
-              error: error instanceof Error ? error.message : String(error),
-              repository: cacheKey
-            });
-          }
-        } else if (file.name === 'Gemfile') {
-          try {
-            const content = await this.getFileContent(owner, repo, file.path);
-            const dependencies = content
-              .split('\n')
-              .map(line => line.trim())
-              .filter(line => line.startsWith('gem '))
-              .map(line => {
-                // Extract gem name
-                const match = line.match(/gem\s+['"]([^'"]+)['"]/);
-                return match ? match[1] : line;
-              });
-
-            structure.packageFiles.push({
-              type: 'ruby',
-              path: file.path,
-              dependencies
-            });
-          } catch (error) {
-            logger.warn(`Error parsing Gemfile in ${file.path}`, {
-              error: error instanceof Error ? error.message : String(error),
-              repository: cacheKey
-            });
-          }
-        }
-      }
-
       // Check if structure is proper (basic requirements)
       structure.hasProperStructure = structure.hasReadme &&
         structure.files.length > 3 &&
         structure.packageFiles.length > 0;
 
       // Cache the result
-      this.structureCache.set(cacheKey, {
+      this.addToStructureCache(cacheKey, {
         timestamp: Date.now(),
         structure
       });
@@ -717,18 +636,243 @@ export class GitHubService {
   }
 
   /**
+  * Helper method to execute a promise with a timeout
+  * @param promise - The promise to execute
+  * @param timeoutMs - Timeout in milliseconds
+  * @param errorMessage - Error message if timeout occurs
+  * @returns Promise result
+  * @throws ApiError if timeout occurs
+  */
+  private static async executeWithTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    errorMessage: string
+  ): Promise<T> {
+    // Use Node.js standard setTimeout instead of the Promise-based version
+    let timeoutHandle: NodeJS.Timeout | undefined = undefined;
+
+    // Create a promise that rejects after the timeout
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      // Use global setTimeout which returns NodeJS.Timeout
+      timeoutHandle = global.setTimeout(() => {
+        reject(new ApiError(
+          HTTP_STATUS.GATEWAY_TIMEOUT,
+          errorMessage,
+          true,
+          'OPERATION_TIMEOUT'
+        ));
+      }, timeoutMs);
+    });
+
+    try {
+      // Race the original promise against the timeout
+      return await Promise.race([promise, timeoutPromise]);
+    } finally {
+      // Clear the timeout to prevent memory leaks
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+    }
+  }
+
+  /**
+   * Perform the actual repository analysis
+   * @param owner - Repository owner
+   * @param repo - Repository name 
+   * @param structure - Structure object to update
+   */
+  private static async performRepositoryAnalysis(
+    owner: string,
+    repo: string,
+    structure: IRepositoryStructure
+  ): Promise<void> {
+    // Get repository contents recursively
+    await this.getRepositoryContentsRecursive(owner, repo, '', structure);
+
+    // If README exists, get its content
+    if (structure.files.some(file =>
+      file.name.toLowerCase() === 'readme.md' ||
+      file.name.toLowerCase() === 'readme.txt' ||
+      file.name.toLowerCase() === 'readme'
+    )) { 
+      const readmeFile = structure.files.find(file =>
+        file.name.toLowerCase() === 'readme.md' ||
+        file.name.toLowerCase() === 'readme.txt' ||
+        file.name.toLowerCase() === 'readme'
+      );
+
+      if (readmeFile) {
+        try {
+          structure.readmeContent = await this.getFileContent(
+            owner,
+            repo,
+            readmeFile.path
+          );
+        } catch (error) {
+          logger.warn(`Error fetching README content`, {
+            path: readmeFile.path,
+            error: error instanceof Error ? error.message : String(error)
+          });
+          // Don't fail the entire analysis if README fetching fails
+        }
+      }
+    }
+
+    // Process package files with error handling for each file
+    for (const file of structure.files) {
+      if (file.name === 'package.json') {
+        await this.processPackageJson(owner, repo, file, structure);
+      } else if (file.name === 'requirements.txt') {
+        await this.processRequirementsTxt(owner, repo, file, structure);
+      } else if (file.name === 'Gemfile') {
+        await this.processGemfile(owner, repo, file, structure);
+      }
+    }
+  }
+
+  /**
+   * Process package.json file
+   * @param owner - Repository owner
+   * @param repo - Repository name
+   * @param file - File information
+   * @param structure - Structure object to update
+   */
+  private static async processPackageJson(
+    owner: string,
+    repo: string,
+    file: IFileInfo,
+    structure: IRepositoryStructure
+  ): Promise<void> {
+    try {
+      const content = await this.getFileContent(owner, repo, file.path);
+
+      // Validate content is valid JSON before parsing
+      try {
+        const packageJson = JSON.parse(content);
+
+        structure.packageFiles.push({
+          type: 'npm',
+          path: file.path,
+          dependencies: Object.keys(packageJson.dependencies || {}),
+          devDependencies: Object.keys(packageJson.devDependencies || {})
+        });
+      } catch (parseError) {
+        logger.warn(`Invalid JSON in package.json at ${file.path}`, {
+          error: parseError instanceof Error ? parseError.message : String(parseError),
+          repository: `${owner}/${repo}`
+        });
+      }
+    } catch (error) {
+      logger.warn(`Error fetching package.json content in ${file.path}`, {
+        error: error instanceof Error ? error.message : String(error),
+        repository: `${owner}/${repo}`
+      });
+    }
+  }
+
+  /**
+   * Process requirements.txt file 
+   * @param owner - Repository owner
+   * @param repo - Repository name
+   * @param file - File information
+   * @param structure - Structure object to update
+   */
+  private static async processRequirementsTxt(
+    owner: string,
+    repo: string,
+    file: IFileInfo,
+    structure: IRepositoryStructure
+  ): Promise<void> {
+    try {
+      const content = await this.getFileContent(owner, repo, file.path);
+      const dependencies = content
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => line && !line.startsWith('#'))
+        .map(line => {
+          // Handle version specifiers
+          const parts = line.split('==');
+          return parts[0].trim();
+        });
+
+      structure.packageFiles.push({
+        type: 'python',
+        path: file.path,
+        dependencies
+      });
+    } catch (error) {
+      logger.warn(`Error processing requirements.txt in ${file.path}`, {
+        error: error instanceof Error ? error.message : String(error),
+        repository: `${owner}/${repo}`
+      });
+    }
+  }
+
+  /**
+   * Process Gemfile
+   * @param owner - Repository owner
+   * @param repo - Repository name
+   * @param file - File information
+   * @param structure - Structure object to update
+   */
+  private static async processGemfile(
+    owner: string,
+    repo: string,
+    file: IFileInfo,
+    structure: IRepositoryStructure
+  ): Promise<void> {
+    try {
+      const content = await this.getFileContent(owner, repo, file.path);
+      const dependencies = content
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => line.startsWith('gem '))
+        .map(line => {
+          // Extract gem name
+          const match = line.match(/gem\s+['"]([^'"]+)['"]/);
+          return match ? match[1] : line;
+        });
+
+      structure.packageFiles.push({
+        type: 'ruby',
+        path: file.path,
+        dependencies
+      });
+    } catch (error) {
+      logger.warn(`Error processing Gemfile in ${file.path}`, {
+        error: error instanceof Error ? error.message : String(error),
+        repository: `${owner}/${repo}`
+      });
+    }
+  }
+
+  /**
    * Get repository contents recursively
    * @param owner - Repository owner
    * @param repo - Repository name
    * @param path - Current path within repository
    * @param structure - Structure object to update
+   * @param depth - Current recursion depth
    */
   private static async getRepositoryContentsRecursive(
     owner: string,
     repo: string,
     path: string,
-    structure: IRepositoryStructure
+    structure: IRepositoryStructure,
+    depth: number = 0
   ): Promise<void> {
+    // Protect against excessive recursion
+    if (depth >= this.SECURITY_CONFIG.MAX_TRAVERSAL_DEPTH) {
+      logger.warn(`Maximum traversal depth reached for ${owner}/${repo} at path ${path}`);
+      return;
+    }
+
+    // Protect against excessive files
+    if (structure.files.length >= this.SECURITY_CONFIG.MAX_FILES_TO_ANALYZE) {
+      logger.warn(`Maximum file count reached for ${owner}/${repo}`);
+      return;
+    }
+
     try {
       // Get contents at current path
       const contents = await this.getRepositoryContents(owner, repo, path);
@@ -736,6 +880,12 @@ export class GitHubService {
       // Process each item
       for (const item of contents) {
         if (item.type === 'file') {
+          // Skip files that are too large
+          if (item.size > this.SECURITY_CONFIG.MAX_FILE_SIZE_BYTES) {
+            logger.debug(`Skipping large file ${item.path} (${item.size} bytes)`);
+            continue;
+          }
+
           // Add file info
           const extension = (() => {
             const idx = item.name.lastIndexOf('.');
@@ -758,12 +908,17 @@ export class GitHubService {
           // Add directory
           structure.directories.push(item.path);
 
-          // Recursively process directory
-          await this.getRepositoryContentsRecursive(owner, repo, item.path, structure);
+          // Recursively process directory with increased depth
+          await this.getRepositoryContentsRecursive(owner, repo, item.path, structure, depth + 1);
 
           // Avoid hitting rate limits
-          await setTimeout(100);
+          await setTimeoutPromise(100);
         } else if (item.type === 'symlink' || item.type === 'submodule') {
+          // Skip symlinks at depths > 0 to prevent cycles
+          if (depth > 0 && item.type === 'symlink') {
+            continue;
+          }
+
           // Add with special type
           const fileInfo: IFileInfo = {
             path: item.path,
@@ -829,8 +984,8 @@ export class GitHubService {
 
       // Get commit count (limited to 100 for performance)
       const commitsUrl = `https://api.github.com/repos/${owner}/${repo}/commits?per_page=100`;
-      const commitsResponse = await axios.get(commitsUrl, { 
-        headers, 
+      const commitsResponse = await axios.get(commitsUrl, {
+        headers,
         timeout: this.SECURITY_CONFIG.TIMEOUT_MS,
         maxRedirects: this.SECURITY_CONFIG.MAX_REDIRECT_COUNT
       });
@@ -842,8 +997,8 @@ export class GitHubService {
 
       // Get contributors count
       const contributorsUrl = `https://api.github.com/repos/${owner}/${repo}/contributors?per_page=100`;
-      const contributorsResponse = await axios.get(contributorsUrl, { 
-        headers, 
+      const contributorsResponse = await axios.get(contributorsUrl, {
+        headers,
         timeout: this.SECURITY_CONFIG.TIMEOUT_MS,
         maxRedirects: this.SECURITY_CONFIG.MAX_REDIRECT_COUNT
       });
@@ -855,8 +1010,8 @@ export class GitHubService {
 
       // Get branches count
       const branchesUrl = `https://api.github.com/repos/${owner}/${repo}/branches?per_page=100`;
-      const branchesResponse = await axios.get(branchesUrl, { 
-        headers, 
+      const branchesResponse = await axios.get(branchesUrl, {
+        headers,
         timeout: this.SECURITY_CONFIG.TIMEOUT_MS,
         maxRedirects: this.SECURITY_CONFIG.MAX_REDIRECT_COUNT
       });
@@ -918,25 +1073,25 @@ export class GitHubService {
    */
   public static clearRepoCache(owner: string, repo: string): void {
     const cacheKey = `${owner}/${repo}`;
-    
+
     // Clear all cache entries related to this repo
     this.repositoryCache.delete(cacheKey);
     this.structureCache.delete(cacheKey);
-    
+
     // Clear file content cache entries
     for (const key of this.fileContentCache.keys()) {
       if (key.startsWith(cacheKey)) {
         this.fileContentCache.delete(key);
       }
     }
-    
+
     // Clear contents cache entries
     for (const key of this.contentsCache.keys()) {
       if (key.startsWith(cacheKey)) {
         this.contentsCache.delete(key);
       }
     }
-    
+
     logger.debug(`Cleared cache for repository ${cacheKey}`);
   }
 
@@ -953,95 +1108,73 @@ export class GitHubService {
     // Check cache first
     const cacheKey = `${owner}/${repo}/readme`;
     const cachedContent = this.fileContentCache.get(cacheKey);
-    
+
     if (cachedContent && (Date.now() - cachedContent.timestamp < this.CACHE_TTL)) {
       logger.debug(`Using cached README content for ${cacheKey}`);
       return cachedContent.content;
     }
-    
-    // Get GitHub API token from token manager
-    const token = githubTokenManager.getNextToken();
-    
+
     try {
+      // Get GitHub API token from token manager
+      const token = githubTokenManager.getNextToken();
+
       // Prepare API request
       const apiUrl = `https://api.github.com/repos/${owner}/${repo}/readme`;
       const headers: Record<string, string> = {
         'Accept': 'application/vnd.github.v3.raw',
         'User-Agent': 'XcelCrowd-AI-Evaluation'
       };
-      
+
       if (token) {
         headers['Authorization'] = `Bearer ${token}`;
       }
-      
-      // Make the request
-      const response = await axios.get(apiUrl, {
-        headers,
-        timeout: this.SECURITY_CONFIG.TIMEOUT_MS,
-        maxRedirects: this.SECURITY_CONFIG.MAX_REDIRECT_COUNT
-      });
-      
-      // Extract rate limit info
-      let rateLimitRemaining: number | undefined;
-      let rateLimitReset: number | undefined;
-      
-      if (response.headers && response.headers['x-ratelimit-remaining']) {
-        rateLimitRemaining = parseInt(response.headers['x-ratelimit-remaining'], 10);
-      }
-      
-      if (response.headers && response.headers['x-ratelimit-reset']) {
-        rateLimitReset = parseInt(response.headers['x-ratelimit-reset'], 10);
-      }
-      
-      // Update token metrics
-      if (token) {
-        githubTokenManager.updateTokenMetrics(
-          token,
-          true,
-          rateLimitRemaining,
-          rateLimitReset
-        );
-      }
-      
+
+      // Use unified request method with retry logic
+      const response = await this.makeApiRequest<string>(
+        apiUrl,
+        {
+          headers,
+          responseType: 'text'
+        }
+      );
+
       // Store the content in cache
-      const readmeContent = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
-      this.fileContentCache.set(cacheKey, {
+      const readmeContent = typeof response.data === 'string'
+        ? response.data
+        : JSON.stringify(response.data);
+
+      this.addToContentCache(cacheKey, {
         timestamp: Date.now(),
         content: readmeContent
       });
-      
+
       return readmeContent;
     } catch (error) {
       // If README is not found, that's fine - it could just be missing
       if (axios.isAxiosError(error) && error.response && error.response.status === 404) {
         logger.debug(`README not found for ${owner}/${repo}`);
-        
+
         // Cache empty result to avoid repeated requests
-        this.fileContentCache.set(cacheKey, {
+        this.addToContentCache(cacheKey, {
           timestamp: Date.now(),
           content: ''
         });
-        
+
         return '';
       }
-      
+
       // Handle other errors
       logger.warn(`Error fetching README from GitHub repository`, {
         owner,
         repo,
         error: error instanceof Error ? error.message : String(error)
       });
-      
-      // Update token metrics if token was used
-      if (token) {
-        githubTokenManager.updateTokenMetrics(token, false);
-      }
-      
+
       // Return empty string rather than failing
       return '';
     }
   }
-  
+
   /**
    * Get a sampling of repository files for analysis
    * @param owner - Repository owner
@@ -1053,76 +1186,99 @@ export class GitHubService {
     owner: string,
     repo: string,
     maxFiles: number = 5
-  ): Promise<Array<{path: string; content: string}>> {
+  ): Promise<Array<{ path: string; content: string }>> {
+    // Enforce reasonable limits on maxFiles
+    const limitedMaxFiles = Math.min(maxFiles, this.SECURITY_CONFIG.MAX_FILES_TO_ANALYZE);
+
     // Check cache first
-    const cacheKey = `${owner}/${repo}/files/${maxFiles}`;
+    const cacheKey = `${owner}/${repo}/files/${limitedMaxFiles}`;
     const cachedFiles = this.repoFilesCache.get(cacheKey);
-    
+
     if (cachedFiles && (Date.now() - cachedFiles.timestamp < this.CACHE_TTL)) {
       logger.debug(`Using cached repository files for ${cacheKey}`);
       return cachedFiles.files;
     }
-    
+
     try {
       // Get repository contents first
       const contents = await this.getRepositoryContents(owner, repo);
-      
-      // Focus on code files for analysis
-      const codeExtensions = ['.js', '.ts', '.py', '.java', '.c', '.cpp', '.go', '.rs', '.php', '.rb', '.cs', '.html', '.css'];
-      
+
+      // Use predefined list of code file extensions
+      const codeExtensions = this.CODE_EXTENSIONS;
+
       // Filter and prioritize code files
       const codeFiles = contents.filter(file => {
         if (file.type !== 'file') return false;
-        const ext = file.name.includes('.') ? `.${file.name.split('.').pop()?.toLowerCase()}` : '';
+        if (file.size > this.SECURITY_CONFIG.MAX_FILE_SIZE_BYTES) return false;
+
+        const ext = file.name.includes('.') ?
+          `.${file.name.split('.').pop()?.toLowerCase()}` : '';
         return codeExtensions.includes(ext);
       });
-      
+
       // Get a balanced sample - if we don't have enough code files, add other files
       let filesToAnalyze = [...codeFiles];
-      
-      if (filesToAnalyze.length < maxFiles) {
-        const otherFiles = contents.filter(file => 
-          file.type === 'file' && !codeFiles.includes(file)
+
+      if (filesToAnalyze.length < limitedMaxFiles) {
+        const otherFiles = contents.filter(file =>
+          file.type === 'file' &&
+          file.size <= this.SECURITY_CONFIG.MAX_FILE_SIZE_BYTES &&
+          !codeFiles.includes(file)
         );
-        
-        filesToAnalyze = [...filesToAnalyze, ...otherFiles.slice(0, maxFiles - filesToAnalyze.length)];
+
+        filesToAnalyze = [
+          ...filesToAnalyze,
+          ...otherFiles.slice(0, limitedMaxFiles - filesToAnalyze.length)
+        ];
       }
-      
+
       // Limit to max files
-      filesToAnalyze = filesToAnalyze.slice(0, maxFiles);
-      
-      // Fetch content for each file
-      const files: Array<{path: string; content: string}> = [];
-      
-      for (const file of filesToAnalyze) {
-        try {
-          const content = await this.getFileContent(owner, repo, file.path);
-          files.push({
-            path: file.path,
-            content
-          });
-        } catch (error) {
-          logger.debug(`Error fetching content for file ${file.path}`, {
-            error: error instanceof Error ? error.message : String(error)
-          });
-          
-          // Add file with empty content rather than failing
-          files.push({
-            path: file.path,
-            content: ''
-          });
+      filesToAnalyze = filesToAnalyze.slice(0, limitedMaxFiles);
+
+      // Fetch content for each file with concurrency control
+      const files: Array<{ path: string; content: string }> = [];
+
+      // Process files in batches to control concurrency
+      const batchSize = this.SECURITY_CONFIG.REQUEST_CONCURRENCY;
+
+      for (let i = 0; i < filesToAnalyze.length; i += batchSize) {
+        const batch = filesToAnalyze.slice(i, i + batchSize);
+        const batchPromises = batch.map(async (file) => {
+          try {
+            const content = await this.getFileContent(owner, repo, file.path);
+            return {
+              path: file.path,
+              content
+            };
+          } catch (error) {
+            logger.debug(`Error fetching content for file ${file.path}`, {
+              error: error instanceof Error ? error.message : String(error)
+            });
+
+            // Add file with empty content rather than failing
+            return {
+              path: file.path,
+              content: ''
+            };
+          }
+        });
+
+        // Wait for batch to complete
+        const batchResults = await Promise.all(batchPromises);
+        files.push(...batchResults);
+
+        // Add slight delay between batches
+        if (i + batchSize < filesToAnalyze.length) {
+          await setTimeoutPromise(200);
         }
-        
-        // Add slight delay between requests to respect rate limits
-        await setTimeout(100);
       }
-      
+
       // Cache the results
-      this.repoFilesCache.set(cacheKey, {
+      this.addToRepoFilesCache(cacheKey, {
         timestamp: Date.now(),
         files
       });
-      
+
       return files;
     } catch (error) {
       logger.warn(`Error fetching repository files`, {
@@ -1130,9 +1286,319 @@ export class GitHubService {
         repo,
         error: error instanceof Error ? error.message : String(error)
       });
-      
+
       // Return empty array rather than failing
       return [];
     }
+  }
+
+  /**
+   * Add an entry to the repository cache with LRU eviction
+   * @param key - Cache key
+   * @param value - Value to cache
+   */
+  private static addToRepositoryCache(key: string, value: RepoDetailsCacheEntry): void {
+    // If key already exists, remove it from the order tracking
+    const existingIndex = this.repositoryCacheKeys.indexOf(key);
+    if (existingIndex !== -1) {
+      this.repositoryCacheKeys.splice(existingIndex, 1);
+    }
+
+    // Add/update the cache entry
+    this.repositoryCache.set(key, value);
+    this.repositoryCacheKeys.push(key);
+
+    // Evict oldest entry if we exceed the size limit
+    if (this.repositoryCacheKeys.length > this.SECURITY_CONFIG.MAX_ENTRIES_PER_CACHE) {
+      const oldestKey = this.repositoryCacheKeys.shift();
+      if (oldestKey) {
+        this.repositoryCache.delete(oldestKey);
+      }
+    }
+  }
+
+  /**
+   * Add an entry to the structure cache with LRU eviction
+   * @param key - Cache key
+   * @param value - Value to cache
+   */
+  private static addToStructureCache(key: string, value: StructureCacheEntry): void {
+    const existingIndex = this.structureCacheKeys.indexOf(key);
+    if (existingIndex !== -1) {
+      this.structureCacheKeys.splice(existingIndex, 1);
+    }
+
+    this.structureCache.set(key, value);
+    this.structureCacheKeys.push(key);
+
+    if (this.structureCacheKeys.length > this.SECURITY_CONFIG.MAX_ENTRIES_PER_CACHE) {
+      const oldestKey = this.structureCacheKeys.shift();
+      if (oldestKey) {
+        this.structureCache.delete(oldestKey);
+      }
+    }
+  }
+
+  /**
+   * Add an entry to the file content cache with LRU eviction
+   * @param key - Cache key
+   * @param value - Value to cache
+   */
+  private static addToContentCache(key: string, value: ContentCacheEntry): void {
+    const existingIndex = this.fileContentCacheKeys.indexOf(key);
+    if (existingIndex !== -1) {
+      this.fileContentCacheKeys.splice(existingIndex, 1);
+    }
+
+    this.fileContentCache.set(key, value);
+    this.fileContentCacheKeys.push(key);
+
+    if (this.fileContentCacheKeys.length > this.SECURITY_CONFIG.MAX_ENTRIES_PER_CACHE) {
+      const oldestKey = this.fileContentCacheKeys.shift();
+      if (oldestKey) {
+        this.fileContentCache.delete(oldestKey);
+      }
+    }
+  }
+
+  /**
+   * Add an entry to the repository contents cache with LRU eviction
+   * @param key - Cache key
+   * @param value - Value to cache
+   */
+  private static addToContentsCache(key: string, value: ContentsCacheEntry): void {
+    const existingIndex = this.contentsCacheKeys.indexOf(key);
+    if (existingIndex !== -1) {
+      this.contentsCacheKeys.splice(existingIndex, 1);
+    }
+
+    this.contentsCache.set(key, value);
+    this.contentsCacheKeys.push(key);
+
+    if (this.contentsCacheKeys.length > this.SECURITY_CONFIG.MAX_ENTRIES_PER_CACHE) {
+      const oldestKey = this.contentsCacheKeys.shift();
+      if (oldestKey) {
+        this.contentsCache.delete(oldestKey);
+      }
+    }
+  }
+
+  /**
+   * Add an entry to the repository files cache with LRU eviction
+   * @param key - Cache key
+   * @param value - Value to cache
+   */
+  private static addToRepoFilesCache(key: string, value: RepoFilesCacheEntry): void {
+    const existingIndex = this.repoFilesCacheKeys.indexOf(key);
+    if (existingIndex !== -1) {
+      this.repoFilesCacheKeys.splice(existingIndex, 1);
+    }
+
+    this.repoFilesCache.set(key, value);
+    this.repoFilesCacheKeys.push(key);
+
+    if (this.repoFilesCacheKeys.length > this.SECURITY_CONFIG.MAX_ENTRIES_PER_CACHE) {
+      const oldestKey = this.repoFilesCacheKeys.shift();
+      if (oldestKey) {
+        this.repoFilesCache.delete(oldestKey);
+      }
+    }
+  }
+
+  /**
+   * Updates the circuit breaker state based on API call outcomes
+   * @param success - Whether the API call was successful
+   */
+  private static updateCircuitBreaker(success: boolean): void {
+    if (success) {
+      // Reset failure count on success
+      this.circuitBreakerState.failureCount = 0;
+      this.circuitBreakerState.isOpen = false;
+    } else {
+      // Increment failure count and potentially open circuit
+      this.circuitBreakerState.failureCount++;
+      this.circuitBreakerState.lastFailureTime = Date.now();
+
+      if (this.circuitBreakerState.failureCount >= this.circuitBreakerState.resetThreshold) {
+        this.circuitBreakerState.isOpen = true;
+        logger.warn('Circuit breaker opened due to multiple GitHub API failures');
+      }
+    }
+  }
+
+  /**
+   * Checks if circuit breaker is open, and if enough time has elapsed to try again
+   * @returns Whether API calls should be attempted
+   */
+  private static canMakeApiCall(): boolean {
+    if (!this.circuitBreakerState.isOpen) {
+      return true;
+    }
+
+    // Check if enough time has passed to try again
+    const timeSinceFailure = Date.now() - this.circuitBreakerState.lastFailureTime;
+    if (timeSinceFailure >= this.circuitBreakerState.resetTimeout) {
+      logger.info('Circuit breaker reset timeout elapsed, attempting API call');
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Makes a GitHub API request with retry logic and circuit breaker
+   * @param url - API URL to call
+   * @param options - Request options
+   * @returns Axios response
+   * @throws ApiError if the request fails after retries
+   */
+  private static async makeApiRequest<T>(
+    url: string,
+    options: AxiosRequestConfig
+  ): Promise<AxiosResponse<T>> {
+    // Check circuit breaker
+    if (!this.canMakeApiCall()) {
+      throw new ApiError(
+        EXTENDED_HTTP_STATUS.SERVICE_UNAVAILABLE,
+        'GitHub API service is currently unavailable, please try again later',
+        true,
+        'GITHUB_API_UNAVAILABLE'
+      );
+    }
+
+    let lastError: Error | undefined;
+
+    // Apply default options
+    const requestOptions: AxiosRequestConfig = {
+      timeout: this.SECURITY_CONFIG.TIMEOUT_MS,
+      maxRedirects: this.SECURITY_CONFIG.MAX_REDIRECT_COUNT,
+      ...options
+    };
+
+    // Try request with retries
+    for (let attempt = 0; attempt < this.SECURITY_CONFIG.RETRY_ATTEMPTS; attempt++) {
+      try {
+        const response = await axios.request<T>({
+          url,
+          ...requestOptions
+        });
+
+        // Update circuit breaker on success
+        this.updateCircuitBreaker(true);
+
+        // Extract rate limit information from response headers
+        let rateLimitRemaining: number | undefined;
+        let rateLimitReset: number | undefined;
+
+        if (response.headers && response.headers['x-ratelimit-remaining']) {
+          rateLimitRemaining = parseInt(response.headers['x-ratelimit-remaining'], 10);
+        }
+
+        if (response.headers && response.headers['x-ratelimit-reset']) {
+          rateLimitReset = parseInt(response.headers['x-ratelimit-reset'], 10);
+        }
+
+        // Update token metrics if token was used
+        const token = requestOptions.headers?.['Authorization'] as string | undefined;
+        if (token && token.startsWith('Bearer ')) {
+          const actualToken = token.substring(7);
+          githubTokenManager.updateTokenMetrics(
+            actualToken,
+            true,
+            rateLimitRemaining,
+            rateLimitReset
+          );
+        }
+
+        return response;
+      } catch (error) {
+        lastError = error as Error;
+
+        // Update token metrics if token was used
+        const token = requestOptions.headers?.['Authorization'] as string | undefined;
+        if (token && token.startsWith('Bearer ')) {
+          const actualToken = token.substring(7);
+          githubTokenManager.updateTokenMetrics(actualToken, false);
+        }
+
+        // Handle specific error cases
+        if (axios.isAxiosError(error)) {
+          // If we get a 404 or other specific status, no need to retry
+          if (error.response && (error.response.status === 404 || error.response.status === 403)) {
+            this.updateCircuitBreaker(false);
+            throw error;
+          }
+
+          // If we hit rate limits, wait longer before retrying
+          if (error.response && error.response.status === 429) {
+            // Extract rate limit reset time if available
+            const resetHeader = error.response.headers['x-ratelimit-reset'];
+            const resetTime = resetHeader ? parseInt(resetHeader, 10) * 1000 : null;
+
+            // Calculate wait time - either until reset or use exponential backoff
+            const waitTime = resetTime
+              ? Math.max(0, resetTime - Date.now()) + 1000 // Add 1 second buffer
+              : Math.pow(2, attempt) * this.SECURITY_CONFIG.RETRY_DELAY_BASE_MS;
+
+            logger.warn(`Rate limited by GitHub API, waiting ${waitTime}ms before retry`, {
+              attempt: attempt + 1,
+              maxAttempts: this.SECURITY_CONFIG.RETRY_ATTEMPTS
+            });
+
+            await setTimeoutPromise(waitTime);
+            continue;
+          }
+        }
+
+        // For other errors, use exponential backoff
+        const backoffTime = Math.pow(2, attempt) * this.SECURITY_CONFIG.RETRY_DELAY_BASE_MS;
+        logger.debug(`GitHub API request failed, retrying in ${backoffTime}ms`, {
+          attempt: attempt + 1,
+          maxAttempts: this.SECURITY_CONFIG.RETRY_ATTEMPTS,
+          url,
+          error: error instanceof Error ? error.message : String(error)
+        });
+
+        await setTimeoutPromise(backoffTime);
+      }
+    }
+
+    // If we get here, all retries failed
+    this.updateCircuitBreaker(false);
+
+    // Throw appropriate error
+    if (axios.isAxiosError(lastError) && lastError.response) {
+      // For known error responses, format appropriately
+      if (lastError.response.status === 404) {
+        throw new ApiError(
+          HTTP_STATUS.NOT_FOUND,
+          'GitHub resource not found',
+          true,
+          'GITHUB_RESOURCE_NOT_FOUND'
+        );
+      } else if (lastError.response.status === 403 || lastError.response.status === 401) {
+        throw new ApiError(
+          HTTP_STATUS.FORBIDDEN,
+          'Access to GitHub resource forbidden',
+          true,
+          'GITHUB_ACCESS_FORBIDDEN'
+        );
+      } else if (lastError.response.status === 429) {
+        throw new ApiError(
+          HTTP_STATUS.TOO_MANY_REQUESTS,
+          'GitHub API rate limit exceeded',
+          true,
+          'GITHUB_RATE_LIMIT_EXCEEDED'
+        );
+      }
+    }
+
+    // Generic error for other cases
+    throw new ApiError(
+      EXTENDED_HTTP_STATUS.SERVICE_UNAVAILABLE,
+      'GitHub API request failed after multiple retries',
+      true,
+      'GITHUB_API_FAILURE'
+    );
   }
 }

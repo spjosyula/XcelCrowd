@@ -4,47 +4,112 @@ import { AIEvaluation, Solution } from '../../models';
 import {
   IAIEvaluation,
   ISolution,
-  ISpamFilteringResult,
-  IRequirementsComplianceResult,
-  ICodeQualityResult,
-  IScoringFeedbackResult,
   SolutionStatus,
-  EvaluationDecision
+  EvaluationDecision,
+  HTTP_STATUS
 } from '../../models/interfaces';
 import { ApiError } from '../../utils/api.error';
 import { logger } from '../../utils/logger';
-import { HTTP_STATUS } from '../../models/interfaces';
 import { AIAgentFactory } from './AIAgentFactory';
 import { MongoSanitizer } from '../../utils/mongo.sanitize';
 import { v4 as uuidv4 } from 'uuid';
 import { EvaluationPipelineController, evaluationPipelineController } from './EvaluationPipelineController';
+
+// Configuration interface
+interface IConfig {
+  evaluation?: {
+    maxRetryCount?: number;
+    standardDurationMs?: number;
+    architectReviewThreshold?: number;
+  }
+}
+
+// Default configuration
+const config: IConfig = {
+  evaluation: {
+    maxRetryCount: 3,
+    standardDurationMs: 5 * 60 * 1000, // 5 minutes
+    architectReviewThreshold: 70
+  }
+};
+
+// Evaluation status type
+type EvaluationStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
+
+// Interfaces for evaluation analytics and status
+interface IEvaluationStatus {
+  status: EvaluationStatus;
+  progress: number;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  currentStage: string | null;
+  estimatedCompletionTime: Date | null;
+}
+
+interface IEvaluationStage {
+  name: string;
+  field: keyof Pick<IAIEvaluation, 'spamFiltering' | 'requirementsCompliance' | 'codeQuality' | 'scoringFeedback'>;
+  weight: number;
+}
+
+interface IEvaluationRetryOptions {
+  forceRestart?: boolean;
+  priority?: string;
+  skipSteps?: string[];
+}
+
+interface IEvaluationAnalyticsOptions {
+  startDate?: Date;
+  endDate?: Date;
+  challengeId?: string;
+  groupBy?: 'day' | 'week' | 'month';
+  limit?: number;
+}
+
+interface IEvaluationAnalyticsResult {
+  summary: {
+    total: number;
+    byStatus: Record<string, number>;
+  };
+  timeAnalytics: any[];
+  performance: {
+    avgTime: number;
+    minTime: number;
+    maxTime: number;
+    count: number;
+  };
+}
+
+type PipelineResult = ReturnType<EvaluationPipelineController['executePipeline']> extends Promise<infer T> ? T : never;
 
 /**
  * Service for orchestrating the AI evaluation pipeline
  * Manages the sequential workflow and state transitions for GitHub repository submissions
  */
 export class AIEvaluationService extends BaseService {
-  private readonly agentFactory: AIAgentFactory;
+  
   private readonly pipelineController: EvaluationPipelineController;
 
   // Maximum number of retries for evaluation 
-  private readonly MAX_RETRY_COUNT = 3;
+  private readonly MAX_RETRY_COUNT: number;
   
-  // Sequential order of agent execution
-  private readonly EVALUATION_SEQUENCE = [
-    'SpamFilteringAgent',
-    'RequirementsComplianceAgent',
-    'CodeQualityAgent',
-    'ScoringFeedbackAgent'
-  ];
+  // Standard evaluation duration in milliseconds (for estimation)
+  private readonly STANDARD_EVALUATION_DURATION_MS: number;
+  
+  // Score thresholds
+  private readonly ARCHITECT_REVIEW_THRESHOLD: number;
 
   /**
    * Constructor
    */
   constructor() {
     super();
-    this.agentFactory = AIAgentFactory.getInstance();
     this.pipelineController = evaluationPipelineController;
+    
+    // Get configuration values with defaults
+    this.MAX_RETRY_COUNT = config.evaluation?.maxRetryCount || 3;
+    this.STANDARD_EVALUATION_DURATION_MS = config.evaluation?.standardDurationMs || 5 * 60 * 1000;
+    this.ARCHITECT_REVIEW_THRESHOLD = config.evaluation?.architectReviewThreshold || 70;
   }
 
   /**
@@ -62,17 +127,7 @@ export class AIEvaluationService extends BaseService {
       );
     }
     
-
     const sanitizedSolutionId = MongoSanitizer.sanitizeObjectId(solutionId);
-    if (!Types.ObjectId.isValid(sanitizedSolutionId)) {
-      throw new ApiError(
-        HTTP_STATUS.BAD_REQUEST,
-        'Invalid solution ID format',
-        true,
-        'INVALID_SOLUTION_ID'
-      );
-    }
-
     const traceId = uuidv4();
 
     try {
@@ -109,7 +164,7 @@ export class AIEvaluationService extends BaseService {
 
         // Validate GitHub repository URL
         const sanitizedGitHubUrl = MongoSanitizer.sanitizeGitHubUrl(solution.submissionUrl);
-        if (!solution.submissionUrl || !sanitizedGitHubUrl) {
+        if (!sanitizedGitHubUrl) {
           logger.warn(`Invalid GitHub repository URL`, {
             solutionId: sanitizedSolutionId,
             submissionUrl: solution.submissionUrl,
@@ -123,7 +178,6 @@ export class AIEvaluationService extends BaseService {
           );
         }
         
-
         // Check if evaluation already exists
         const existingEvaluation = await AIEvaluation.findOne({
           solution: sanitizedSolutionId
@@ -154,24 +208,16 @@ export class AIEvaluationService extends BaseService {
             existingEvaluation.scoringFeedback = undefined;
             
             // Store retry metadata
-            if (!existingEvaluation.metadata) {
-              existingEvaluation.metadata = {};
-            }
-            existingEvaluation.metadata.lastRetryAt = new Date();
+            existingEvaluation.metadata = {
+              ...(existingEvaluation.metadata || {}),
+              lastRetryAt: new Date(),
+              traceId
+            };
             
             await existingEvaluation.save({ session });
             
-            // Schedule the sequential processing 
-            this.processEvaluationSequence(existingEvaluation._id?.toString())
-              .catch(error => {
-                logger.error(`Failed to process evaluation after retry`, {
-                  solutionId: sanitizedSolutionId,
-                  evaluationId: existingEvaluation._id?.toString(),
-                  retryCount: existingEvaluation.retryCount,
-                  error: error instanceof Error ? error.message : String(error),
-                  traceId
-                });
-              });
+            // Schedule the evaluation and await its start (not full completion)
+            await this.scheduleEvaluationProcessing(existingEvaluation._id?.toString(), traceId);
             
             return existingEvaluation;
           }
@@ -226,16 +272,8 @@ export class AIEvaluationService extends BaseService {
           traceId
         });
         
-        // Schedule the sequential processing
-        this.processEvaluationSequence(evaluation._id?.toString())
-          .catch(error => {
-            logger.error(`Failed to process evaluation`, {
-              solutionId: sanitizedSolutionId,
-              evaluationId: evaluation._id?.toString(),
-              error: error instanceof Error ? error.message : String(error),
-              traceId
-            });
-          });
+        // Schedule the evaluation and await its start (not full completion)
+        await this.scheduleEvaluationProcessing(evaluation._id?.toString(), traceId);
         
         return evaluation;
       });
@@ -259,54 +297,109 @@ export class AIEvaluationService extends BaseService {
   }
 
   /**
+   * Schedule an evaluation for processing
+   * Returns a promise that resolves once the evaluation has been marked as in_progress
+   * @param evaluationId - The ID of the evaluation to process
+   * @param traceId - Trace ID for logging
+   */
+  private async scheduleEvaluationProcessing(evaluationId: string | undefined, traceId: string): Promise<void> {
+    if (!evaluationId) {
+      logger.error('Missing evaluation ID for processing', { traceId });
+      return;
+    }
+
+    // Start processing in the background but return a promise that resolves
+    // once the evaluation is confirmed to be in_progress status
+    return new Promise<void>((resolve, reject) => {
+      // Run process in the background
+      setImmediate(async () => {
+        try {
+          // First mark as in_progress so we have clear state transition
+          await this.updateEvaluationStatus(evaluationId, 'in_progress', traceId);
+          
+          // Signal that we've started processing
+          resolve();
+          
+          // Then start the actual processing
+          await this.processEvaluationSequence(evaluationId, traceId);
+        } catch (error) {
+          logger.error(`Error processing evaluation`, {
+            evaluationId,
+            error: error instanceof Error ? error.message : String(error),
+            traceId
+          });
+          
+          // Only reject if we haven't resolved yet (meaning the status update failed)
+          // Otherwise the error is handled within processEvaluationSequence
+          reject(error);
+        }
+      });
+    });
+  }
+
+  /**
+   * Update the status of an evaluation
+   * @param evaluationId - The ID of the evaluation
+   * @param status - The new status
+   * @param traceId - Trace ID for logging
+   */
+  private async updateEvaluationStatus(
+    evaluationId: string, 
+    status: EvaluationStatus, 
+    traceId: string, 
+    additionalData: Record<string, any> = {}
+  ): Promise<void> {
+    await this.withTransaction(async (session) => {
+      const evaluation = await AIEvaluation.findById(evaluationId).session(session);
+      
+      if (!evaluation) {
+        logger.warn(`Evaluation not found for status update`, { 
+          evaluationId,
+          status,
+          traceId 
+        });
+        return;
+      }
+      
+      evaluation.status = status;
+      
+      // Update metadata
+      evaluation.metadata = {
+        ...(evaluation.metadata || {}),
+        [`${status}At`]: new Date(),
+        traceId,
+        ...additionalData
+      };
+      
+      // Update specific fields for status changes
+      if (status === 'in_progress') {
+        evaluation.metadata.processingStartedAt = new Date();
+      } else if (status === 'completed') {
+        evaluation.completedAt = new Date();
+      } else if (status === 'failed' && additionalData.failureReason) {
+        evaluation.failureReason = additionalData.failureReason;
+      }
+      
+      await evaluation.save({ session });
+      
+      logger.info(`Updated evaluation status to ${status}`, {
+        evaluationId,
+        traceId
+      });
+    });
+  }
+
+  /**
    * Process evaluation in a sequential workflow
    * Each agent processes in order and passes results to the next agent
    * @param evaluationId - The ID of the evaluation to process
+   * @param traceId - Trace ID for logging
    */
-  private async processEvaluationSequence(evaluationId: string | undefined): Promise<void> {
-    if (!evaluationId) {
-      logger.error('Missing evaluation ID for processing');
-      return;
-    }
-    
-    const traceId = uuidv4();
-    
+  private async processEvaluationSequence(evaluationId: string, traceId: string): Promise<void> {
     try {
       logger.debug(`Starting sequential evaluation workflow`, { 
         evaluationId,
         traceId 
-      });
-      
-      // Update evaluation status to in_progress
-      await this.withTransaction(async (session) => {
-        const evaluation = await AIEvaluation.findById(evaluationId).session(session);
-        
-        if (!evaluation) {
-          logger.warn(`Evaluation not found for processing`, { 
-            evaluationId,
-            traceId 
-          });
-          return;
-        }
-        
-        if (evaluation.status !== 'pending') {
-          logger.warn(`Evaluation not in pending state, skipping`, {
-            evaluationId,
-            status: evaluation.status,
-            traceId
-          });
-          return;
-        }
-        
-        evaluation.status = 'in_progress';
-        
-        if (!evaluation.metadata) {
-          evaluation.metadata = {};
-        }
-        evaluation.metadata.processingStartedAt = new Date();
-        evaluation.metadata.traceId = traceId;
-        
-        await evaluation.save({ session });
       });
       
       // Fetch the solution with full details
@@ -324,10 +417,11 @@ export class AIEvaluationService extends BaseService {
           traceId 
         });
         
-        await this.markEvaluationFailed(
+        await this.updateEvaluationStatus(
           evaluationId, 
-          'Evaluation or solution not found', 
-          traceId
+          'failed', 
+          traceId, 
+          { failureReason: 'Evaluation or solution not found' }
         );
         return;
       }
@@ -347,7 +441,7 @@ export class AIEvaluationService extends BaseService {
         traceId: pipelineResult.traceId || traceId
       });
       
-      // Save results to the evaluation record
+      // Save results to the evaluation record and update solution status in a single transaction
       await this.withTransaction(async (session) => {
         const evalToUpdate = await AIEvaluation.findById(evaluationId).session(session);
         
@@ -377,38 +471,36 @@ export class AIEvaluationService extends BaseService {
         }
         
         // Update metadata
-        if (!evalToUpdate.metadata) {
-          evalToUpdate.metadata = {};
-        }
-        
-        evalToUpdate.metadata.pipelineResult = {
-          finalDecision: pipelineResult.finalDecision,
-          pipelineCompleted: pipelineResult.pipelineCompleted,
-          processingTimeMs: pipelineResult.processingTimeMs,
-          stoppedAt: pipelineResult.stoppedAt,
-          reason: pipelineResult.reason
+        evalToUpdate.metadata = {
+          ...(evalToUpdate.metadata || {}),
+          pipelineResult: {
+            finalDecision: pipelineResult.finalDecision,
+            pipelineCompleted: pipelineResult.pipelineCompleted,
+            processingTimeMs: pipelineResult.processingTimeMs,
+            stoppedAt: pipelineResult.stoppedAt,
+            reason: pipelineResult.reason
+          }
         };
         
         // Get the metrics from the pipeline results
         const metrics = this.pipelineController.getMetricsFromResults(pipelineResult.results);
         evalToUpdate.metadata.metrics = metrics;
         
+        // Update evaluation status
+        if (!pipelineResult.success) {
+          evalToUpdate.status = 'failed';
+          evalToUpdate.failureReason = pipelineResult.reason || 'Pipeline execution failed';
+        } else {
+          evalToUpdate.status = 'completed';
+          evalToUpdate.completedAt = new Date();
+        }
+        
         await evalToUpdate.save({ session });
+        
+        // Also update the solution status in the same transaction
+        await this.updateSolutionStatusFromPipelineResult(solution, pipelineResult, session);
       });
       
-      // Update solution status based on pipeline result
-      await this.updateSolutionStatusFromPipelineResult(solution, pipelineResult);
-      
-      // Mark evaluation as completed
-      if (!pipelineResult.success) {
-        await this.markEvaluationFailed(
-          evaluationId,
-          pipelineResult.reason || 'Pipeline execution failed',
-          traceId
-        );
-      } else {
-        await this.completeEvaluation(evaluationId, traceId);
-      }
     } catch (error) {
       logger.error(`Error in evaluation sequential processing`, {
         evaluationId,
@@ -417,10 +509,14 @@ export class AIEvaluationService extends BaseService {
         traceId
       });
       
-      await this.markEvaluationFailed(
+      await this.updateEvaluationStatus(
         evaluationId,
-        error instanceof Error ? error.message : 'Unknown error',
-        traceId
+        'failed',
+        traceId, 
+        { 
+          failureReason: error instanceof Error ? error.message : 'Unknown error',
+          failedAt: new Date()
+        }
       );
     }
   }
@@ -429,10 +525,12 @@ export class AIEvaluationService extends BaseService {
    * Update solution status based on pipeline result
    * @param solution - The solution to update
    * @param pipelineResult - The result from the pipeline
+   * @param session - Mongoose session for transactional updates
    */
   private async updateSolutionStatusFromPipelineResult(
     solution: ISolution,
-    pipelineResult: ReturnType<typeof this.pipelineController.executePipeline> extends Promise<infer T> ? T : never
+    pipelineResult: PipelineResult,
+    session: ClientSession
   ): Promise<void> {
     try {
       // Determine the new status based on the pipeline result
@@ -463,7 +561,7 @@ export class AIEvaluationService extends BaseService {
         case EvaluationDecision.PASS:
           // If passing with good score, mark for architect review
           if (pipelineResult.results.scoringFeedback && 
-              pipelineResult.results.scoringFeedback.result.score >= 70) {
+              pipelineResult.results.scoringFeedback.result.score >= this.ARCHITECT_REVIEW_THRESHOLD) {
             newStatus = SolutionStatus.CLAIMED;
           } else {
             // Otherwise, approve automatically 
@@ -477,7 +575,7 @@ export class AIEvaluationService extends BaseService {
         await Solution.findByIdAndUpdate(solution._id, {
           status: newStatus,
           feedback: feedback || 'Evaluated by AI system'
-        });
+        }).session(session);
         
         logger.info(`Updated solution status based on pipeline result`, {
           solutionId: solution._id?.toString(),
@@ -491,99 +589,8 @@ export class AIEvaluationService extends BaseService {
         solutionId: solution._id?.toString(),
         error: error instanceof Error ? error.message : String(error)
       });
-      // Don't throw here - this is a side effect and shouldn't fail the main workflow
-    }
-  }
-  
-  /**
-   * Mark an evaluation as completed
-   * @param evaluationId - The ID of the evaluation
-   * @param traceId - The trace ID for logging
-   */
-  private async completeEvaluation(evaluationId: string, traceId: string): Promise<void> {
-    try {
-      await this.withTransaction(async (session) => {
-        const evaluation = await AIEvaluation.findById(evaluationId).session(session);
-        
-        if (!evaluation) {
-          logger.warn(`Evaluation not found for completion`, { 
-            evaluationId,
-            traceId 
-          });
-          return;
-        }
-        
-        evaluation.status = 'completed';
-        evaluation.completedAt = new Date();
-        
-        if (!evaluation.metadata) {
-          evaluation.metadata = {};
-        }
-        evaluation.metadata.completedAt = new Date();
-        
-        await evaluation.save({ session });
-        
-        logger.info(`Completed evaluation`, {
-          evaluationId,
-          traceId
-        });
-      });
-    } catch (error) {
-      logger.error(`Error completing evaluation`, {
-        evaluationId,
-        error: error instanceof Error ? error.message : String(error),
-        traceId
-      });
-    }
-  }
-  
-  /**
-   * Mark an evaluation as failed
-   * @param evaluationId - The ID of the evaluation
-   * @param reason - The reason for failure
-   * @param traceId - The trace ID for logging
-   */
-  private async markEvaluationFailed(
-    evaluationId: string,
-    reason: string,
-    traceId: string
-  ): Promise<void> {
-    try {
-      await this.withTransaction(async (session) => {
-        const evaluation = await AIEvaluation.findById(evaluationId).session(session);
-        
-        if (!evaluation) {
-          logger.warn(`Evaluation not found for failure marking`, { 
-            evaluationId,
-            traceId 
-          });
-          return;
-        }
-        
-        evaluation.status = 'failed';
-        evaluation.failureReason = reason;
-        
-        if (!evaluation.metadata) {
-          evaluation.metadata = {};
-        }
-        evaluation.metadata.failedAt = new Date();
-        evaluation.metadata.failureReason = reason;
-        
-        await evaluation.save({ session });
-        
-        logger.warn(`Marked evaluation as failed`, {
-          evaluationId,
-          reason,
-          traceId
-        });
-      });
-    } catch (error) {
-      logger.error(`Error marking evaluation as failed`, {
-        evaluationId,
-        reason,
-        error: error instanceof Error ? error.message : String(error),
-        traceId
-      });
+      // Throw error to ensure transaction rollback
+      throw error;
     }
   }
   
@@ -603,14 +610,6 @@ export class AIEvaluationService extends BaseService {
     }
     
     const sanitizedSolutionId = MongoSanitizer.sanitizeObjectId(solutionId);
-    if (!Types.ObjectId.isValid(sanitizedSolutionId)) {
-      throw new ApiError(
-        HTTP_STATUS.BAD_REQUEST,
-        'Invalid solution ID format',
-        true,
-        'INVALID_SOLUTION_ID'
-      );
-    }
     
     try {
       const evaluation = await AIEvaluation.findOne({ 
@@ -649,18 +648,11 @@ export class AIEvaluationService extends BaseService {
   }
 
   /**
- * Get the current status of an evaluation for a solution
- * @param solutionId - The ID of the solution
- * @returns Object containing evaluation status information
- */
-  public async getEvaluationStatus(solutionId: string): Promise<{
-    status: string;
-    progress: number;
-    startedAt: Date | null;
-    completedAt: Date | null;
-    currentStage: string | null;
-    estimatedCompletionTime: Date | null;
-  }> {
+   * Get the current status of an evaluation for a solution
+   * @param solutionId - The ID of the solution
+   * @returns Object containing evaluation status information
+   */
+  public async getEvaluationStatus(solutionId: string): Promise<IEvaluationStatus> {
     if (!solutionId) {
       throw new ApiError(
         HTTP_STATUS.BAD_REQUEST,
@@ -691,10 +683,10 @@ export class AIEvaluationService extends BaseService {
 
       // Calculate progress based on completed steps
       let progress = 0;
-      let currentStage = null;
+      let currentStage: string | null = null;
 
       // Define evaluation stages in order
-      const stages = [
+      const stages: IEvaluationStage[] = [
         { name: 'Spam Filtering', field: 'spamFiltering', weight: 0.1 },
         { name: 'Requirements Compliance', field: 'requirementsCompliance', weight: 0.3 },
         { name: 'Code Quality', field: 'codeQuality', weight: 0.3 },
@@ -706,8 +698,8 @@ export class AIEvaluationService extends BaseService {
       let foundCurrentStage = false;
 
       for (const stage of stages) {
-        // @ts-ignore - dynamic access to evaluation properties
-        if (evaluation[stage.field]) {
+        const fieldValue = evaluation[stage.field];
+        if (fieldValue) {
           // This stage is complete
           accumulatedProgress += stage.weight;
         } else if (!foundCurrentStage) {
@@ -733,10 +725,9 @@ export class AIEvaluationService extends BaseService {
       // Estimate completion time
       let estimatedCompletionTime: Date | null = null;
       if (evaluation.status === 'in_progress' && evaluation.createdAt) {
-        // Rough estimate: typical evaluation takes about 5 minutes
-        const estimatedDurationMs = 5 * 60 * 1000;
+        // Use configured standard evaluation duration
         const elapsedMs = Date.now() - evaluation.createdAt.getTime();
-        const remainingMs = (estimatedDurationMs * (1 - (progress / 100))) - elapsedMs;
+        const remainingMs = (this.STANDARD_EVALUATION_DURATION_MS * (1 - (progress / 100))) - elapsedMs;
 
         if (remainingMs > 0) {
           estimatedCompletionTime = new Date(Date.now() + remainingMs);
@@ -771,22 +762,16 @@ export class AIEvaluationService extends BaseService {
   }
 
   /**
- * Get analytics data about AI evaluations
- * @param options - Analytics filter options
- * @returns Analytics data
- */
-  public async getEvaluationAnalytics(options: {
-    startDate?: Date;
-    endDate?: Date;
-    challengeId?: string;
-    groupBy?: string;
-    limit?: number;
-  }): Promise<any> {
+   * Get analytics data about AI evaluations
+   * @param options - Analytics filter options
+   * @returns Analytics data
+   */
+  public async getEvaluationAnalytics(options: IEvaluationAnalyticsOptions): Promise<IEvaluationAnalyticsResult> {
     try {
       const { startDate, endDate, challengeId, groupBy = 'day', limit = 50 } = options;
 
       // Build query filters
-      const queryFilters: any = {};
+      const queryFilters: Record<string, any> = {};
 
       // Date range filters
       if (startDate) {
@@ -799,10 +784,11 @@ export class AIEvaluationService extends BaseService {
         queryFilters.createdAt.$lte = endDate;
       }
 
-      // Challenge filter
+      // Challenge filter requires joining with solutions
       if (challengeId) {
-        // For challenge-specific analytics, we need to join with solutions
-        // This requires a more complex aggregation
+        // We'll implement the join in a future PR
+        // For now, log that this filter isn't implemented
+        logger.info(`Challenge-specific analytics not yet implemented`, { challengeId });
       }
 
       // Basic analytics - status counts
@@ -813,7 +799,7 @@ export class AIEvaluationService extends BaseService {
       ]);
 
       // Time-based analytics
-      let timeGrouping = { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } };
+      let timeGrouping: any = { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } };
       if (groupBy === 'week') {
         timeGrouping = { $dateToString: { format: '%Y-%U', date: '$createdAt' } };
       } else if (groupBy === 'month') {
@@ -839,7 +825,7 @@ export class AIEvaluationService extends BaseService {
       ]);
 
       // Performance metrics
-      const averageProcessingTime = await AIEvaluation.aggregate([
+      const performanceQuery = await AIEvaluation.aggregate([
         {
           $match: {
             ...queryFilters,
@@ -866,21 +852,23 @@ export class AIEvaluationService extends BaseService {
         }
       ]);
 
+      const performance = performanceQuery[0] || {
+        avgTime: 0,
+        minTime: 0,
+        maxTime: 0,
+        count: 0
+      };
+
       return {
         summary: {
           total: statusCounts.reduce((sum, item) => sum + item.count, 0),
-          byStatus: statusCounts.reduce((result, item) => {
+          byStatus: statusCounts.reduce<Record<string, number>>((result, item) => {
             result[item._id] = item.count;
             return result;
           }, {})
         },
         timeAnalytics,
-        performance: averageProcessingTime[0] || {
-          avgTime: 0,
-          minTime: 0,
-          maxTime: 0,
-          count: 0
-        }
+        performance
       };
     } catch (error) {
       logger.error('Error getting evaluation analytics', {
@@ -908,11 +896,7 @@ export class AIEvaluationService extends BaseService {
    */
   public async retryEvaluation(
     solutionId: string,
-    options: {
-      forceRestart?: boolean;
-      priority?: string;
-      skipSteps?: string[];
-    },
+    options: IEvaluationRetryOptions,
     userId: string
   ): Promise<IAIEvaluation> {
     const { forceRestart = false, priority, skipSteps } = options;
@@ -974,13 +958,14 @@ export class AIEvaluationService extends BaseService {
 
         // Store retry metadata
         evaluation.metadata = {
-          ...evaluation.metadata,
+          ...(evaluation.metadata || {}),
           retryRequested: {
             by: userId,
             at: new Date(),
             priority,
             skipSteps
-          }
+          },
+          traceId
         };
 
         await evaluation.save({ session });
@@ -992,17 +977,8 @@ export class AIEvaluationService extends BaseService {
           traceId
         });
 
-        // Schedule processing asynchronously
-        setTimeout(() => {
-          this.processEvaluationSequence(evaluation._id?.toString())
-            .catch(error => {
-              logger.error(`Failed to process retry`, {
-                evaluationId: evaluation._id?.toString(),
-                error: error instanceof Error ? error.message : String(error),
-                traceId
-              });
-            });
-        }, 100);
+        // Schedule processing and wait for it to start
+        await this.scheduleEvaluationProcessing(evaluation._id?.toString(), traceId);
 
         return evaluation;
       });
@@ -1030,7 +1006,7 @@ export class AIEvaluationService extends BaseService {
    * @param solutionId - The ID of the solution to evaluate
    * @returns Pipeline execution result
    */
-  public async runEvaluationPipeline(solutionId: string): Promise<ReturnType<typeof this.pipelineController.executePipeline> extends Promise<infer T> ? T : never> {
+  public async runEvaluationPipeline(solutionId: string): Promise<PipelineResult> {
     if (!solutionId) {
       throw new ApiError(
         HTTP_STATUS.BAD_REQUEST,
@@ -1041,14 +1017,6 @@ export class AIEvaluationService extends BaseService {
     }
     
     const sanitizedSolutionId = MongoSanitizer.sanitizeObjectId(solutionId);
-    if (!Types.ObjectId.isValid(sanitizedSolutionId)) {
-      throw new ApiError(
-        HTTP_STATUS.BAD_REQUEST,
-        'Invalid solution ID format',
-        true,
-        'INVALID_SOLUTION_ID'
-      );
-    }
     
     try {
       // Fetch the solution with full details
@@ -1069,7 +1037,7 @@ export class AIEvaluationService extends BaseService {
       
       // Validate GitHub repository URL
       const sanitizedGitHubUrl = MongoSanitizer.sanitizeGitHubUrl(solution.submissionUrl);
-      if (!solution.submissionUrl || !sanitizedGitHubUrl) {
+      if (!sanitizedGitHubUrl) {
         logger.warn(`Invalid GitHub repository URL`, {
           solutionId: sanitizedSolutionId,
           submissionUrl: solution.submissionUrl
