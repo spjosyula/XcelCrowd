@@ -16,7 +16,8 @@ export enum EvaluationResponseStatus {
 export enum EvaluationDecision {
   PASS = 'pass',           // Meets criteria to continue to next step
   FAIL = 'fail',           // Does not meet criteria, should stop evaluation
-  REVIEW = 'review'        // Requires manual review
+  REVIEW = 'review',       // Requires manual review
+  ERROR = 'error'          // Processing error occurred
 }
 
 /**
@@ -164,7 +165,8 @@ export interface IAIEvaluation extends Document {
  * Base interface for all evaluation agents
  */
 export interface IEvaluationAgent<T extends IAgentEvaluationResult> {
-  evaluate(solution: ISolution): Promise<IStandardizedEvaluationResponse<T>>;
+  evaluate(solution: ISolution, previousResults?: Record<string, IAgentEvaluationResult>): Promise<IStandardizedEvaluationResponse<T>>;
+  determineDecision(result: T): EvaluationDecision;
   name: string;
   description: string;
 }

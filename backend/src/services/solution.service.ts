@@ -20,6 +20,7 @@ import { PaginationOptions, PaginationResult } from '../utils/paginationUtils';
 import { MongoSanitizer } from '../utils/mongo.sanitize';
 import { BaseService } from './BaseService';
 import { HTTP_STATUS } from '../constants';
+import { scheduler, Scheduler } from '../utils/scheduler';
 
 
 /**
@@ -37,6 +38,34 @@ interface SolutionSubmissionData {
  * Contains all business logic for solution management
  */
 export class SolutionService extends BaseService {
+
+  constructor() {
+    super();
+    this.registerEventListeners();
+  }
+
+  /**
+   * Register for scheduler events to process solutions for architect review
+   * when challenge deadlines are reached
+   */
+  private registerEventListeners(): void {
+    scheduler.on(Scheduler.EVENTS.CHALLENGE_DEADLINE_REACHED, async (challengeId: string) => {
+      try {
+        logger.info(`Solution service received challenge deadline event for ${challengeId}`);
+        
+        // Process the solutions for architect review
+        await this.processChallengeForArchitectReview(challengeId);
+        
+        logger.info(`Completed processing solutions for architect review for challenge ${challengeId} via event handler`);
+      } catch (error) {
+        logger.error(`Error processing solutions for architect review for challenge ${challengeId} from event`, {
+          challengeId,
+          error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined
+        });
+      }
+    });
+  }
 
   private getDocumentId(doc: any): string {
     if (!doc) return 'unknown-id';
@@ -91,6 +120,44 @@ export class SolutionService extends BaseService {
       // Log submission attempt
       logger.info(`Student ${sanitizedStudentId} attempting to submit solution for challenge ${sanitizedChallengeId}`);
 
+      // Perform content moderation on submission
+      const moderationResult = await this.moderateSubmissionContent(
+        sanitizedTitle,
+        sanitizedDescription,
+        sanitizedSubmissionUrl
+      );
+
+      if (!moderationResult.isAllowed) {
+        logger.warn(`Submission rejected by content moderation`, {
+          studentId: sanitizedStudentId,
+          challengeId: sanitizedChallengeId,
+          reason: moderationResult.reason
+        });
+
+        throw new ApiError(
+          HTTP_STATUS.FORBIDDEN,
+          `Submission rejected: ${moderationResult.reason}`,
+          true,
+          'CONTENT_MODERATION_FAILURE'
+        );
+      }
+
+      // Check for deadline before starting transaction to fail fast
+      const challenge = await Challenge.findById(sanitizedChallengeId);
+      if (!challenge) {
+        throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Challenge not found');
+      }
+
+      // Strict deadline enforcement - check before any further processing
+      if (challenge.isDeadlinePassed()) {
+        throw new ApiError(
+          HTTP_STATUS.BAD_REQUEST,
+          'Challenge deadline has passed, no new solutions can be submitted',
+          true,
+          'DEADLINE_PASSED'
+        );
+      }
+
       // If idempotencyKey provided, check for existing submission with this key
       if (idempotencyKey) {
         const sanitizedKey = String(idempotencyKey).trim();
@@ -120,11 +187,13 @@ export class SolutionService extends BaseService {
           throw new ApiError(HTTP_STATUS.NOT_FOUND, 'Challenge not found');
         }
 
-        // Check if challenge deadline has passed
+        // Double-check deadline within transaction for consistency
         if (updatedChallenge.isDeadlinePassed()) {
           throw new ApiError(
             HTTP_STATUS.BAD_REQUEST,
-            'Challenge deadline has passed, no new solutions can be submitted'
+            'Challenge deadline has passed, no new solutions can be submitted',
+            true,
+            'DEADLINE_PASSED'
           );
         }
 
@@ -170,6 +239,7 @@ export class SolutionService extends BaseService {
           submissionUrl: sanitizedSubmissionUrl,
           status: SolutionStatus.SUBMITTED,
           tags: sanitizedTags,
+          submittedAt: new Date(), // Add submission timestamp
           ...(idempotencyKey && { idempotencyKey: String(idempotencyKey).trim() })
         });
 
@@ -202,21 +272,151 @@ export class SolutionService extends BaseService {
         return populatedSolution;
       });
     } catch (error) {
-      logger.error(
-        `Error submitting solution: ${error instanceof Error ? error.message : String(error)}`,
-        { studentId, challengeId, error }
-      );
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const errorStack = error instanceof Error ? error.stack : undefined;
 
-      // Re-throw ApiError instances as-is
-      if (error instanceof ApiError) throw error;
+      logger.error(`Error in solution submission`, {
+        error: errorMessage,
+        stack: errorStack,
+        studentId,
+        challengeId
+      });
 
-      // For any other errors, wrap in a generic ApiError
+      if (error instanceof ApiError) {
+        throw error;
+      }
+
       throw new ApiError(
         HTTP_STATUS.INTERNAL_SERVER_ERROR,
-        'Failed to submit solution due to an unexpected error',
+        `Error submitting solution: ${errorMessage}`,
         true,
         'SOLUTION_SUBMISSION_ERROR'
       );
+    }
+  }
+
+  /**
+   * Perform content moderation on submission to detect malicious content
+   * @param title - Solution title
+   * @param description - Solution description
+   * @param submissionUrl - GitHub URL for the solution
+   * @returns Moderation result indicating if content is allowed
+   */
+  private async moderateSubmissionContent(
+    title: string,
+    description: string,
+    submissionUrl: string
+  ): Promise<{
+    isAllowed: boolean;
+    reason?: string;
+    flags?: {
+      maliciousUrls?: boolean;
+      suspiciousPatterns?: boolean;
+      prohibited?: boolean;
+    }
+  }> {
+    try {
+      // Result object with flags for different types of content violations
+      const result = {
+        isAllowed: true,
+        reason: '',
+        flags: {
+          maliciousUrls: false,
+          suspiciousPatterns: false,
+          prohibited: false
+        }
+      };
+
+      const reasons: string[] = [];
+
+      // Check for malicious URLs or redirects
+      const urlRegex = /https?:\/\/[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*)/gi;
+      const extractedUrls: string[] = [];
+
+      // Extract URLs from title and description
+      let match;
+      while ((match = urlRegex.exec(title + ' ' + description)) !== null) {
+        extractedUrls.push(match[0]);
+      }
+
+      // Check if submission URL is GitHub
+      if (!submissionUrl.includes('github.com')) {
+        result.flags.maliciousUrls = true;
+        reasons.push('Submission URL must be a GitHub repository');
+      }
+
+      // Check for other URLs that aren't from trusted domains
+      const trustedDomains = ['github.com', 'gitlab.com', 'bitbucket.org', 'npmjs.com',
+        'stackoverflow.com', 'mozilla.org', 'microsoft.com', 'google.com',
+        'developer.mozilla.org', 'reactjs.org', 'nodejs.org', 'typescriptlang.org'];
+
+      for (const url of extractedUrls) {
+        const isDomainTrusted = trustedDomains.some(domain => url.includes(domain));
+        if (!isDomainTrusted) {
+          result.flags.maliciousUrls = true;
+          reasons.push('Contains link to untrusted domain');
+          break;
+        }
+      }
+
+      // Check for suspicious patterns in description (code injection attempts, etc.)
+      const suspiciousPatterns = [
+        /<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, // Script tags
+        /eval\s*\(/gi,                                        // eval()
+        /document\.cookie/gi,                                 // Cookie access
+        /document\.location\s*=/gi,                           // Location redirect
+        /exec\s*\(/gi,                                        // exec()
+        /__proto__/gi,                                        // Prototype pollution
+        /constructor\.constructor/gi,                         // Constructor hacks
+        /fetch\s*\(\s*["']https?:\/\//gi,                     // Fetch to external URL
+        /localStorage\./gi,                                   // localStorage access
+        /sessionStorage\./gi,                                 // sessionStorage access
+      ];
+
+      for (const pattern of suspiciousPatterns) {
+        if (pattern.test(description)) {
+          result.flags.suspiciousPatterns = true;
+          reasons.push('Contains potentially malicious code patterns');
+          break;
+        }
+      }
+
+      // Check for prohibited content
+      const prohibitedTerms = [
+        // These would normally be more comprehensive and use better detection methods
+        // This is just a basic example
+        /\b(hack|exploit|vulnerability|inject|attack)\b/gi,
+        /\b(phish|scam|spam|malware|trojan|virus|worm|rootkit|backdoor)\b/gi
+      ];
+
+      for (const term of prohibitedTerms) {
+        if (term.test(title) || term.test(description)) {
+          result.flags.prohibited = true;
+          reasons.push('Contains prohibited terms related to security exploits or malware');
+          break;
+        }
+      }
+
+      // Final decision based on flags
+      if (result.flags.maliciousUrls || result.flags.suspiciousPatterns || result.flags.prohibited) {
+        result.isAllowed = false;
+        result.reason = reasons.join('. ');
+      }
+
+      return result;
+
+    } catch (error) {
+      logger.error('Error in content moderation', {
+        error: error instanceof Error ? error.message : String(error)
+      });
+
+      // Default to allowing content if moderation fails
+      // This is a fail-open approach to prevent blocking legitimate submissions
+      // In a production system, you might want to fail-closed for higher security
+      return {
+        isAllowed: true,
+        reason: 'Moderation check failed, proceeding with submission'
+      };
     }
   }
 
@@ -306,8 +506,16 @@ export class SolutionService extends BaseService {
         await session.commitTransaction();
         session.endSession();
 
+        // Convert evaluationScores from Record<string, number> to Map<string, number> for type compatibility
+        const typedSolutions: ISolution[] = solutions.map((sol: any) => {
+          if (sol.evaluationScores && !(sol.evaluationScores instanceof Map)) {
+            sol.evaluationScores = new Map(Object.entries(sol.evaluationScores));
+          }
+          return sol as ISolution;
+        });
+
         return {
-          solutions,
+          solutions: typedSolutions,
           total,
           page,
           limit
@@ -594,8 +802,16 @@ export class SolutionService extends BaseService {
         limit: validatedLimit
       });
 
+      // Convert evaluationScores from Record<string, number> to Map<string, number> for type compatibility
+      const typedSolutions: ISolution[] = solutions.map((sol: any) => {
+        if (sol.evaluationScores && !(sol.evaluationScores instanceof Map)) {
+          sol.evaluationScores = new Map(Object.entries(sol.evaluationScores));
+        }
+        return sol as ISolution;
+      });
+
       return {
-        solutions,
+        solutions: typedSolutions,
         total,
         page: validatedPage,
         limit: validatedLimit
@@ -767,7 +983,12 @@ export class SolutionService extends BaseService {
 
           // If challenge is claimed, verify this architect is the one who claimed it
           if (challengeClaimedBy && challengeClaimedBy !== architectProfileId) {
-            logger.warn(`Architect ${architectProfileId} attempted to access solution for challenge claimed by ${challengeClaimedBy}`);
+            logger.warn(`Architect ${architectProfileId} attempted to access solution for challenge claimed by another architect`, {
+              architectId: architectProfileId,
+              challengeId: sanitizedSolutionId,
+              claimedBy: challengeClaimedBy
+            });
+
             throw new ApiError(
               HTTP_STATUS.FORBIDDEN,
               'This challenge has been claimed by another architect'
@@ -1858,7 +2079,7 @@ export class SolutionService extends BaseService {
 
       // Use the AI evaluation service to process all solutions more efficiently
       const evaluationResult = await aiEvaluationService.processEvaluationsForChallenge(sanitizedChallengeId);
-      
+
       // Update challenge status to CLOSED if all solutions are processed
       const challenge = await Challenge.findById(sanitizedChallengeId);
       if (challenge && challenge.status !== ChallengeStatus.CLOSED) {

@@ -14,9 +14,11 @@ interface DecodedToken {
   userId: string;
   email: string;
   role: string;
-  profile?: string; // Added profile field
+  profile?: string; 
   iat: number;
   exp: number;
+  jti?: string; // JWT ID for revocation tracking
+  tokenVersion?: number; // Version number for handling revocation
 }
 
 // Extend Express Request type to include user
@@ -27,11 +29,21 @@ declare global {
         userId: string;
         email: string;
         role: string;
-        profile?: string; // Added profile field
+        profile?: string;
+        tokenId?: string; // JWT ID
+        tokenVersion?: number; // Token version
       };
     }
   }
 }
+
+// In-memory token blacklist (for development/testing)
+// In production, this should be replaced with a distributed cache like Redis
+const TOKEN_BLACKLIST = new Set<string>();
+
+// Track user token versions in-memory (for development/testing)
+// In production, this should be stored in the User model in the database
+const USER_TOKEN_VERSIONS = new Map<string, number>();
 
 /**
  * Rate limiter to prevent brute force attacks
@@ -92,7 +104,23 @@ export const authenticate = async (req: Request, res: Response, next: NextFuncti
         return next(new ApiError(HTTP_STATUS.UNAUTHORIZED, 'Your session has expired. Please log in again'));
       }
       
-      // 4) Attach user to request
+      // 4) Check if specific token has been blacklisted
+      if (decoded.jti && TOKEN_BLACKLIST.has(decoded.jti)) {
+        return next(new ApiError(HTTP_STATUS.UNAUTHORIZED, 'This session has been revoked. Please log in again'));
+      }
+      
+      // 5) Check token version (for password changes/force logout)
+      if (decoded.tokenVersion !== undefined && decoded.userId) {
+        const currentVersion = USER_TOKEN_VERSIONS.get(decoded.userId) || 0;
+        if (decoded.tokenVersion < currentVersion) {
+          return next(new ApiError(
+            HTTP_STATUS.UNAUTHORIZED, 
+            'Your credentials have changed. Please log in again'
+          ));
+        }
+      }
+      
+      // 6) Attach user to request
       req.user = {
         userId: decoded.userId,
         email: decoded.email,
@@ -104,7 +132,17 @@ export const authenticate = async (req: Request, res: Response, next: NextFuncti
         req.user.profile = decoded.profile;
       }
       
-      // 5) Log successful authentication
+      // Add token ID if it exists for revocation tracking
+      if (decoded.jti) {
+        req.user.tokenId = decoded.jti;
+      }
+      
+      // Add token version if it exists
+      if (decoded.tokenVersion !== undefined) {
+        req.user.tokenVersion = decoded.tokenVersion;
+      }
+      
+      // 7) Log successful authentication
       logger.debug(`User ${decoded.email} authenticated successfully`);
       
       next();
@@ -128,7 +166,6 @@ export const authenticate = async (req: Request, res: Response, next: NextFuncti
     next(error);
   }
 };
-
 
 /**
  * Authorization middleware based on user roles

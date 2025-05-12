@@ -573,11 +573,11 @@ Please analyze these results and provide a comprehensive final evaluation.` }
   }
   
   /**
-   * Override the default decision logic
+   * Override determineDecision to provide final evaluation decision
    * @param result - The evaluation result
    * @returns The decision to pass, fail, or request review
    */
-  protected determineDecision(result: IScoringFeedbackResult): EvaluationDecision {
+  public determineDecision(result: IScoringFeedbackResult): EvaluationDecision {
     // The ScoringFeedbackAgent never rejects submissions
     // It only provides a decision suggestion for the system
     

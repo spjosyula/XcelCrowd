@@ -3,17 +3,18 @@ import {
   ISolution, 
   IStandardizedEvaluationResponse, 
   EvaluationDecision,
+  EvaluationResponseStatus,
   ISpamFilteringResult,
   IRequirementsComplianceResult,
   ICodeQualityResult,
   IScoringFeedbackResult,
   ChallengeStatus,
-  ChallengeDifficulty
+  ChallengeDifficulty,
+  IAgentEvaluationResult
 } from '../../models/interfaces';
 import { logger } from '../../utils/logger';
 import { v4 as uuidv4 } from 'uuid';
 import { Challenge } from '../../models';
-import { LLMService } from '../llm/LLMService';
 import { Types } from 'mongoose';
 
 /**
@@ -51,6 +52,8 @@ export interface IChallengeContext {
 
 /**
  * Result of a complete pipeline evaluation
+ * The interface uses intersection types to allow both string indexing and specific typed properties
+ * This resolves TypeScript errors while maintaining type safety
  */
 export interface IPipelineResult {
   success: boolean;
@@ -58,10 +61,17 @@ export interface IPipelineResult {
   stoppedAt?: string;
   reason?: string;
   results: {
+    [key: string]: IStandardizedEvaluationResponse<IAgentEvaluationResult>;
+  } & {
     spamFiltering?: IStandardizedEvaluationResponse<ISpamFilteringResult>;
     requirementsCompliance?: IStandardizedEvaluationResponse<IRequirementsComplianceResult>;
     codeQuality?: IStandardizedEvaluationResponse<ICodeQualityResult>;
     scoringFeedback?: IStandardizedEvaluationResponse<IScoringFeedbackResult>;
+    // New agent naming convention (agent name with Agent suffix)
+    SpamFilteringAgent?: IStandardizedEvaluationResponse<ISpamFilteringResult>;
+    RequirementsComplianceAgent?: IStandardizedEvaluationResponse<IRequirementsComplianceResult>;
+    CodeQualityAgent?: IStandardizedEvaluationResponse<ICodeQualityResult>;
+    ScoringFeedbackAgent?: IStandardizedEvaluationResponse<IScoringFeedbackResult>;
   };
   finalDecision: EvaluationDecision;
   processingTimeMs: number;
@@ -84,6 +94,12 @@ export class EvaluationPipelineController {
     'RequirementsComplianceAgent',
     'CodeQualityAgent',
     'ScoringFeedbackAgent'
+  ];
+  
+  // Define which stages can reject submissions
+  private readonly REJECTION_ENABLED_STAGES = [
+    'SpamFilteringAgent',
+    'RequirementsComplianceAgent'
   ];
   
   /**
@@ -187,6 +203,22 @@ export class EvaluationPipelineController {
     // Store results from each stage
     const results: IPipelineResult['results'] = {};
     
+    // Circuit breaker state
+    const circuitBreakers: Record<string, {
+      failures: number;
+      lastFailure: number;
+      isOpen: boolean;
+    }> = {};
+    
+    // Initialize circuit breakers for each agent
+    for (const stageName of this.PIPELINE_STAGES) {
+      circuitBreakers[stageName] = {
+        failures: 0,
+        lastFailure: 0,
+        isOpen: false
+      };
+    }
+    
     try {
       logger.info(`Starting evaluation pipeline for solution`, {
         solutionId: solution._id?.toString(),
@@ -195,9 +227,10 @@ export class EvaluationPipelineController {
       });
       
       // Analyze challenge context first
-      const challengeContext = solution.challenge 
-        ? await this.analyzeChallengeContext(solution.challenge.toString())
-        : null;
+      let challengeContext: IChallengeContext | undefined = undefined;
+      if (solution.challenge) {
+        challengeContext = await this.analyzeChallengeContext(solution.challenge.toString());
+      }
       
       // Initialize solution context if it doesn't exist
       if (!solution.context) {
@@ -207,130 +240,252 @@ export class EvaluationPipelineController {
         };
       }
       
-      // Add challenge context to solution context
+      // Store challenge context in solution context
       if (challengeContext) {
         solution.context.challengeContext = challengeContext;
       }
       
-      // Execute each agent in sequence
+      // Execute each stage in sequence with circuit breaker protection
       for (const stageName of this.PIPELINE_STAGES) {
-        logger.debug(`Executing pipeline stage: ${stageName}`, {
-          solutionId: solution._id?.toString(),
-          stage: stageName,
-          traceId
-        });
-        
-        // Get the agent for this stage
-        const agent = this.agentFactory.getAgent(stageName);
-        
-        // Execute the agent
-        const stageResult = await agent.evaluate(solution);
-        
-        // Store the result based on agent type
-        if (stageName === 'SpamFilteringAgent') {
-          results.spamFiltering = stageResult as IStandardizedEvaluationResponse<ISpamFilteringResult>;
-          // Store in solution context for next agents
-          if (solution.context.pipelineResults) {
-            solution.context.pipelineResults.spamFiltering = stageResult;
+        try {
+          // Check if circuit breaker is open
+          const breaker = circuitBreakers[stageName];
+          if (breaker.isOpen) {
+            const now = Date.now();
+            const timeElapsed = now - breaker.lastFailure;
+            
+            // Use exponential backoff based on failure count
+            const backoffTime = Math.min(
+              30000, // Max 30 seconds
+              Math.pow(2, breaker.failures) * 1000 // Exponential backoff
+            );
+            
+            if (timeElapsed < backoffTime) {
+              logger.warn(`Circuit breaker open for ${stageName}`, {
+                solutionId: solution._id?.toString(),
+                traceId,
+                backoffTimeMs: backoffTime,
+                timeElapsedMs: timeElapsed
+              });
+              
+              // Skip this stage and set status in result
+              results[stageName] = {
+                success: false,
+                status: EvaluationResponseStatus.ERROR,
+                message: `${stageName} evaluation skipped due to circuit breaker`,
+                decision: EvaluationDecision.FAIL,
+                result: {
+                  score: 0,
+                  feedback: `Evaluation skipped due to service protection (circuit breaker open)`,
+                  metadata: { circuitBreakerOpen: true },
+                  evaluatedAt: new Date()
+                } as any,
+                processingTimeMs: 0,
+                traceId
+              };
+              
+              continue;
+            }
+            
+            // Reset circuit breaker after backoff time
+            breaker.isOpen = false;
           }
-        } else if (stageName === 'RequirementsComplianceAgent') {
-          results.requirementsCompliance = stageResult as IStandardizedEvaluationResponse<IRequirementsComplianceResult>;
-          // Store in solution context for next agents
-          if (solution.context.pipelineResults) {
-            solution.context.pipelineResults.requirementsCompliance = stageResult;
-          }
-        } else if (stageName === 'CodeQualityAgent') {
-          results.codeQuality = stageResult as IStandardizedEvaluationResponse<ICodeQualityResult>;
-          // Store in solution context for next agents
-          if (solution.context.pipelineResults) {
-            solution.context.pipelineResults.codeQuality = stageResult;
-          }
-        } else if (stageName === 'ScoringFeedbackAgent') {
-          results.scoringFeedback = stageResult as IStandardizedEvaluationResponse<IScoringFeedbackResult>;
-          // Store in solution context
-          if (solution.context.pipelineResults) {
-            solution.context.pipelineResults.scoringFeedback = stageResult;
-          }
-        }
-        
-        // Check if we should continue to the next stage
-        if (stageResult.decision === EvaluationDecision.FAIL) {
-          logger.info(`Pipeline stopped at ${stageName} with FAIL decision`, {
+          
+          // Get the agent instance
+          const agent = this.agentFactory.getAgent(stageName);
+          
+          // Collect all previous results for context
+          const previousResults = this.collectPreviousResults(results);
+          
+          // Log the stage start
+          logger.debug(`Starting ${stageName} evaluation`, {
             solutionId: solution._id?.toString(),
-            stage: stageName,
-            score: stageResult.result.score,
-            traceId
+            traceId,
+            stage: stageName
           });
           
-          // Return early with results up to this point
-          return {
-            success: true,
-            pipelineCompleted: false,
-            stoppedAt: stageName,
-            reason: stageResult.message,
-            results,
-            finalDecision: EvaluationDecision.FAIL,
-            processingTimeMs: Date.now() - startTime,
-            traceId,
-            challengeContext: solution.context.challengeContext
-          };
-        }
-        
-        // REVIEW decisions allow pipeline to continue, but the final decision will be review
-        if (stageResult.decision === EvaluationDecision.REVIEW) {
-          logger.info(`Stage ${stageName} requested REVIEW but pipeline continues`, {
+          // Give the agent enhanced context about the challenge and previous evaluations
+          // This helps the AI better understand the challenge requirements and build on previous analysis
+          if (solution.context) {
+            solution.context.currentStage = stageName;
+            solution.context.previousResults = previousResults;
+          }
+          
+          // Execute the agent
+          const result = await agent.evaluate(solution, previousResults);
+          
+          // Store the result
+          results[stageName] = result;
+          
+          // Store the result in solution context
+          if (solution.context && solution.context.pipelineResults) {
+            solution.context.pipelineResults[stageName] = result;
+          }
+          
+          // Check if we should reject the solution at this stage
+          if (
+            (result.decision === EvaluationDecision.FAIL || result.decision === EvaluationDecision.ERROR) &&
+            this.REJECTION_ENABLED_STAGES.includes(stageName)
+          ) {
+            logger.info(`Solution rejected at ${stageName} stage`, {
+              solutionId: solution._id?.toString(),
+              traceId,
+              stage: stageName,
+              decision: result.decision,
+              score: result.result.score
+            });
+            
+            // Break the pipeline if this stage rejected the solution
+            return {
+              success: false,
+              pipelineCompleted: false,
+              stoppedAt: stageName,
+              reason: `Rejected at ${stageName} stage: ${result.message}`,
+              results,
+              finalDecision: result.decision,
+              processingTimeMs: Date.now() - startTime,
+              traceId,
+              challengeContext: solution.context?.challengeContext
+            };
+          }
+          
+          // Reset circuit breaker on success
+          circuitBreakers[stageName].failures = 0;
+          
+          // Log the stage completion
+          logger.debug(`Completed ${stageName} evaluation`, {
             solutionId: solution._id?.toString(),
+            traceId,
             stage: stageName,
-            score: stageResult.result.score,
-            traceId
+            decision: result.decision,
+            score: result.result.score,
+            processingTimeMs: result.processingTimeMs
           });
+        } catch (error) {
+          // Log the error
+          logger.error(`Error in ${stageName} evaluation`, {
+            solutionId: solution._id?.toString(),
+            traceId,
+            stage: stageName,
+            error: error instanceof Error ? error.message : String(error),
+            stack: error instanceof Error ? error.stack : undefined
+          });
+          
+          // Update circuit breaker
+          const breaker = circuitBreakers[stageName];
+          breaker.failures++;
+          breaker.lastFailure = Date.now();
+          
+          // Open circuit breaker if too many failures
+          if (breaker.failures >= 3) {
+            breaker.isOpen = true;
+            logger.warn(`Circuit breaker opened for ${stageName}`, {
+              solutionId: solution._id?.toString(),
+              traceId,
+              stage: stageName,
+              failures: breaker.failures
+            });
+          }
+          
+          // Create an error result
+          const errorResult: IStandardizedEvaluationResponse<any> = {
+            success: false,
+            status: EvaluationResponseStatus.ERROR,
+            message: `${stageName} evaluation failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            decision: EvaluationDecision.ERROR,
+            result: {
+              score: 0,
+              feedback: `Evaluation error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+              metadata: { error: error instanceof Error ? error.message : String(error) },
+              evaluatedAt: new Date()
+            },
+            processingTimeMs: 0,
+            traceId
+          };
+          
+          // Store the error result
+          results[stageName] = errorResult;
+          
+          // Store the error result in solution context
+          if (solution.context && solution.context.pipelineResults) {
+            solution.context.pipelineResults[stageName] = errorResult;
+          }
+          
+          // Continue to next stage instead of failing completely
+          continue;
         }
       }
       
-      // All stages completed successfully
-      // Determine the final decision based on the results of all stages
+      // Determine the final decision based on all results
       const finalDecision = this.determineFinalDecision(results);
+      
+      // Calculate total processing time
+      const processingTimeMs = Date.now() - startTime;
       
       logger.info(`Completed evaluation pipeline for solution`, {
         solutionId: solution._id?.toString(),
+        traceId,
         finalDecision,
-        processingTimeMs: Date.now() - startTime,
-        traceId
+        processingTimeMs,
+        stagesCompleted: Object.keys(results).length,
+        totalStages: this.PIPELINE_STAGES.length
       });
       
+      // Return the pipeline result
       return {
         success: true,
         pipelineCompleted: true,
         results,
         finalDecision,
-        processingTimeMs: Date.now() - startTime,
+        processingTimeMs,
         traceId,
-        challengeContext: solution.context.challengeContext
+        challengeContext: solution.context?.challengeContext
       };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      const errorStack = error instanceof Error ? error.stack : undefined;
+      // Calculate processing time even for error case
+      const processingTimeMs = Date.now() - startTime;
       
       logger.error(`Error in evaluation pipeline`, {
         solutionId: solution._id?.toString(),
-        error: errorMessage,
-        stack: errorStack,
-        traceId
+        traceId,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        processingTimeMs
       });
       
+      // Return error result
       return {
         success: false,
         pipelineCompleted: false,
-        stoppedAt: Object.keys(results).length > 0 
-          ? this.PIPELINE_STAGES[Object.keys(results).length] 
-          : this.PIPELINE_STAGES[0],
-        reason: `Pipeline error: ${errorMessage}`,
+        stoppedAt: 'pipeline_controller',
+        reason: `Evaluation pipeline error: ${error instanceof Error ? error.message : 'Unknown error'}`,
         results,
-        finalDecision: EvaluationDecision.FAIL,
-        processingTimeMs: Date.now() - startTime,
-        traceId
+        finalDecision: EvaluationDecision.ERROR,
+        processingTimeMs,
+        traceId,
+        challengeContext: solution.context?.challengeContext
       };
     }
+  }
+  
+  /**
+   * Collect previous agent results for passing to next stage
+   * @param results - Current pipeline results
+   * @returns Previous results for next agent
+   */
+  private collectPreviousResults(
+    results: IPipelineResult['results']
+  ): Record<string, IAgentEvaluationResult> {
+    const previousResults: Record<string, IAgentEvaluationResult> = {};
+    
+    // Convert from pipeline results structure to flat structure for agents
+    for (const [key, value] of Object.entries(results)) {
+      if (value?.success && value?.result) {
+        previousResults[key] = value.result;
+      }
+    }
+    
+    return previousResults;
   }
   
   /**
@@ -340,6 +495,11 @@ export class EvaluationPipelineController {
    */
   private determineFinalDecision(results: IPipelineResult['results']): EvaluationDecision {
     // If ScoringFeedbackAgent ran, use its decision
+    if (results.ScoringFeedbackAgent) {
+      return results.ScoringFeedbackAgent.decision;
+    }
+    
+    // If scoring feedback isn't available but we have an older format key, use that
     if (results.scoringFeedback) {
       return results.scoringFeedback.decision;
     }
@@ -408,16 +568,22 @@ export class EvaluationPipelineController {
     // Start with the score summary
     let feedback = "## AI Evaluation Summary\n\n";
     
-    // Add scoring feedback if available
-    if (pipelineResult.results.scoringFeedback?.result) {
-      const scoringResult = pipelineResult.results.scoringFeedback.result;
+    // Add scoring feedback if available (try new format first, then old format)
+    const scoringResult = 
+      pipelineResult.results.ScoringFeedbackAgent?.result || 
+      pipelineResult.results.scoringFeedback?.result;
+      
+    if (scoringResult) {
       feedback += `### Overall Assessment\n${scoringResult.feedback}\n\n`;
       feedback += `**Score:** ${scoringResult.score}/100\n\n`;
     }
     
-    // Add requirements compliance feedback
-    if (pipelineResult.results.requirementsCompliance?.result) {
-      const reqResult = pipelineResult.results.requirementsCompliance.result;
+    // Add requirements compliance feedback (try new format first, then old format)
+    const reqResult = 
+      pipelineResult.results.RequirementsComplianceAgent?.result || 
+      pipelineResult.results.requirementsCompliance?.result;
+      
+    if (reqResult) {
       // Cast to any to access potential custom properties added at runtime
       const reqResultAny = reqResult as any;
       
@@ -453,9 +619,12 @@ export class EvaluationPipelineController {
       }
     }
     
-    // Add code quality feedback
-    if (pipelineResult.results.codeQuality?.result) {
-      const codeResult = pipelineResult.results.codeQuality.result;
+    // Add code quality feedback (try new format first, then old format)
+    const codeResult = 
+      pipelineResult.results.CodeQualityAgent?.result || 
+      pipelineResult.results.codeQuality?.result;
+      
+    if (codeResult) {
       // Cast to any to access potential custom properties added at runtime
       const codeResultAny = codeResult as any;
       
@@ -526,9 +695,12 @@ export class EvaluationPipelineController {
       solution.context.challengeContext = pipelineResult.challengeContext;
       
       // Extract comprehensive feedback from scoring agent for architect review
-      if (pipelineResult.results.scoringFeedback) {
-        const scoringResult = pipelineResult.results.scoringFeedback.result;
-        
+      // Try the new format (ScoringFeedbackAgent) first, then fall back to the old format (scoringFeedback)
+      const scoringResult = 
+        pipelineResult.results.ScoringFeedbackAgent?.result || 
+        pipelineResult.results.scoringFeedback?.result;
+      
+      if (scoringResult) {
         // Set feedback from AI for architect to review
         solution.feedback = this.generateComprehensiveFeedback(pipelineResult);
         
@@ -552,7 +724,7 @@ export class EvaluationPipelineController {
           }
           
           // Agent-specific metadata handling with proper type guards
-          if (agentName === 'spamFiltering' && 'metadata' in result.result) {
+          if ((agentName === 'spamFiltering' || agentName === 'SpamFilteringAgent') && 'metadata' in result.result) {
             // Check for spam filtering metadata (spamIndicators)
             const spamMetadata = result.result.metadata as ISpamFilteringResult['metadata'];
             if (spamMetadata && Array.isArray(spamMetadata.spamIndicators)) {
@@ -562,7 +734,7 @@ export class EvaluationPipelineController {
             }
           }
           
-          if (agentName === 'requirementsCompliance' && 'metadata' in result.result) {
+          if ((agentName === 'requirementsCompliance' || agentName === 'RequirementsComplianceAgent') && 'metadata' in result.result) {
             // Check for requirements compliance metadata (missingRequirements)
             const reqMetadata = result.result.metadata as IRequirementsComplianceResult['metadata'];
             if (reqMetadata && Array.isArray(reqMetadata.missingRequirements)) {

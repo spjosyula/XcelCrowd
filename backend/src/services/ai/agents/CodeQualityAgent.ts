@@ -298,11 +298,11 @@ export class CodeQualityAgent extends AIAgentBase<ICodeQualityResult> {
   }
 
   /**
-   * Override the default decision logic for code quality
+   * Determine the decision based on code quality metrics
    * @param result - The evaluation result
-   * @returns The decision to pass, fail, or request review
+   * @returns Decision based on code quality scores
    */
-  protected determineDecision(result: ICodeQualityResult): EvaluationDecision {
+  public determineDecision(result: ICodeQualityResult): EvaluationDecision {
     // Critical security vulnerabilities should be reviewed but not failed
     // as code quality failures should only happen if specifically required by the challenge
     const hasCriticalVulnerabilities = result.metadata.vulnerabilities.some(

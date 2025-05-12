@@ -19,8 +19,46 @@ import {
   createPaginationResult
 } from '../utils/paginationUtils';
 import { MongoSanitizer } from '../utils/mongo.sanitize';
+import { scheduler } from '../utils/scheduler';
 
 export class ChallengeService extends BaseService {
+  constructor() {
+    super();
+  }
+
+  public initialize(): void {
+    this.registerEventListeners();
+  }
+
+  /**
+   * Register for scheduler events to handle challenge deadlines
+   */
+  private registerEventListeners(): void {
+    // Check if scheduler exists before trying to use it
+    if (!scheduler) {
+      logger.warn('[ChallengeService] Scheduler not available, event listeners not registered');
+      return;
+    }
+
+    // Register for challenge deadline reached events
+    scheduler.on('challenge:deadline:reached', async (challengeId: string) => {
+      try {
+        logger.info(`Challenge service received deadline reached event for challenge ${challengeId}`);
+        
+        // Update the challenge status first
+        await this.updateChallengeStatuses(0, [challengeId]);
+        
+        logger.info(`Challenge ${challengeId} status updated to CLOSED via event handler`);
+      } catch (error) {
+        logger.error(`Error handling challenge deadline event for ${challengeId}`, {
+          challengeId,
+          error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined
+        });
+      }
+    });
+  }
+
   /**
    * Create a new challenge
    * @param companyId - The ID of the company creating the challenge
@@ -33,8 +71,8 @@ export class ChallengeService extends BaseService {
     try {
       // Validate company ID using MongoSanitizer to prevent NoSQL injection
       const sanitizedCompanyId = MongoSanitizer.validateObjectId(
-        companyId, 
-        'company', 
+        companyId,
+        'company',
         { errorStatus: 400, additionalContext: 'When creating a challenge' }
       );
 
@@ -123,7 +161,7 @@ export class ChallengeService extends BaseService {
 
     // Sanitize array fields
     if (data.requirements && Array.isArray(data.requirements)) {
-      sanitized.requirements = data.requirements.map(item => 
+      sanitized.requirements = data.requirements.map(item =>
         MongoSanitizer.sanitizeString(item, {
           fieldName: 'Requirement',
           maxLength: 500
@@ -132,7 +170,7 @@ export class ChallengeService extends BaseService {
     }
 
     if (data.resources && Array.isArray(data.resources)) {
-      sanitized.resources = data.resources.map(item => 
+      sanitized.resources = data.resources.map(item =>
         MongoSanitizer.sanitizeString(item, {
           fieldName: 'Resource',
           maxLength: 1000
@@ -141,7 +179,7 @@ export class ChallengeService extends BaseService {
     }
 
     if (data.category && Array.isArray(data.category)) {
-      sanitized.category = data.category.map(item => 
+      sanitized.category = data.category.map(item =>
         MongoSanitizer.sanitizeString(item, {
           fieldName: 'Category',
           maxLength: 100
@@ -150,7 +188,7 @@ export class ChallengeService extends BaseService {
     }
 
     if (data.tags && Array.isArray(data.tags)) {
-      sanitized.tags = data.tags.map(item => 
+      sanitized.tags = data.tags.map(item =>
         MongoSanitizer.sanitizeString(item, {
           fieldName: 'Tag',
           maxLength: 50
@@ -159,7 +197,7 @@ export class ChallengeService extends BaseService {
     }
 
     if (data.allowedInstitutions && Array.isArray(data.allowedInstitutions)) {
-      sanitized.allowedInstitutions = data.allowedInstitutions.map(item => 
+      sanitized.allowedInstitutions = data.allowedInstitutions.map(item =>
         MongoSanitizer.sanitizeString(item, {
           fieldName: 'Institution',
           maxLength: 200
@@ -209,9 +247,9 @@ export class ChallengeService extends BaseService {
 
     // Sanitize numeric fields
     if (data.maxParticipants !== undefined) {
-      if (typeof data.maxParticipants !== 'number' || 
-          data.maxParticipants < 1 || 
-          data.maxParticipants > 10000) {
+      if (typeof data.maxParticipants !== 'number' ||
+        data.maxParticipants < 1 ||
+        data.maxParticipants > 10000) {
         throw ApiError.badRequest(
           'Maximum participants must be a positive number between 1 and 10000',
           'INVALID_MAX_PARTICIPANTS'
@@ -221,9 +259,9 @@ export class ChallengeService extends BaseService {
     }
 
     if (data.maxApprovedSolutions !== undefined) {
-      if (typeof data.maxApprovedSolutions !== 'number' || 
-          data.maxApprovedSolutions < 1 || 
-          data.maxApprovedSolutions > 1000) {
+      if (typeof data.maxApprovedSolutions !== 'number' ||
+        data.maxApprovedSolutions < 1 ||
+        data.maxApprovedSolutions > 1000) {
         throw ApiError.badRequest(
           'Maximum approved solutions must be a positive number between 1 and 1000',
           'INVALID_MAX_APPROVED_SOLUTIONS'
@@ -265,8 +303,8 @@ export class ChallengeService extends BaseService {
     try {
       // Validate challenge ID using MongoSanitizer
       const sanitizedChallengeId = MongoSanitizer.validateObjectId(
-        challengeId, 
-        'challenge', 
+        challengeId,
+        'challenge',
         { errorStatus: 400, additionalContext: 'When fetching challenge' }
       );
 
@@ -321,14 +359,14 @@ export class ChallengeService extends BaseService {
     try {
       // Validate IDs using MongoSanitizer
       const sanitizedChallengeId = MongoSanitizer.validateObjectId(
-        challengeId, 
-        'challenge', 
+        challengeId,
+        'challenge',
         { errorStatus: 400, additionalContext: 'When updating challenge' }
       );
-      
+
       const sanitizedCompanyId = MongoSanitizer.validateObjectId(
-        companyId, 
-        'company', 
+        companyId,
+        'company',
         { errorStatus: 400, additionalContext: 'When updating challenge' }
       );
 
@@ -396,10 +434,10 @@ export class ChallengeService extends BaseService {
 
         // Filter out fields that aren't allowed to be updated
         const filteredUpdateData: Partial<IChallenge> = {};
-        
+
         for (const field of allowedFields) {
           if (field in sanitizedUpdateData) {
-            filteredUpdateData[field as keyof IChallenge] = 
+            filteredUpdateData[field as keyof IChallenge] =
               sanitizedUpdateData[field as keyof IChallenge];
           }
         }
@@ -412,12 +450,12 @@ export class ChallengeService extends BaseService {
 
         // Update using findOneAndUpdate with sanitized operations
         const updatedChallenge = await Challenge.findOneAndUpdate(
-          { _id: sanitizedChallengeId }, 
+          { _id: sanitizedChallengeId },
           safeUpdateOps,
-          { 
-            new: true, 
+          {
+            new: true,
             runValidators: true,
-            session 
+            session
           }
         );
 
@@ -454,13 +492,21 @@ export class ChallengeService extends BaseService {
   /**
    * Updates challenge statuses based on deadlines
    * This should be called by a scheduled job
+   * @param retryAttempt - Current retry attempt number for error handling
+   * @param specificChallengeIds - Optional array of specific challenge IDs to update
+   * @returns Results of the update operation
    */
-  async updateChallengeStatuses(): Promise<{
+  async updateChallengeStatuses(
+    retryAttempt = 0,
+    specificChallengeIds?: string[]
+  ): Promise<{
     updated: number;
     errors: number;
     details: Array<{ id: string; status: string }>;
   }> {
-    logger.info('[updateChallengeStatuses] Starting automatic challenge status update job');
+    logger.info('[updateChallengeStatuses] Starting challenge status update job', {
+      specificChallengeIds: specificChallengeIds?.length ? specificChallengeIds : 'all'
+    });
 
     try {
       return await this.withTransaction(async (session) => {
@@ -470,13 +516,32 @@ export class ChallengeService extends BaseService {
           details: [] as Array<{ id: string; status: string }>
         };
 
-        // Find active challenges with passed deadlines
-        const expiredSubmissionChallenges = await Challenge.find({
-          status: ChallengeStatus.ACTIVE,
-          deadline: { $lt: new Date() }
-        }).session(session);
+        // Build the query based on whether specific challenge IDs were provided
+        const baseQuery: any = {
+          status: ChallengeStatus.ACTIVE
+        };
+        
+        // If specific IDs were provided, use them
+        if (specificChallengeIds && specificChallengeIds.length > 0) {
+          // Sanitize all IDs to prevent injection
+          const sanitizedIds = specificChallengeIds.map(id => 
+            MongoSanitizer.sanitizeObjectId(id, 'challenge')
+          );
+          
+          baseQuery._id = { $in: sanitizedIds };
+          logger.info('[updateChallengeStatuses] Processing specific challenges', {
+            count: sanitizedIds.length,
+            ids: sanitizedIds
+          });
+        } else {
+          // Otherwise, use deadline check
+          baseQuery.deadline = { $lt: new Date() };
+        }
 
-        logger.info('[updateChallengeStatuses] Found expired submission challenges', {
+        // Find challenges to update
+        const expiredSubmissionChallenges = await Challenge.find(baseQuery).session(session);
+
+        logger.info('[updateChallengeStatuses] Found challenges to update', {
           count: expiredSubmissionChallenges.length
         });
 
@@ -513,6 +578,20 @@ export class ChallengeService extends BaseService {
         stack: error instanceof Error ? error.stack : undefined
       });
 
+      // Retry logic for connection issues
+      if (retryAttempt < 3 && error instanceof Error &&
+        (error.message.includes('buffering timed out') ||
+          error.message.includes('connection') ||
+          error.name === 'MongooseError')) {
+
+        const delay = Math.min(1000 * (2 ** retryAttempt), 10000);
+        logger.info(`[updateChallengeStatuses] Retrying after ${delay}ms (attempt ${retryAttempt + 1})`);
+
+        // Wait before retrying
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return this.updateChallengeStatuses(retryAttempt + 1, specificChallengeIds);
+      }
+
       if (error instanceof ApiError) throw error;
       throw ApiError.internal(
         'Failed to update challenge statuses',
@@ -536,14 +615,14 @@ export class ChallengeService extends BaseService {
     try {
       // Validate IDs using MongoSanitizer
       const sanitizedChallengeId = MongoSanitizer.validateObjectId(
-        challengeId, 
-        'challenge', 
+        challengeId,
+        'challenge',
         { errorStatus: 400, additionalContext: 'When publishing challenge' }
       );
-      
+
       const sanitizedCompanyId = MongoSanitizer.validateObjectId(
-        companyId, 
-        'company', 
+        companyId,
+        'company',
         { errorStatus: 400, additionalContext: 'When publishing challenge' }
       );
 
@@ -641,8 +720,8 @@ export class ChallengeService extends BaseService {
       // Company ID filter with validation
       if (filters.companyId) {
         const sanitizedCompanyId = MongoSanitizer.validateObjectId(
-          filters.companyId, 
-          'company', 
+          filters.companyId,
+          'company',
           { errorStatus: 400, additionalContext: 'In challenge filters' }
         );
         queryFilters.company = new Types.ObjectId(sanitizedCompanyId);
@@ -652,7 +731,7 @@ export class ChallengeService extends BaseService {
       if (filters.category) {
         if (Array.isArray(filters.category)) {
           // Sanitize each category
-          const sanitizedCategories = filters.category.map(cat => 
+          const sanitizedCategories = filters.category.map(cat =>
             MongoSanitizer.sanitizeString(cat, {
               fieldName: 'Category',
               maxLength: 100
@@ -736,10 +815,10 @@ export class ChallengeService extends BaseService {
           // Log the error and throw a sanitized error message
           logger.error('[getChallenges] Error building search regex', {
             error: error instanceof Error ? error.message : String(error),
-            searchTerm: filters.searchTerm.substring(0, 20) + 
+            searchTerm: filters.searchTerm.substring(0, 20) +
               (filters.searchTerm.length > 20 ? '...' : '')
           });
-          
+
           throw ApiError.badRequest(
             'Invalid search pattern. Please simplify your search term.',
             'INVALID_SEARCH_PATTERN'
@@ -748,19 +827,19 @@ export class ChallengeService extends BaseService {
       }
 
       // Validate and sanitize pagination parameters
-      const page = typeof filters.page === 'number' ? 
+      const page = typeof filters.page === 'number' ?
         Math.max(1, filters.page) : 1;
-        
+
       const maxLimit = 50; // Set maximum items per page
-      const limit = typeof filters.limit === 'number' ? 
+      const limit = typeof filters.limit === 'number' ?
         Math.min(Math.max(1, filters.limit), maxLimit) : 10;
 
       // Validate and sanitize sort parameters
       const allowedSortFields = [
-        'createdAt', 'title', 'deadline', 'difficulty', 
+        'createdAt', 'title', 'deadline', 'difficulty',
         'maxParticipants', 'currentParticipants', 'status'
       ];
-      
+
       const sortBy = filters.sortBy || 'createdAt';
       const sortOrder = filters.sortOrder || 'desc';
 
@@ -770,7 +849,7 @@ export class ChallengeService extends BaseService {
         sortOrder,
         allowedSortFields
       );
-      
+
       const sortOptions: Record<string, 1 | -1> = {
         [validatedSort.sortBy]: validatedSort.sortOrder
       };
@@ -793,11 +872,11 @@ export class ChallengeService extends BaseService {
       logger.error('[getChallenges] Failed to retrieve challenges', {
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined,
-        filters: JSON.stringify({ 
-          ...filters, 
-          searchTerm: filters.searchTerm ? 
-            (filters.searchTerm.substring(0, 20) + 
-              (filters.searchTerm.length > 20 ? '...' : '')) : undefined 
+        filters: JSON.stringify({
+          ...filters,
+          searchTerm: filters.searchTerm ?
+            (filters.searchTerm.substring(0, 20) +
+              (filters.searchTerm.length > 20 ? '...' : '')) : undefined
         })
       });
 
@@ -824,14 +903,14 @@ export class ChallengeService extends BaseService {
     try {
       // Validate IDs using MongoSanitizer
       const sanitizedChallengeId = MongoSanitizer.validateObjectId(
-        challengeId, 
-        'challenge', 
+        challengeId,
+        'challenge',
         { errorStatus: 400, additionalContext: 'When closing challenge' }
       );
-      
+
       const sanitizedCompanyId = MongoSanitizer.validateObjectId(
-        companyId, 
-        'company', 
+        companyId,
+        'company',
         { errorStatus: 400, additionalContext: 'When closing challenge' }
       );
 
@@ -897,18 +976,18 @@ export class ChallengeService extends BaseService {
     try {
       // Validate challenge ID using MongoSanitizer
       const sanitizedChallengeId = MongoSanitizer.validateObjectId(
-        challengeId, 
-        'challenge', 
+        challengeId,
+        'challenge',
         { errorStatus: 400, additionalContext: 'When deleting challenge' }
       );
 
       await this.withTransaction(async (session) => {
         // Find the challenge first to verify it exists
         // Use $eq operator to prevent NoSQL injection
-        const challenge = await Challenge.findOne({ 
-          _id: { $eq: sanitizedChallengeId } 
+        const challenge = await Challenge.findOne({
+          _id: { $eq: sanitizedChallengeId }
         }).session(session);
-        
+
         if (!challenge) {
           throw ApiError.notFound('Challenge not found', 'CHALLENGE_NOT_FOUND');
         }
@@ -1196,10 +1275,10 @@ export class ChallengeService extends BaseService {
    * @returns The completed challenge and selected solutions
    */
   async markChallengeAsCompleted(
-    challengeId: string, 
+    challengeId: string,
     companyId: string
-  ): Promise<{ 
-    challenge: IChallenge; 
+  ): Promise<{
+    challenge: IChallenge;
     selectedSolutions: ISolution[];
   }> {
     logger.info('[markChallengeAsCompleted] Marking challenge as completed with final solutions', {
@@ -1210,11 +1289,11 @@ export class ChallengeService extends BaseService {
     try {
       // Validate IDs using MongoSanitizer
       const sanitizedChallengeId = MongoSanitizer.validateObjectId(
-        challengeId, 
+        challengeId,
         'challenge'
       );
       const sanitizedCompanyId = MongoSanitizer.validateObjectId(
-        companyId, 
+        companyId,
         'company'
       );
 
@@ -1245,8 +1324,8 @@ export class ChallengeService extends BaseService {
           challenge: sanitizedChallengeId,
           status: SolutionStatus.SELECTED
         })
-        .populate('student')
-        .session(session);
+          .populate('student')
+          .session(session);
 
         // If no solutions have been selected, we cannot complete the challenge
         if (selectedSolutions.length === 0) {
@@ -1400,8 +1479,8 @@ export class ChallengeService extends BaseService {
     try {
       // Validate challenge ID using MongoSanitizer
       const sanitizedChallengeId = MongoSanitizer.validateObjectId(
-        challengeId, 
-        'challenge', 
+        challengeId,
+        'challenge',
         { errorStatus: 400, additionalContext: 'When fetching challenge with visibility' }
       );
 
@@ -1410,8 +1489,8 @@ export class ChallengeService extends BaseService {
       if (profileId) {
         try {
           sanitizedProfileId = MongoSanitizer.validateObjectId(
-            profileId, 
-            'profile', 
+            profileId,
+            'profile',
             { required: false, errorStatus: 400, additionalContext: 'When fetching challenge with visibility' }
           );
         } catch (error) {
@@ -1442,7 +1521,7 @@ export class ChallengeService extends BaseService {
       // For private challenges, check institution access for students
       if (challenge.visibility === 'private' && userRole === UserRole.STUDENT) {
         // Sanitize university name if present
-        const universityName = studentProfile?.university ? 
+        const universityName = studentProfile?.university ?
           MongoSanitizer.sanitizeString(studentProfile.university, {
             fieldName: 'University',
             maxLength: 200,
@@ -1585,10 +1664,10 @@ export class ChallengeService extends BaseService {
         // Only allow specific safe operators and recursively sanitize their values
         const safeOps: Record<string, any> = {};
         const allowedOperators = ['$eq', '$gt', '$gte', '$lt', '$lte', '$in', '$nin', '$regex', '$options'];
-        
+
         // Check if it's a MongoDB query operator object
         const hasOperators = Object.keys(value).some(k => k.startsWith('$'));
-        
+
         if (hasOperators) {
           // If it has operators, only allow whitelisted ones
           for (const [op, opValue] of Object.entries(value)) {
@@ -1609,7 +1688,7 @@ export class ChallengeService extends BaseService {
               }
             }
           }
-          
+
           if (Object.keys(safeOps).length > 0) {
             safeFilters[key] = safeOps;
           }
@@ -1651,8 +1730,8 @@ export class ChallengeService extends BaseService {
       if (userId) {
         try {
           sanitizedUserId = MongoSanitizer.validateObjectId(
-            userId, 
-            'user', 
+            userId,
+            'user',
             { required: false, errorStatus: 400, additionalContext: 'When fetching challenges for user' }
           );
         } catch (error) {
@@ -1670,10 +1749,10 @@ export class ChallengeService extends BaseService {
       // Sanitize difficulty
       if (filters.difficulty) {
         const difficulty = MongoSanitizer.sanitizeString(filters.difficulty, {
-          fieldName: 'Difficulty', 
+          fieldName: 'Difficulty',
           maxLength: 50
         });
-        
+
         // Validate against enum
         if (!Object.values(ChallengeDifficulty).includes(difficulty as ChallengeDifficulty)) {
           throw ApiError.badRequest(
@@ -1681,7 +1760,7 @@ export class ChallengeService extends BaseService {
             'INVALID_DIFFICULTY'
           );
         }
-        
+
         queryFilters.difficulty = { $eq: difficulty };
       }
 
@@ -1689,7 +1768,7 @@ export class ChallengeService extends BaseService {
       if (filters.category) {
         if (Array.isArray(filters.category)) {
           // Sanitize each category
-          const sanitizedCategories = filters.category.map(cat => 
+          const sanitizedCategories = filters.category.map(cat =>
             MongoSanitizer.sanitizeString(cat, {
               fieldName: 'Category',
               maxLength: 100
@@ -1730,13 +1809,13 @@ export class ChallengeService extends BaseService {
           ];
 
           logger.debug('[getChallengesForUser] Applied search filter', {
-            searchPattern: filters.searchTerm.substring(0, 20) + 
+            searchPattern: filters.searchTerm.substring(0, 20) +
               (filters.searchTerm.length > 20 ? '...' : '')
           });
         } catch (error) {
           logger.error('[getChallengesForUser] Error processing search term', {
             error: error instanceof Error ? error.message : String(error),
-            searchTerm: filters.searchTerm.substring(0, 20) + 
+            searchTerm: filters.searchTerm.substring(0, 20) +
               (filters.searchTerm.length > 20 ? '...' : '')
           });
 
@@ -1795,10 +1874,10 @@ export class ChallengeService extends BaseService {
       } else if (filters.status) {
         // Validate if status is a valid enum value
         const status = MongoSanitizer.sanitizeString(filters.status, {
-          fieldName: 'Status', 
+          fieldName: 'Status',
           maxLength: 20
         });
-        
+
         if (Object.values(ChallengeStatus).includes(status as ChallengeStatus)) {
           queryFilters.status = { $eq: status };
         } else {
@@ -1821,11 +1900,11 @@ export class ChallengeService extends BaseService {
         if (userRole === UserRole.STUDENT && sanitizedUserId && studentProfile?.university) {
           // Sanitize university name
           const university = MongoSanitizer.sanitizeString(studentProfile.university, {
-            fieldName: 'University', 
+            fieldName: 'University',
             maxLength: 200,
             required: false
           });
-          
+
           visibilityFilter.$or = [
             { visibility: { $eq: 'public' } },
             { visibility: { $eq: 'anonymous' } },
@@ -1841,10 +1920,10 @@ export class ChallengeService extends BaseService {
       }
 
       // Sanitize pagination parameters
-      const page = filters.page ? 
+      const page = filters.page ?
         Math.max(1, parseInt(String(filters.page))) : 1;
-        
-      const limit = filters.limit ? 
+
+      const limit = filters.limit ?
         Math.min(Math.max(1, parseInt(String(filters.limit))), 50) : 10;
 
       // Apply final sanitization to the entire query object
@@ -1983,14 +2062,14 @@ export class ChallengeService extends BaseService {
     try {
       // Validate challenge ID using MongoSanitizer
       const sanitizedChallengeId = MongoSanitizer.validateObjectId(
-        challengeId, 
-        'challenge', 
+        challengeId,
+        'challenge',
         { errorStatus: 400, additionalContext: `During ${action} authorization` }
       );
-      
+
       // Sanitize user/profile ID
       const sanitizedUserIdOrProfileId = MongoSanitizer.validateObjectId(
-        userIdOrProfileId, 
+        userIdOrProfileId,
         userRole === UserRole.COMPANY ? 'company profile' : 'user',
         { errorStatus: 400, additionalContext: `During ${action} authorization` }
       );

@@ -71,7 +71,45 @@ const solutionSchema = new Schema<ISolution>({
     min: [0, 'Score cannot be negative'],
     max: [100, 'Score cannot exceed 100']
   },
-  // Added fields for enhanced workflow
+  // AI evaluation related fields
+  aiScore: {
+    type: Number,
+    min: [0, 'AI score cannot be negative'],
+    max: [100, 'AI score cannot exceed 100']
+  },
+  evaluationScores: {
+    type: Map,
+    of: Number,
+    default: {}
+  },
+  reviewPriority: {
+    type: String,
+    enum: ['low', 'medium', 'high'],
+    default: 'medium'
+  },
+  rejectionReason: {
+    type: String,
+    trim: true
+  },
+  // Solution context for AI and workflow
+  context: {
+    type: Schema.Types.Mixed,
+    default: {}
+  },
+  // Architect notes
+  notes: {
+    type: String,
+    trim: true
+  },
+  lastUpdatedAt: {
+    type: Date,
+    default: Date.now
+  },
+  // Add submittedAt field
+  submittedAt: {
+    type: Date
+  },
+  // Add fields for enhanced workflow
   selectedAt: {
     type: Date
   },
@@ -98,14 +136,27 @@ const solutionSchema = new Schema<ISolution>({
  * Pre-save middleware to update status when reviewed
  */
 solutionSchema.pre('save', function(next) {
-  if (this.isModified('reviewedBy') && this.reviewedBy && !this.reviewedAt) {
-    this.reviewedAt = new Date();
+  // Need to use type assertion because mongoose doesn't properly type these fields
+  const solution = this as unknown as {
+    isModified: (path: string) => boolean;
+    reviewedBy?: mongoose.Types.ObjectId;
+    reviewedAt?: Date;
+    status?: string;
+    selectedAt?: Date;
+    lastUpdatedAt: Date;
+  };
+
+  if (solution.isModified('reviewedBy') && solution.reviewedBy && !solution.reviewedAt) {
+    solution.reviewedAt = new Date();
   }
   
   // Set selectedAt when status changes to SELECTED
-  if (this.isModified('status') && this.status === SolutionStatus.SELECTED && !this.selectedAt) {
-    this.selectedAt = new Date();
+  if (solution.isModified('status') && solution.status === SolutionStatus.SELECTED && !solution.selectedAt) {
+    solution.selectedAt = new Date();
   }
+  
+  // Update lastUpdatedAt whenever the solution is modified
+  solution.lastUpdatedAt = new Date();
   
   next();
 });
@@ -122,6 +173,9 @@ solutionSchema.index({ reviewedAt: -1 });
 solutionSchema.index({ student: 1 });
 solutionSchema.index({ challenge: 1 });
 solutionSchema.index({ challenge: 1, status: 1 });
+solutionSchema.index({ aiScore: -1 });
+solutionSchema.index({ reviewPriority: 1 });
+solutionSchema.index({ lastUpdatedAt: -1 });
 
 /**
  * Create and export the Solution model

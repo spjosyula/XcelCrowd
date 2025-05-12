@@ -2040,11 +2040,11 @@ Your response should be a JSON array with verification results for each requirem
   }
 
   /**
-   * Override the default decision logic for requirements compliance
+   * Override determineDecision to handle enhanced decision logic
    * @param result - The evaluation result
    * @returns The decision to pass, fail, or request review
    */
-  protected determineDecision(result: IRequirementsComplianceResult): EvaluationDecision {
+  public determineDecision(result: IRequirementsComplianceResult): EvaluationDecision {
     // We'll use the requirementsSatisfied and totalRequirements that exist in the metadata
     const { requirementsSatisfied, totalRequirements } = result.metadata;
 

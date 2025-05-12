@@ -1,40 +1,49 @@
-import { AIEvaluationService } from './ai-evaluation.service';
 import { AIAgentFactory } from './AIAgentFactory';
-import { spamFilteringAgent } from './agents/SpamFilteringAgent';
-import { requirementsComplianceAgent } from './agents/RequirementsComplianceAgent';
-import { codeQualityAgent } from './agents/CodeQualityAgent';
-import { scoringFeedbackAgent } from './agents/ScoringFeedbackAgent';
-import { evaluationPipelineController } from './EvaluationPipelineController';
+import { SpamFilteringAgent } from './agents/SpamFilteringAgent';
+import { RequirementsComplianceAgent } from './agents/RequirementsComplianceAgent';
+import { CodeQualityAgent } from './agents/CodeQualityAgent';
+import { ScoringFeedbackAgent } from './agents/ScoringFeedbackAgent';
+import { AIEvaluationService } from './ai-evaluation.service';
+import { EvaluationPipelineController } from './EvaluationPipelineController';
+import { logger } from '../../utils/logger';
 
-// Create and export singleton instance of the evaluation service
-const aiEvaluationService = new AIEvaluationService();
+// Create the agent factory singleton
+const agentFactory = AIAgentFactory.getInstance();
+
+// Initialize all evaluation agents
+const spamFilteringAgent = SpamFilteringAgent.getInstance();
+const requirementsComplianceAgent = RequirementsComplianceAgent.getInstance();
+const codeQualityAgent = CodeQualityAgent.getInstance();
+const scoringFeedbackAgent = ScoringFeedbackAgent.getInstance();
 
 // Register all agents with the factory
-const registerAgents = () => {
-  const factory = AIAgentFactory.getInstance();
-  
-  // Register the four evaluation agents
-  factory.registerAgent(spamFilteringAgent);
-  factory.registerAgent(requirementsComplianceAgent);
-  factory.registerAgent(codeQualityAgent);
-  factory.registerAgent(scoringFeedbackAgent);
-};
+agentFactory.registerAgent(spamFilteringAgent);
+agentFactory.registerAgent(requirementsComplianceAgent);
+agentFactory.registerAgent(codeQualityAgent);
+agentFactory.registerAgent(scoringFeedbackAgent);
 
-// Initialize AI services
-const initializeAI = () => {
-  // Register all agents
-  registerAgents();
-  
-  // Initialize the pipeline controller
-  // The controller is already initialized as a singleton in its own file
-  
-  // Log initialization
-  console.log('AI evaluation system initialized');
-};
+// Create the pipeline controller singleton
+const evaluationPipelineController = EvaluationPipelineController.getInstance();
 
-// Export services and initialization function
+// Create the AI evaluation service singleton
+const aiEvaluationService = new AIEvaluationService();
+
+// Log successful initialization
+logger.info('AI Evaluation Services initialized', {
+  registeredAgents: [
+    spamFilteringAgent.name,
+    requirementsComplianceAgent.name,
+    codeQualityAgent.name,
+    scoringFeedbackAgent.name
+  ]
+});
+
 export {
-  aiEvaluationService,
+  agentFactory,
   evaluationPipelineController,
-  initializeAI
+  aiEvaluationService,
+  spamFilteringAgent,
+  requirementsComplianceAgent,
+  codeQualityAgent,
+  scoringFeedbackAgent
 }; 

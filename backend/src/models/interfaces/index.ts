@@ -179,7 +179,7 @@ export enum SolutionStatus {
   DRAFT = 'draft',  // Solution is being created but not yet submitted
   SUBMITTED = 'submitted',  // Initial state when solution is first submitted
   CLAIMED = 'claimed',  // Solution has been claimed for review by an architect
-  UNDER_REVIEW = 'under_review',  // Solution is being reviewed by architects
+  UNDER_REVIEW = 'under_review',  // Solution is being reviewed by architects (including AI evaluated solutions)
   APPROVED = 'approved',  // Solution has been approved by reviewers
   REJECTED = 'rejected',  // Solution has been rejected by reviewers
   SELECTED = 'selected'  // Solution has been selected as one of the best
@@ -198,20 +198,35 @@ export interface ISolution extends Document, ITimestamps {
   feedback?: string;  // Comments or suggestions from reviewers
   reviewedBy?: Types.ObjectId | IArchitectProfile;  // Architect who reviewed this solution
   reviewedAt?: Date;  // When the solution was reviewed
-  score?: number;  // Numerical assessment of the solution quality
-  tags: string[];  // Keywords or tags associated with the solution
+  score?: number;  // Numerical assessment of the solution quality (from architect review)
+  
+  // AI evaluation related fields
+  aiScore?: number;  // Score assigned by AI evaluation (0-100)
+  evaluationScores?: Map<string, number>;  // Scores from different evaluation components
+  reviewPriority?: 'low' | 'medium' | 'high';  // Priority for architect review
+  rejectionReason?: string;  // Reason for rejection if status is REJECTED
+  notes?: string;  // Notes from architects or AI system
+  lastUpdatedAt?: Date;  // When the solution was last updated
+  
+  tags?: string[];  // Keywords or tags associated with the solution
+  submittedAt?: Date;  // When the solution was submitted
   selectedAt?: Date;  // When the solution was selected as exemplary
   selectedBy?: Types.ObjectId | ICompanyProfile;  // Company who selected this solution
   companyFeedback?: string;  // Feedback from company to the student when selected as winner
   selectionReason?: string;  // Reason why the company selected this solution
+  
   // Internal runtime context for evaluation pipeline data sharing between agents
   context?: {
     evaluationId?: string;
+    challengeContext?: any;  // Context about the challenge for AI agents
+    currentStage?: string;  // Current stage in the evaluation pipeline
+    previousResults?: Record<string, any>;  // Results from previous pipeline stages
     pipelineResults?: {
-      spamFiltering?: any;
-      requirementsCompliance?: any;
-      codeQuality?: any;
-      scoringFeedback?: any;
+      [key: string]: any;  // Allow for dynamic agent names
+      SpamFilteringAgent?: any;
+      RequirementsComplianceAgent?: any;
+      CodeQualityAgent?: any;
+      ScoringFeedbackAgent?: any;
     };
     [key: string]: any;  // Allow for other context data
   };

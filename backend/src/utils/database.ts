@@ -10,6 +10,9 @@ type ConnectionState = {
   retryCount: number;
   isConnecting: boolean;
   connectionPromise: Promise<void> | null;
+  activeConnections: number;
+  maxConnections: number;
+  lastConnectionCheck: number;
 };
 
 /**
@@ -19,7 +22,10 @@ const connection: ConnectionState = {
   isConnected: false,
   retryCount: 0,
   isConnecting: false,
-  connectionPromise: null
+  connectionPromise: null,
+  activeConnections: 0,
+  maxConnections: 0,
+  lastConnectionCheck: Date.now()
 };
 
 /**
@@ -27,11 +33,11 @@ const connection: ConnectionState = {
  */
 const connectionOptions: mongoose.ConnectOptions = {
   // Connection timeouts
-  serverSelectionTimeoutMS: 10000,    // How long to try selecting a server
+  serverSelectionTimeoutMS: 30000,    // How long to try selecting a server
   connectTimeoutMS: 30000,            // How long to wait for initial connection
   socketTimeoutMS: 45000,             // How long to wait for operations
   
-  // Connection pooling
+  // Connection pooling - critical for preventing leaks
   maxPoolSize: 50,                    // Maximum connections in the pool (adjust based on expected load)
   minPoolSize: 5,                     // Minimum connections maintained in the pool
   maxIdleTimeMS: 60000,               // How long a connection can be idle before closing
@@ -47,6 +53,9 @@ const connectionOptions: mongoose.ConnectOptions = {
   heartbeatFrequencyMS: 10000,        // How often to check server status
   autoIndex: config.isProduction ? false : true, // Disable auto-indexing in production
   autoCreate: config.isProduction ? false : true, // Disable auto collection creation in production
+  
+  // Connection management
+  family: 4,                          // Use IPv4, more reliable in some environments
 };
 
 /**
@@ -163,6 +172,54 @@ function setupConnectionMonitoring(): void {
     connection.retryCount = 0;
   });
   
+  // Monitor connection pool for leaks
+  const connectionPoolMonitor = setInterval(() => {
+    if (mongoose.connection.db) {
+      try {
+        // Get current state of MongoDB connection pool
+        // Use any type for now to access internal mongoose properties
+        const mongoConnection = mongoose.connection as any;
+        const activeConnections = mongoConnection.db?.topology?.connections?.length || 0;
+        connection.activeConnections = activeConnections;
+        
+        // Track maximum connections seen
+        if (activeConnections > connection.maxConnections) {
+          connection.maxConnections = activeConnections;
+        }
+        
+        // Log connection pool metrics periodically
+        const now = Date.now();
+        if (now - connection.lastConnectionCheck >= 300000) { // Every 5 minutes
+          logger.info('MongoDB connection pool status', {
+            activeConnections,
+            maxConnectionsSeen: connection.maxConnections,
+            poolSize: connectionOptions.maxPoolSize
+          });
+          connection.lastConnectionCheck = now;
+        }
+        
+        // Alert if approaching connection limit
+        const connectionLimit = connectionOptions.maxPoolSize || 100;
+        const usagePercent = (activeConnections / connectionLimit) * 100;
+        
+        if (usagePercent > 80) {
+          logger.warn('MongoDB connection pool approaching limit', {
+            activeConnections,
+            poolLimit: connectionLimit,
+            usagePercent: usagePercent.toFixed(2) + '%'
+          });
+        }
+      } catch (error) {
+        logger.error('Error monitoring connection pool', error);
+      }
+    }
+  }, 30000); // Check every 30 seconds
+  
+  // Ensure monitor is cleared on process exit
+  process.on('beforeExit', () => {
+    clearInterval(connectionPoolMonitor);
+  });
+  
   // Periodic connection health check
   if (config.isProduction) {
     setInterval(async () => {
@@ -201,25 +258,62 @@ export async function disconnectDB(): Promise<void> {
 }
 
 /**
- * Setup process signal handlers for graceful shutdown
+ * Setup graceful shutdown to properly close database connections
  */
 export function setupGracefulShutdown(): void {
   const shutdown = async (signal: string): Promise<void> => {
-    logger.info(`${signal} received, gracefully shutting down...`);
     try {
-      // Allow pending operations to complete (within timeout)
-      await mongoose.connection.close(false);
-      logger.info('MongoDB connections closed successfully');
-      process.exit(0);
+      logger.info(`${signal} received - cleaning up database connections`);
+      
+      // Clean up any pending transactions
+      // Use type assertion to access internal mongoose properties safely
+      const sessions = mongoose.connections.flatMap(conn => {
+        try {
+          const mongoConn = conn as any;
+          return Array.from(mongoConn.client?.topology?.sessions?.values() || []);
+        } catch {
+          return [];
+        }
+      });
+      
+      // End all active sessions
+      for (const session of sessions) {
+        try {
+          // Type guard and safer type assertion
+          if (session && 
+              typeof session === 'object' && 
+              'hasEnded' in session && 
+              session.hasEnded === false) {
+            // Use a more structured way to access the endSession method
+            const sessionWithMethods = session as { 
+              hasEnded: boolean; 
+              endSession: () => Promise<void> 
+            };
+            
+            await sessionWithMethods.endSession();
+          }
+        } catch (err) {
+          logger.error(`Error ending MongoDB session: ${err}`);
+        }
+      }
+      
+      // Close connections
+      await disconnectDB();
+      logger.info('All database connections closed cleanly');
+      
+      // Give time for final logging
+      setTimeout(() => {
+        process.exit(0);
+      }, 500);
     } catch (error) {
-      logger.error('Error during graceful shutdown:', error);
+      logger.error(`Error during database shutdown: ${error}`);
       process.exit(1);
     }
   };
-
-  // Handle termination signals
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  
+  // Register shutdown handlers
   process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGUSR2', () => shutdown('SIGUSR2')); // For Nodemon restarts
 }
 

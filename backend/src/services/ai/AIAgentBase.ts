@@ -32,7 +32,7 @@ export abstract class AIAgentBase<T extends IAgentEvaluationResult> implements I
    * @param result - The evaluation result
    * @returns The decision to pass, fail, or request review
    */
-  protected determineDecision(result: T): EvaluationDecision {
+  public determineDecision(result: T): EvaluationDecision {
     // Default implementation based on score
     // Derived classes should override this for more nuanced decisions
     if (result.score >= 70) {

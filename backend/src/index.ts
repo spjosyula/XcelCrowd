@@ -19,6 +19,8 @@ import { authenticate, conditionalAuthenticate } from './middlewares/auth.middle
 import swaggerUi from 'swagger-ui-express';
 import { setupSwagger } from './config/swagger.config';
 import { scheduler } from './utils/scheduler';
+// Import the AI agent system initialization
+import './services/ai';
 
 
 // Validate environment variables before starting

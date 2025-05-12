@@ -13,6 +13,7 @@ import { HTTP_STATUS } from '../../constants';
 import { MongoSanitizer } from '../../utils/mongo.sanitize';
 import { v4 as uuidv4 } from 'uuid';
 import { EvaluationPipelineController, evaluationPipelineController } from './EvaluationPipelineController';
+import { scheduler, Scheduler } from '../../utils/scheduler';
 
 // Configuration interface
 interface IConfig {
@@ -95,8 +96,6 @@ export class AIEvaluationService extends BaseService {
   // Standard evaluation duration in milliseconds (for estimation)
   private readonly STANDARD_EVALUATION_DURATION_MS: number;
   
-  // Score thresholds
-  private readonly ARCHITECT_REVIEW_THRESHOLD: number;
 
   /**
    * Constructor
@@ -108,7 +107,31 @@ export class AIEvaluationService extends BaseService {
     // Get configuration values with defaults
     this.MAX_RETRY_COUNT = config.evaluation?.maxRetryCount || 3;
     this.STANDARD_EVALUATION_DURATION_MS = config.evaluation?.standardDurationMs || 5 * 60 * 1000;
-    this.ARCHITECT_REVIEW_THRESHOLD = config.evaluation?.architectReviewThreshold || 70;
+
+    // Register for scheduler events
+    this.registerEventListeners();
+  }
+
+  /**
+   * Register for scheduler events to process evaluations when challenge deadlines are reached
+   */
+  private registerEventListeners(): void {
+    scheduler.on(Scheduler.EVENTS.CHALLENGE_DEADLINE_REACHED, async (challengeId: string) => {
+      try {
+        logger.info(`AI Evaluation service received challenge deadline event for ${challengeId}`);
+        
+        // Process the evaluations for this challenge
+        await this.processEvaluationsForChallenge(challengeId);
+        
+        logger.info(`Completed processing AI evaluations for challenge ${challengeId} via event handler`);
+      } catch (error) {
+        logger.error(`Error processing AI evaluations for challenge ${challengeId} from event`, {
+          challengeId,
+          error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined
+        });
+      }
+    });
   }
 
   /**
@@ -389,142 +412,171 @@ export class AIEvaluationService extends BaseService {
   }
 
   /**
-   * Process evaluation in a sequential workflow
-   * Each agent processes in order and passes results to the next agent
+   * Process the evaluation sequence for a solution
    * @param evaluationId - The ID of the evaluation to process
    * @param traceId - Trace ID for logging
    */
   private async processEvaluationSequence(evaluationId: string, traceId: string): Promise<void> {
     try {
-      logger.debug(`Starting sequential evaluation workflow`, { 
-        evaluationId,
-        traceId 
-      });
+      // Find the evaluation
+      const evaluation = await AIEvaluation.findById(evaluationId);
       
-      // Fetch the solution with full details
-      const evaluation = await AIEvaluation.findById(evaluationId)
-        .populate({
-          path: 'solution',
-          populate: {
-            path: 'challenge'
-          }
-        });
-      
-      if (!evaluation || !evaluation.solution) {
-        logger.error(`Evaluation or solution not found`, { 
+      if (!evaluation) {
+        logger.error(`Evaluation not found for processing`, {
           evaluationId,
-          traceId 
+          traceId
         });
-        
-        await this.updateEvaluationStatus(
-          evaluationId, 
-          'failed', 
-          traceId, 
-          { failureReason: 'Evaluation or solution not found' }
-        );
         return;
       }
       
-      const solution = evaluation.solution as ISolution;
-
-      // Execute the evaluation pipeline using the pipeline controller
-      const pipelineResult = await this.pipelineController.executePipeline(solution);
+      // Update status to in_progress
+      await this.updateEvaluationStatus(evaluationId, 'in_progress', traceId);
       
-      logger.info(`Pipeline execution completed`, {
-        evaluationId,
-        solutionId: solution._id?.toString(),
-        success: pipelineResult.success,
-        completed: pipelineResult.pipelineCompleted,
-        finalDecision: pipelineResult.finalDecision,
-        processingTimeMs: pipelineResult.processingTimeMs,
-        traceId: pipelineResult.traceId || traceId
-      });
+      // Get the solution for evaluation
+      const solution = await Solution.findById(evaluation.solution)
+        .populate('challenge', 'title description requirements deadline status');
       
-      // Save results to the evaluation record and update solution status in a single transaction
-      await this.withTransaction(async (session) => {
-        const evalToUpdate = await AIEvaluation.findById(evaluationId).session(session);
+      if (!solution) {
+        logger.error(`Solution not found for evaluation`, {
+          evaluationId,
+          solutionId: evaluation.solution.toString(),
+          traceId
+        });
         
-        if (!evalToUpdate) {
-          logger.warn(`Evaluation not found for updating results`, { 
+        await this.updateEvaluationStatus(evaluationId, 'failed', traceId, {
+          failureReason: 'Solution not found'
+        });
+        
+        return;
+      }
+      
+      // Check solution deadline before processing
+      const challenge = solution.challenge;
+      // Check if challenge is populated (is an object, not just an ID)
+      if (challenge && typeof challenge === 'object' && 'deadline' in challenge) {
+        const now = new Date();
+        const deadline = new Date(challenge.deadline as Date);
+        
+        // Only evaluate solutions after the deadline has passed
+        // This ensures all solutions are processed together and
+        // students can't resubmit after seeing AI feedback
+        if (now < deadline) {
+          logger.warn(`Challenge deadline has not passed yet, skipping evaluation`, {
             evaluationId,
-            traceId 
+            solutionId: solution._id?.toString(),
+            challengeId: challenge._id?.toString(),
+            deadline: deadline.toISOString(),
+            now: now.toISOString(),
+            traceId
           });
+          
+          await this.updateEvaluationStatus(evaluationId, 'pending', traceId, {
+            failureReason: 'Challenge deadline has not passed yet'
+          });
+          
           return;
         }
-        
-        // Update each result if available
-        if (pipelineResult.results.spamFiltering) {
-          evalToUpdate.spamFiltering = pipelineResult.results.spamFiltering.result;
-        }
-        
-        if (pipelineResult.results.requirementsCompliance) {
-          evalToUpdate.requirementsCompliance = pipelineResult.results.requirementsCompliance.result;
-        }
-        
-        if (pipelineResult.results.codeQuality) {
-          evalToUpdate.codeQuality = pipelineResult.results.codeQuality.result;
-        }
-        
-        if (pipelineResult.results.scoringFeedback) {
-          evalToUpdate.scoringFeedback = pipelineResult.results.scoringFeedback.result;
-        }
-        
-        // Update metadata
-        evalToUpdate.metadata = {
-          ...(evalToUpdate.metadata || {}),
-          pipelineResult: {
-            finalDecision: pipelineResult.finalDecision,
-            pipelineCompleted: pipelineResult.pipelineCompleted,
-            processingTimeMs: pipelineResult.processingTimeMs,
-            stoppedAt: pipelineResult.stoppedAt,
-            reason: pipelineResult.reason
-          }
-        };
-        
-        // Get the metrics from the pipeline results
-        const metrics = this.pipelineController.getMetricsFromResults(pipelineResult.results);
-        evalToUpdate.metadata.metrics = metrics;
-        
-        // Update evaluation status
-        if (!pipelineResult.success) {
-          evalToUpdate.status = 'failed';
-          evalToUpdate.failureReason = pipelineResult.reason || 'Pipeline execution failed';
-        } else {
-          evalToUpdate.status = 'completed';
-          evalToUpdate.completedAt = new Date();
-        }
-        
-        await evalToUpdate.save({ session });
-        
-        // Also update the solution status in the same transaction
-        await this.updateSolutionStatusFromPipelineResult(solution, pipelineResult, session);
-      });
+      }
       
-    } catch (error) {
-      logger.error(`Error in evaluation sequential processing`, {
+      // Log processing start
+      logger.info(`Starting evaluation processing sequence`, {
         evaluationId,
-        error: error instanceof Error ? error.message : String(error),
-        stack: error instanceof Error ? error.stack : undefined,
+        solutionId: solution._id?.toString(),
         traceId
       });
       
-      await this.updateEvaluationStatus(
+      // Use iterative pipeline to ensure thorough evaluation
+      // The pipeline will analyze the challenge and solution multiple times
+      // for better understanding before making decisions
+      const pipelineResult = await this.pipelineController.executeIterativePipeline(solution, 2);
+      
+      if (!pipelineResult.success) {
+        logger.error(`Evaluation pipeline failed`, {
+          evaluationId,
+          solutionId: solution._id?.toString(),
+          reason: pipelineResult.reason,
+          stoppedAt: pipelineResult.stoppedAt,
+          traceId
+        });
+        
+        await this.updateEvaluationStatus(evaluationId, 'failed', traceId, {
+          failureReason: pipelineResult.reason || 'Pipeline failed'
+        });
+        
+        // Update solution status based on where the pipeline failed
+        await this.withTransaction(async (session) => {
+          await this.updateSolutionStatusFromPipelineResult(solution, pipelineResult, session);
+        });
+        
+        return;
+      }
+      
+      // Store pipeline results in evaluation
+      const updateData: Record<string, any> = {};
+      
+      // Map pipeline results to evaluation fields
+      // Try both the new agent naming convention and the old one
+      if (pipelineResult.results.SpamFilteringAgent) {
+        updateData.spamFiltering = pipelineResult.results.SpamFilteringAgent.result;
+      } else if (pipelineResult.results.spamFiltering) {
+        updateData.spamFiltering = pipelineResult.results.spamFiltering.result;
+      }
+      
+      if (pipelineResult.results.RequirementsComplianceAgent) {
+        updateData.requirementsCompliance = pipelineResult.results.RequirementsComplianceAgent.result;
+      } else if (pipelineResult.results.requirementsCompliance) {
+        updateData.requirementsCompliance = pipelineResult.results.requirementsCompliance.result;
+      }
+      
+      if (pipelineResult.results.CodeQualityAgent) {
+        updateData.codeQuality = pipelineResult.results.CodeQualityAgent.result;
+      } else if (pipelineResult.results.codeQuality) {
+        updateData.codeQuality = pipelineResult.results.codeQuality.result;
+      }
+      
+      if (pipelineResult.results.ScoringFeedbackAgent) {
+        updateData.scoringFeedback = pipelineResult.results.ScoringFeedbackAgent.result;
+      } else if (pipelineResult.results.scoringFeedback) {
+        updateData.scoringFeedback = pipelineResult.results.scoringFeedback.result;
+      }
+      
+      // Update evaluation status and data
+      await this.updateEvaluationStatus(evaluationId, 'completed', traceId, {
+        ...updateData,
+        completedAt: new Date()
+      });
+      
+      // Update solution status with evaluation results
+      await this.withTransaction(async (session) => {
+        await this.updateSolutionStatusFromPipelineResult(solution, pipelineResult, session);
+      });
+      
+      logger.info(`Evaluation processing sequence completed successfully`, {
         evaluationId,
-        'failed',
-        traceId, 
-        { 
-          failureReason: error instanceof Error ? error.message : 'Unknown error',
-          failedAt: new Date()
-        }
-      );
+        solutionId: solution._id?.toString(),
+        traceId,
+        processingTimeMs: pipelineResult.processingTimeMs
+      });
+    } catch (error) {
+      logger.error(`Error processing evaluation sequence`, {
+        evaluationId,
+        traceId,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      
+      // Update evaluation status to failed
+      await this.updateEvaluationStatus(evaluationId, 'failed', traceId, {
+        failureReason: error instanceof Error ? error.message : String(error)
+      });
     }
   }
-  
+
   /**
    * Update solution status based on pipeline result
    * @param solution - The solution to update
-   * @param pipelineResult - The result from the pipeline
-   * @param session - Mongoose session for transactional updates
+   * @param pipelineResult - The pipeline result
+   * @param session - MongoDB session for transactions
    */
   private async updateSolutionStatusFromPipelineResult(
     solution: ISolution,
@@ -532,67 +584,93 @@ export class AIEvaluationService extends BaseService {
     session: ClientSession
   ): Promise<void> {
     try {
-      // Determine the new status based on the pipeline result
-      let newStatus: SolutionStatus = solution.status;
-      let feedback: string | undefined = undefined;
+      // Extract key metrics
+      const metrics = this.pipelineController.getMetricsFromResults(pipelineResult.results);
       
-      // Get the last agent result for feedback
-      const lastAgentResult = pipelineResult.results.scoringFeedback ||
-        pipelineResult.results.codeQuality ||
-        pipelineResult.results.requirementsCompliance ||
-        pipelineResult.results.spamFiltering;
+      // Prepare solution update
+      const updateData: Record<string, any> = {
+        lastUpdatedAt: new Date()
+      };
       
-      if (lastAgentResult) {
-        feedback = lastAgentResult.result.feedback;
-      }
-      
-      // Determine status based on final decision
+      // Determine solution status based on final decision
       switch (pipelineResult.finalDecision) {
-        case EvaluationDecision.FAIL:
-          newStatus = SolutionStatus.REJECTED;
-          break;
-        
-        case EvaluationDecision.REVIEW:
-          // If review is requested, put in queue for architect review
-          newStatus = SolutionStatus.CLAIMED;
-          break;
-        
         case EvaluationDecision.PASS:
-          // If passing with good score, mark for architect review
-          if (pipelineResult.results.scoringFeedback && 
-              pipelineResult.results.scoringFeedback.result.score >= this.ARCHITECT_REVIEW_THRESHOLD) {
-            newStatus = SolutionStatus.CLAIMED;
+          // Solution passed all checks and is sent to architect for review
+          updateData.status = SolutionStatus.UNDER_REVIEW;
+          updateData.aiScore = metrics.averageScore;
+          
+          // Prepare solution for architect review
+          solution = this.pipelineController.prepareSolutionForArchitectReview(solution, pipelineResult);
+          
+          // Store the prepared solution data
+          Object.assign(updateData, {
+            feedback: solution.feedback,
+            evaluationScores: solution.evaluationScores || {},
+            reviewPriority: solution.reviewPriority || 'medium'
+          });
+          
+          logger.info(`Solution passed AI evaluation and is ready for architect review`, {
+            solutionId: solution._id?.toString(),
+            score: metrics.averageScore
+          });
+          break;
+          
+        case EvaluationDecision.FAIL:
+          // Solution failed at spam filtering or requirements compliance stage
+          // Student will receive feedback and can't resubmit after the deadline
+          updateData.status = SolutionStatus.REJECTED;
+          updateData.rejectionReason = pipelineResult.reason || 'Failed AI evaluation';
+          
+          // Set feedback from the failing stage
+          if (pipelineResult.stoppedAt === 'SpamFilteringAgent' && pipelineResult.results.SpamFilteringAgent) {
+            updateData.feedback = pipelineResult.results.SpamFilteringAgent.result.feedback;
+          } else if (pipelineResult.stoppedAt === 'spamFiltering' && pipelineResult.results.spamFiltering) {
+            updateData.feedback = pipelineResult.results.spamFiltering.result.feedback;
+          } else if (pipelineResult.stoppedAt === 'RequirementsComplianceAgent' && pipelineResult.results.RequirementsComplianceAgent) {
+            updateData.feedback = pipelineResult.results.RequirementsComplianceAgent.result.feedback;
+          } else if (pipelineResult.stoppedAt === 'requirementsCompliance' && pipelineResult.results.requirementsCompliance) {
+            updateData.feedback = pipelineResult.results.requirementsCompliance.result.feedback;
           } else {
-            // Otherwise, approve automatically 
-            newStatus = SolutionStatus.APPROVED;
+            updateData.feedback = 'Your solution did not meet the required criteria.';
           }
+          
+          logger.info(`Solution rejected by AI evaluation`, {
+            solutionId: solution._id?.toString(),
+            stoppedAt: pipelineResult.stoppedAt,
+            reason: pipelineResult.reason
+          });
+          break;
+          
+        case EvaluationDecision.REVIEW:
+        case EvaluationDecision.ERROR:
+          // Mark for architect review in case of uncertainty or error
+          updateData.status = SolutionStatus.UNDER_REVIEW;
+          updateData.reviewPriority = 'high'; // Prioritize manual review for uncertain cases
+          updateData.notes = `Flagged for review: ${pipelineResult.reason || 'Evaluation uncertainty'}`;
+          
+          logger.info(`Solution marked for priority architect review due to evaluation uncertainty`, {
+            solutionId: solution._id?.toString(),
+            finalDecision: pipelineResult.finalDecision
+          });
           break;
       }
       
-      // Only update if status has changed
-      if (newStatus !== solution.status) {
-        await Solution.findByIdAndUpdate(solution._id, {
-          status: newStatus,
-          feedback: feedback || 'Evaluated by AI system'
-        }).session(session);
-        
-        logger.info(`Updated solution status based on pipeline result`, {
-          solutionId: solution._id?.toString(),
-          previousStatus: solution.status,
-          newStatus,
-          finalDecision: pipelineResult.finalDecision
-        });
-      }
+      // Update the solution
+      await Solution.findByIdAndUpdate(
+        solution._id,
+        updateData,
+        { new: true, session }
+      );
     } catch (error) {
       logger.error(`Error updating solution status from pipeline result`, {
         solutionId: solution._id?.toString(),
         error: error instanceof Error ? error.message : String(error)
       });
-      // Throw error to ensure transaction rollback
+      
       throw error;
     }
   }
-  
+
   /**
    * Get the evaluation result for a solution
    * @param solutionId - The ID of the solution
