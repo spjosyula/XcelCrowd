@@ -23,7 +23,7 @@ export class MongoSanitizer {
   private static readonly MAX_ARRAY_LENGTH = 100; // Prevent DoS via large arrays
 
 
-  
+
   /**
    * Sanitizes a MongoDB ObjectId string
    * @param id - The ID to sanitize
@@ -216,169 +216,169 @@ export class MongoSanitizer {
  * @throws ApiError with detailed error information
  */
   static sanitizeHtml(
-  html: unknown,
-  options: {
-    fieldName?: string;
-    maxLength?: number;
-    allowedTags?: string[];
-    allowedAttributes?: Record<string, string[]>;
-    allowedSchemes?: string[];
-    stripAllTags?: boolean;
-    allowIframes?: boolean;
-    requireNoopener?: boolean;
-    logSuspiciousContent?: boolean;
-  } = {}
-): string {
-  const {
-    fieldName = 'HTML content',
-    maxLength = 100000,
-    allowedTags = ['p', 'b', 'i', 'em', 'strong', 'a', 'ul', 'ol', 'li', 'br', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'code', 'pre', 'hr', 'span', 'div', 'table', 'thead', 'tbody', 'tr', 'th', 'td'],
-    allowedAttributes = {
-      a: ['href', 'title', 'target', 'rel'],
-      img: ['src', 'alt', 'title', 'width', 'height'],
-      div: ['class', 'id', 'style'],
-      span: ['class', 'id', 'style'],
-      table: ['class', 'id', 'style', 'border', 'cellpadding', 'cellspacing'],
-      th: ['scope', 'colspan', 'rowspan', 'style', 'class'],
-      td: ['colspan', 'rowspan', 'style', 'class'],
-      p: ['class', 'style'],
-      code: ['class'],
-      pre: ['class']
-    },
-    allowedSchemes = ['http', 'https', 'mailto', 'tel'],
-    stripAllTags = false,
-    allowIframes = false,
-    requireNoopener = true,
-    logSuspiciousContent = true
-  } = options;
+    html: unknown,
+    options: {
+      fieldName?: string;
+      maxLength?: number;
+      allowedTags?: string[];
+      allowedAttributes?: Record<string, string[]>;
+      allowedSchemes?: string[];
+      stripAllTags?: boolean;
+      allowIframes?: boolean;
+      requireNoopener?: boolean;
+      logSuspiciousContent?: boolean;
+    } = {}
+  ): string {
+    const {
+      fieldName = 'HTML content',
+      maxLength = 100000,
+      allowedTags = ['p', 'b', 'i', 'em', 'strong', 'a', 'ul', 'ol', 'li', 'br', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'code', 'pre', 'hr', 'span', 'div', 'table', 'thead', 'tbody', 'tr', 'th', 'td'],
+      allowedAttributes = {
+        a: ['href', 'title', 'target', 'rel'],
+        img: ['src', 'alt', 'title', 'width', 'height'],
+        div: ['class', 'id', 'style'],
+        span: ['class', 'id', 'style'],
+        table: ['class', 'id', 'style', 'border', 'cellpadding', 'cellspacing'],
+        th: ['scope', 'colspan', 'rowspan', 'style', 'class'],
+        td: ['colspan', 'rowspan', 'style', 'class'],
+        p: ['class', 'style'],
+        code: ['class'],
+        pre: ['class']
+      },
+      allowedSchemes = ['http', 'https', 'mailto', 'tel'],
+      stripAllTags = false,
+      allowIframes = false,
+      requireNoopener = true,
+      logSuspiciousContent = true
+    } = options;
 
-  try {
-    // Validate input type and length
-    if (html === null || html === undefined) {
-      return '';
-    }
+    try {
+      // Validate input type and length
+      if (html === null || html === undefined) {
+        return '';
+      }
 
-    let htmlString = String(html);
+      let htmlString = String(html);
 
-    // Apply length limits to prevent DoS attacks
-    if (htmlString.length > maxLength) {
-      logger.warn(`HTML content exceeded maximum length (${htmlString.length} > ${maxLength})`, {
-        contentLength: htmlString.length,
-        maxAllowed: maxLength,
-        fieldName
-      });
+      // Apply length limits to prevent DoS attacks
+      if (htmlString.length > maxLength) {
+        logger.warn(`HTML content exceeded maximum length (${htmlString.length} > ${maxLength})`, {
+          contentLength: htmlString.length,
+          maxAllowed: maxLength,
+          fieldName
+        });
+
+        throw new ApiError(
+          HTTP_STATUS.BAD_REQUEST,
+          `${fieldName} exceeds maximum allowed length (${maxLength} characters)`,
+          true,
+          'HTML_CONTENT_TOO_LONG'
+        );
+      }
+
+      // Log suspicious content if enabled
+      if (logSuspiciousContent) {
+        const suspiciousPatterns = [
+          /<script/i, /javascript:/i, /data:text\/html/i, /expression\s*\(/i,
+          /eval\s*\(/i, /vbscript:/i, /document\./i, /window\./i, /on\w+=/i
+        ];
+
+        const suspiciousMatches = suspiciousPatterns
+          .map(pattern => pattern.test(htmlString) ? pattern.toString() : null)
+          .filter(Boolean);
+
+        if (suspiciousMatches.length > 0) {
+          logger.warn(`Potentially malicious HTML content detected`, {
+            patterns: suspiciousMatches,
+            fieldName,
+            contentPreview: htmlString.substring(0, 200) + (htmlString.length > 200 ? '...' : '')
+          });
+        }
+      }
+
+      // Option to strip all HTML tags
+      if (stripAllTags) {
+        // Instead of regex, use DOMPurify with all tags forbidden
+        return DOMPurify.sanitize(htmlString, { ALLOWED_TAGS: [] });
+      }
+
+      // Set up DOMPurify configuration based on our options
+      const purifyConfig: any = {
+        ALLOWED_TAGS: allowedTags,
+        ALLOWED_ATTR: [],
+        ALLOWED_URI_REGEXP: new RegExp(`^(?:${allowedSchemes.join('|')})`, 'i'),
+        ADD_TAGS: allowIframes ? ['iframe'] : [],
+        ADD_ATTR: [],
+        FORCE_BODY: true,
+        USE_PROFILES: { html: true }
+      };
+
+      // Add allowed attributes
+      for (const [tag, attrs] of Object.entries(allowedAttributes)) {
+        attrs.forEach(attr => {
+          if (!purifyConfig.ALLOWED_ATTR.includes(attr)) {
+            purifyConfig.ALLOWED_ATTR.push(attr);
+          }
+        });
+      }
+
+      // If iframes are allowed, add iframe attributes
+      if (allowIframes) {
+        ['src', 'width', 'height', 'frameborder', 'allowfullscreen', 'allow', 'title'].forEach(attr => {
+          if (!purifyConfig.ALLOWED_ATTR.includes(attr)) {
+            purifyConfig.ALLOWED_ATTR.push(attr);
+          }
+        });
+      }
+
+      // Handle target="_blank" with proper security
+      if (requireNoopener) {
+        purifyConfig.FORBID_ATTR = ['target'];
+        purifyConfig.ADD_ATTR = ['target', 'rel'];
+
+        // Add hook to ensure proper rel attribute for target="_blank"
+        purifyConfig.HOOKS = {
+          afterSanitizeAttributes: (node: Element) => {
+            if (node.tagName === 'A' && node.hasAttribute('target') && node.getAttribute('target') === '_blank') {
+              node.setAttribute('rel', 'noopener noreferrer');
+            }
+          }
+        };
+      }
+
+      // Perform the actual sanitization with DOMPurify
+      const sanitizedHtml = DOMPurify.sanitize(htmlString, purifyConfig);
+
+      // Final safety check
+      const dangerousContent = /<script|javascript:|data:text\/html|eval\s*\(|expression\s*\(/i.test(String(sanitizedHtml));
+      if (dangerousContent) {
+        logger.error(`Sanitization failed to remove all potentially dangerous content`, {
+          fieldName,
+          beforeLength: htmlString.length,
+          afterLength: String(sanitizedHtml).length
+        });
+
+        // If final output still contains suspicious patterns, fall back to complete stripping
+        return DOMPurify.sanitize(String(sanitizedHtml), { ALLOWED_TAGS: [] });
+      }
+
+      return String(sanitizedHtml);
+    } catch (error) {
+      logger.error(`Error sanitizing HTML content:`, error);
+
+      // If any error occurs during sanitization, return empty string or throw
+      if (error instanceof ApiError) {
+        throw error;
+      }
 
       throw new ApiError(
         HTTP_STATUS.BAD_REQUEST,
-        `${fieldName} exceeds maximum allowed length (${maxLength} characters)`,
+        `Failed to sanitize ${fieldName}: ${error instanceof Error ? error.message : String(error)}`,
         true,
-        'HTML_CONTENT_TOO_LONG'
+        'HTML_SANITIZATION_ERROR'
       );
     }
-
-    // Log suspicious content if enabled
-    if (logSuspiciousContent) {
-      const suspiciousPatterns = [
-        /<script/i, /javascript:/i, /data:text\/html/i, /expression\s*\(/i,
-        /eval\s*\(/i, /vbscript:/i, /document\./i, /window\./i, /on\w+=/i
-      ];
-      
-      const suspiciousMatches = suspiciousPatterns
-        .map(pattern => pattern.test(htmlString) ? pattern.toString() : null)
-        .filter(Boolean);
-
-      if (suspiciousMatches.length > 0) {
-        logger.warn(`Potentially malicious HTML content detected`, {
-          patterns: suspiciousMatches,
-          fieldName,
-          contentPreview: htmlString.substring(0, 200) + (htmlString.length > 200 ? '...' : '')
-        });
-      }
-    }
-
-    // Option to strip all HTML tags
-    if (stripAllTags) {
-      // Instead of regex, use DOMPurify with all tags forbidden
-      return DOMPurify.sanitize(htmlString, { ALLOWED_TAGS: [] });
-    }
-
-    // Set up DOMPurify configuration based on our options
-    const purifyConfig: any = {
-      ALLOWED_TAGS: allowedTags,
-      ALLOWED_ATTR: [],
-      ALLOWED_URI_REGEXP: new RegExp(`^(?:${allowedSchemes.join('|')})`, 'i'),
-      ADD_TAGS: allowIframes ? ['iframe'] : [],
-      ADD_ATTR: [],
-      FORCE_BODY: true,
-      USE_PROFILES: { html: true }
-    };
-
-    // Add allowed attributes
-    for (const [tag, attrs] of Object.entries(allowedAttributes)) {
-      attrs.forEach(attr => {
-        if (!purifyConfig.ALLOWED_ATTR.includes(attr)) {
-          purifyConfig.ALLOWED_ATTR.push(attr);
-        }
-      });
-    }
-
-    // If iframes are allowed, add iframe attributes
-    if (allowIframes) {
-      ['src', 'width', 'height', 'frameborder', 'allowfullscreen', 'allow', 'title'].forEach(attr => {
-        if (!purifyConfig.ALLOWED_ATTR.includes(attr)) {
-          purifyConfig.ALLOWED_ATTR.push(attr);
-        }
-      });
-    }
-
-    // Handle target="_blank" with proper security
-    if (requireNoopener) {
-      purifyConfig.FORBID_ATTR = ['target'];
-      purifyConfig.ADD_ATTR = ['target', 'rel'];
-      
-      // Add hook to ensure proper rel attribute for target="_blank"
-      purifyConfig.HOOKS = {
-        afterSanitizeAttributes: (node: Element) => {
-          if (node.tagName === 'A' && node.hasAttribute('target') && node.getAttribute('target') === '_blank') {
-            node.setAttribute('rel', 'noopener noreferrer');
-          }
-        }
-      };
-    }
-
-    // Perform the actual sanitization with DOMPurify
-    const sanitizedHtml = DOMPurify.sanitize(htmlString, purifyConfig);
-
-    // Final safety check
-    const dangerousContent = /<script|javascript:|data:text\/html|eval\s*\(|expression\s*\(/i.test(String(sanitizedHtml));
-    if (dangerousContent) {
-      logger.error(`Sanitization failed to remove all potentially dangerous content`, {
-        fieldName,
-        beforeLength: htmlString.length,
-        afterLength: String(sanitizedHtml).length
-      });
-      
-      // If final output still contains suspicious patterns, fall back to complete stripping
-      return DOMPurify.sanitize(String(sanitizedHtml), { ALLOWED_TAGS: [] });
-    }
-
-    return String(sanitizedHtml);
-  } catch (error) {
-    logger.error(`Error sanitizing HTML content:`, error);
-
-    // If any error occurs during sanitization, return empty string or throw
-    if (error instanceof ApiError) {
-      throw error;
-    }
-
-    throw new ApiError(
-      HTTP_STATUS.BAD_REQUEST,
-      `Failed to sanitize ${fieldName}: ${error instanceof Error ? error.message : String(error)}`,
-      true,
-      'HTML_SANITIZATION_ERROR'
-    );
   }
-}
 
   /**
    * Safely creates an equality condition for MongoDB queries
@@ -1032,8 +1032,8 @@ export class MongoSanitizer {
       url.hostname = url.hostname.toLowerCase();
 
       // Check for potentially dangerous content in URL parameters
-      const hasScriptInParams = /[?&].*script.*=/.test(url.search) ||
-        /[?&].*<.*>.*=/.test(url.search);
+      const hasScriptInParams = /[?&][^=]*script[^=]*=/.test(url.search) ||
+        /[?&][^=]*<[^=]*>[^=]*=/.test(url.search);
       if (hasScriptInParams) {
         logger.warn(`Potentially malicious script content in URL params`, {
           submissionUrl: urlString,
