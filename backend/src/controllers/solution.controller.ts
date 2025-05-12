@@ -1,11 +1,12 @@
 import { Response, NextFunction } from 'express';
 import { SolutionService, solutionService } from '../services/solution.service'; 
-import { HTTP_STATUS, SolutionStatus, UserRole } from '../models/interfaces';
+import { SolutionStatus, UserRole } from '../models/interfaces';
 import { BaseController } from './BaseController';
 import { AuthRequest } from '../types/request.types';
 import { catchAsync } from '../utils/catch.async';
 import { MongoSanitizer } from '../utils/mongo.sanitize';
 import { logger } from '../utils/logger';
+import { HTTP_STATUS } from '../constants';
 
 
 /**

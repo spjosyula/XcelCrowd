@@ -1,6 +1,6 @@
 import { logger } from '../../../utils/logger';
 import { ApiError } from '../../../utils/api.error';
-import { HTTP_STATUS } from '../../../models/interfaces';
+import { HTTP_STATUS } from '../../../constants';
 import { v4 as uuidv4 } from 'uuid';
 import { 
   ILLMProvider, 

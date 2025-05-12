@@ -5,7 +5,6 @@ import { HTTP_STATUS } from '../constants';
 import { logger } from '../utils/logger';
 import { executePaginatedQuery, PaginationOptions, PaginationResult } from '../utils/paginationUtils';
 import { BaseService } from './BaseService';
-import { escapeRegExp } from 'lodash';
 import { MongoSanitizer } from '../utils/mongo.sanitize';
 
 /**

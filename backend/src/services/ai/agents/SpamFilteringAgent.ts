@@ -6,7 +6,7 @@ import {
 } from '../../../models/interfaces';
 import { logger } from '../../../utils/logger';
 import { ApiError } from '../../../utils/api.error';
-import { HTTP_STATUS } from '../../../models/interfaces';
+import { HTTP_STATUS } from '../../../constants';
 
 // Define common patterns for spam repositories
 import SPAM_PATTERNS from '../../../constants/spam.patterns';

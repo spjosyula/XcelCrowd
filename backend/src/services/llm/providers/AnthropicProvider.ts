@@ -1,5 +1,4 @@
 import axios from 'axios';
-import { setTimeout } from 'timers/promises';
 import { AbstractLLMProvider } from './AbstractLLMProvider';
 import { 
   ILLMTextRequest, 
@@ -7,8 +6,6 @@ import {
   ILLMEmbeddingRequest, 
   ILLMEmbeddingResponse,
   ILLMStreamChunk,
-  ILLMMessage,
-  ILLMFunction
 } from '../interfaces/ILLMRequest';
 import { 
   IModelCapabilities, 
@@ -19,8 +16,7 @@ import { LLMProvider, LLMTokenManager } from '../../../config/llm.token.manager'
 import { config } from '../../../config/config.env.validation';
 import { logger } from '../../../utils/logger';
 import { ApiError } from '../../../utils/api.error';
-import { HTTP_STATUS } from '../../../models/interfaces';
-
+import { HTTP_STATUS } from '../../../constants';
 /**
  * Anthropic provider implementation
  * Supports Claude 3 models (Opus, Sonnet, Haiku)

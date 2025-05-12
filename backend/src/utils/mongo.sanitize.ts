@@ -201,6 +201,228 @@ export class MongoSanitizer {
   }
 
   /**
+ * Sanitizes HTML content with comprehensive XSS protection
+ * Uses a whitelist approach to ensure only safe HTML elements and attributes are permitted
+ * @param html - The HTML content to sanitize
+ * @param options - Configuration options for HTML sanitization
+ * @returns Safely sanitized HTML string
+ * @throws ApiError with detailed error information
+ */
+  static sanitizeHtml(
+    html: unknown,
+    options: {
+      fieldName?: string;
+      maxLength?: number;
+      allowedTags?: string[];
+      allowedAttributes?: Record<string, string[]>;
+      allowedSchemes?: string[];
+      stripAllTags?: boolean;
+      allowIframes?: boolean;
+      requireNoopener?: boolean;
+      logSuspiciousContent?: boolean;
+    } = {}
+  ): string {
+    const {
+      fieldName = 'HTML content',
+      maxLength = 100000,
+      allowedTags = ['p', 'b', 'i', 'em', 'strong', 'a', 'ul', 'ol', 'li', 'br', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'code', 'pre', 'hr', 'span', 'div', 'table', 'thead', 'tbody', 'tr', 'th', 'td'],
+      allowedAttributes = {
+        a: ['href', 'title', 'target', 'rel'],
+        img: ['src', 'alt', 'title', 'width', 'height'],
+        div: ['class', 'id', 'style'],
+        span: ['class', 'id', 'style'],
+        table: ['class', 'id', 'style', 'border', 'cellpadding', 'cellspacing'],
+        th: ['scope', 'colspan', 'rowspan', 'style', 'class'],
+        td: ['colspan', 'rowspan', 'style', 'class'],
+        p: ['class', 'style'],
+        code: ['class'],
+        pre: ['class']
+      },
+      allowedSchemes = ['http', 'https', 'mailto', 'tel'],
+      stripAllTags = false,
+      allowIframes = false,
+      requireNoopener = true,
+      logSuspiciousContent = true
+    } = options;
+
+    try {
+      // Validate input type and length
+      if (html === null || html === undefined) {
+        return '';
+      }
+
+      let htmlString = String(html);
+
+      // Apply length limits to prevent DoS attacks
+      if (htmlString.length > maxLength) {
+        logger.warn(`HTML content exceeded maximum length (${htmlString.length} > ${maxLength})`, {
+          contentLength: htmlString.length,
+          maxAllowed: maxLength,
+          fieldName
+        });
+
+        throw new ApiError(
+          HTTP_STATUS.BAD_REQUEST,
+          `${fieldName} exceeds maximum allowed length (${maxLength} characters)`,
+          true,
+          'HTML_CONTENT_TOO_LONG'
+        );
+      }
+
+      // Check for potentially malicious content patterns
+      const suspiciousPatterns = [
+        /<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/i,                           // <script> tags
+        /javascript:/i,                                                                  // javascript: protocol
+        /data:text\/html/i,                                                             // data: text/html URIs
+        /expression\s*\(/i,                                                             // CSS expressions
+        /eval\s*\(/i,                                                                   // eval()
+        /vbscript:/i,                                                                   // vbscript: protocol
+        /document\.(?:cookie|write|open|execute|createelement|domain|referrer)/i,       // DOM manipulation
+        /window\.(?:location|open|eval|execScript)/i,                                   // window object exploitation
+        /on(?:load|click|mouseover|mouseout|mousedown|mouseup|focus|blur|error|submit)/i // Inline event handlers
+      ];
+
+      // Check for suspicious patterns and log if found
+      if (logSuspiciousContent) {
+        const suspiciousMatches = suspiciousPatterns
+          .map(pattern => pattern.test(htmlString) ? pattern.toString() : null)
+          .filter(Boolean);
+
+        if (suspiciousMatches.length > 0) {
+          logger.warn(`Potentially malicious HTML content detected`, {
+            patterns: suspiciousMatches,
+            fieldName,
+            contentPreview: htmlString.substring(0, 200) + (htmlString.length > 200 ? '...' : '')
+          });
+        }
+      }
+
+      // Option to strip all HTML tags
+      if (stripAllTags) {
+        // Simple tag removal
+        return htmlString.replace(/<[^>]*>?/gm, '');
+      }
+
+      // Add iframe to allowed tags if specified
+      const finalAllowedTags = [...allowedTags];
+      if (allowIframes) {
+        finalAllowedTags.push('iframe');
+        // If iframes are allowed, set default iframe attributes
+        allowedAttributes.iframe = ['src', 'width', 'height', 'frameborder', 'allowfullscreen', 'allow', 'title'];
+      }
+
+      // Main sanitization process
+      let sanitizedHtml = htmlString;
+
+      // 1. Remove all disallowed tags
+      const allowedTagsRegex = new RegExp(`<(?!\\/?(${finalAllowedTags.join('|')})\\b)[^>]+>`, 'gi');
+      sanitizedHtml = sanitizedHtml.replace(allowedTagsRegex, '');
+
+      // 2. Process allowed tags and their attributes
+      for (const tag of finalAllowedTags) {
+        const tagAttrsToKeep = allowedAttributes[tag] || [];
+        const tagRegex = new RegExp(`<${tag}\\b([^>]*)>`, 'gi');
+
+        sanitizedHtml = sanitizedHtml.replace(tagRegex, (match, attributes) => {
+          // 2.1 Parse attributes
+          let attrsString = ' ';
+          const attrRegex = /(\S+)=["']?((?:.(?!["']?\s+(?:\S+)=|[>"']))+.)["']?/gi;
+          let attrMatch;
+
+          while ((attrMatch = attrRegex.exec(attributes)) !== null) {
+            const [fullMatch, attrName, attrValue] = attrMatch;
+            const lcAttrName = attrName.toLowerCase();
+
+            // 2.2 Check if attribute is allowed for this tag
+            if (tagAttrsToKeep.includes(lcAttrName)) {
+              let safeValue = attrValue;
+
+              // 2.3 Special handling for URLs
+              if (['src', 'href'].includes(lcAttrName)) {
+                // URL validation
+                const urlSchemeRegex = /^([a-zA-Z]+):/;
+                const schemeMatch = urlSchemeRegex.exec(safeValue);
+
+                if (schemeMatch) {
+                  const scheme = schemeMatch[1].toLowerCase();
+                  if (!allowedSchemes.includes(scheme)) {
+                    continue; // Skip this attribute
+                  }
+                }
+
+                // Escape any HTML entities in URLs
+                safeValue = safeValue
+                  .replace(/&/g, '&amp;')
+                  .replace(/</g, '&lt;')
+                  .replace(/>/g, '&gt;')
+                  .replace(/"/g, '&quot;')
+                  .replace(/'/g, '&#39;');
+              }
+
+              // 2.4 Special handling for style attributes
+              if (lcAttrName === 'style') {
+                // Remove potentially dangerous CSS
+                safeValue = safeValue.replace(/(expression|eval|javascript|behavior|vbscript)[\s\r\n\v\f]*\(.*\)/gi, '');
+                safeValue = safeValue.replace(/url\s*\(\s*['"](.*)['"]\s*\)/gi, (match, url) => {
+                  const urlSchemeRegex = /^([a-zA-Z]+):/;
+                  const schemeMatch = urlSchemeRegex.exec(url);
+
+                  if (schemeMatch) {
+                    const scheme = schemeMatch[1].toLowerCase();
+                    if (!allowedSchemes.includes(scheme)) {
+                      return ''; // Remove dangerous URL
+                    }
+                  }
+
+                  return match; // Keep safe URL
+                });
+              }
+
+              // 2.5 Special handling for a tags: require noopener for external links
+              if (tag === 'a' && lcAttrName === 'target' && safeValue === '_blank' && requireNoopener) {
+                attrsString += 'rel="noopener noreferrer" ';
+              }
+
+              attrsString += `${lcAttrName}="${safeValue}" `;
+            }
+          }
+
+          return `<${tag}${attrsString.trim()}>`;
+        });
+      }
+
+      // 3. Final safety check for any remaining dangerous content
+      const finalSafetyCheck = suspiciousPatterns.some(pattern => pattern.test(sanitizedHtml));
+      if (finalSafetyCheck) {
+        logger.error(`Sanitization failed to remove all potentially dangerous content`, {
+          fieldName,
+          beforeLength: htmlString.length,
+          afterLength: sanitizedHtml.length
+        });
+
+        // If final output still contains suspicious patterns, fall back to complete stripping
+        return sanitizedHtml.replace(/<[^>]*>?/gm, '');
+      }
+
+      return sanitizedHtml;
+    } catch (error) {
+      logger.error(`Error sanitizing HTML content:`, error);
+
+      // If any error occurs during sanitization, return empty string or throw
+      if (error instanceof ApiError) {
+        throw error;
+      }
+
+      throw new ApiError(
+        HTTP_STATUS.BAD_REQUEST,
+        `Failed to sanitize ${fieldName}: ${error instanceof Error ? error.message : String(error)}`,
+        true,
+        'HTML_SANITIZATION_ERROR'
+      );
+    }
+  }
+
+  /**
    * Safely creates an equality condition for MongoDB queries
    * Prevents NoSQL injection by ensuring the value is treated as a literal
    * @param value - The value to use in the equality condition

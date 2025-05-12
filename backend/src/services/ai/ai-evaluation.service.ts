@@ -5,12 +5,11 @@ import {
   IAIEvaluation,
   ISolution,
   SolutionStatus,
-  EvaluationDecision,
-  HTTP_STATUS
+  EvaluationDecision 
 } from '../../models/interfaces';
 import { ApiError } from '../../utils/api.error';
 import { logger } from '../../utils/logger';
-import { AIAgentFactory } from './AIAgentFactory';
+import { HTTP_STATUS } from '../../constants';
 import { MongoSanitizer } from '../../utils/mongo.sanitize';
 import { v4 as uuidv4 } from 'uuid';
 import { EvaluationPipelineController, evaluationPipelineController } from './EvaluationPipelineController';

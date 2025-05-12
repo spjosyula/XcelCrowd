@@ -5,11 +5,9 @@ import {
   ISolution,
   SolutionStatus,
   ChallengeStatus,
-  HTTP_STATUS,
   UserRole,
   IUser,
   IChallenge,
-  ICompanyProfile
 } from '../models/interfaces';
 import { ApiError } from '../utils/api.error';
 import { logger } from '../utils/logger';

@@ -4,7 +4,8 @@ import { AIEvaluationService, aiEvaluationService } from '../services/ai/ai-eval
 import { catchAsync } from '../utils/catch.async';
 import { logger } from '../utils/logger';
 import { ApiError } from '../utils/api.error';
-import { HTTP_STATUS, UserRole } from '../models/interfaces';
+import { UserRole } from '../models/interfaces';
+import { HTTP_STATUS } from '../constants';
 import { AuthRequest } from '../types/request.types';
 import { MongoSanitizer } from '../utils/mongo.sanitize';
 
@@ -176,12 +177,19 @@ export class AIEvaluationController extends BaseController {
       // Performance tracking
       const startTime = Date.now();
 
+      // Validate groupBy value
+      const allowedGroupBy = ['day', 'week', 'month'];
+      const groupByValue =
+        typeof groupBy === 'string' && allowedGroupBy.includes(groupBy)
+          ? (groupBy as 'day' | 'week' | 'month')
+          : undefined;
+
       // Get analytics via service
       const analytics = await this.aiEvaluationService.getEvaluationAnalytics({
         startDate: startDate ? new Date(startDate as string) : undefined,
         endDate: endDate ? new Date(endDate as string) : undefined,
         challengeId: sanitizedChallengeId,
-        groupBy: groupBy as string,
+        groupBy: groupByValue,
         limit: limit ? parseInt(limit as string, 10) : undefined
       });
 

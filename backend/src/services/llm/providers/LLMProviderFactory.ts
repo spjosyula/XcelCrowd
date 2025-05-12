@@ -7,7 +7,7 @@ import { OpenAIProvider } from './OpenAIProvider';
 import { AnthropicProvider } from './AnthropicProvider';
 import { AzureOpenAIProvider } from './AzureOpenAIProvider';
 import { ApiError } from '../../../utils/api.error';
-import { HTTP_STATUS } from '../../../models/interfaces';
+import { HTTP_STATUS } from '../../../constants';
 
 /**
  * Factory for creating and managing LLM provider instances

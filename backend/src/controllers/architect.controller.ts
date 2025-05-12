@@ -1,6 +1,6 @@
 import { Response, NextFunction } from 'express';
 import { architectService, ArchitectService } from '../services/architect.service';
-import { ChallengeStatus, HTTP_STATUS, UserRole, SolutionStatus } from '../models/interfaces';
+import { ChallengeStatus, UserRole, SolutionStatus } from '../models/interfaces';
 import { BaseController } from './BaseController';
 import { AuthRequest } from '../types/request.types';
 import { catchAsync } from '../utils/catch.async';
@@ -8,6 +8,7 @@ import { logger } from '../utils/logger';
 import { ApiError } from '../utils/api.error';
 import { Types } from 'mongoose';
 import { dashboardService } from '../services/dashboard.service';
+import { HTTP_STATUS } from '../constants';
 
 
 /********

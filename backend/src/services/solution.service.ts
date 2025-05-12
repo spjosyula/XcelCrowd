@@ -5,22 +5,21 @@ import StudentProfile from '../models/StudentProfile';
 import { profileService } from './profile.service';
 import { PipelineStage } from 'mongoose';
 import {
-  HTTP_STATUS,
   SolutionStatus,
   ChallengeStatus,
   ChallengeVisibility,
   UserRole,
   ISolution,
-  IStudentProfile,
   IChallenge,
   ChallengeDifficulty,
   EvaluationDecision
 } from '../models/interfaces';
 import { ApiError } from '../utils/api.error';
 import { logger } from '../utils/logger';
-import { executePaginatedQuery, PaginationOptions, PaginationResult } from '../utils/paginationUtils';
+import { PaginationOptions, PaginationResult } from '../utils/paginationUtils';
 import { MongoSanitizer } from '../utils/mongo.sanitize';
 import { BaseService } from './BaseService';
+import { HTTP_STATUS } from '../constants';
 
 
 /**

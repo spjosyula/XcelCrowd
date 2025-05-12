@@ -4,7 +4,7 @@ import { setTimeout as setTimeoutPromise } from 'timers/promises';
 // Internal utilities
 import { MongoSanitizer } from '../utils/mongo.sanitize';
 import { ApiError } from '../utils/api.error';
-import { HTTP_STATUS } from '../models/interfaces';
+import { HTTP_STATUS } from '../constants';
 import { logger } from '../utils/logger';
 import { githubTokenManager } from '../config/github.token.manager';
 

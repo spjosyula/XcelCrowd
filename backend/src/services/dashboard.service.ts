@@ -6,11 +6,11 @@ import {
   SolutionStatus,
   ChallengeStatus,
   EvaluationDecision,
-  HTTP_STATUS
 } from '../models/interfaces';
 import { BaseService } from './BaseService';
 import { evaluationPipelineController } from './ai/EvaluationPipelineController';
 import { MongoSanitizer } from '../utils/mongo.sanitize';
+import { HTTP_STATUS } from '../constants';
 
 /**
  * Interface for architect dashboard metrics

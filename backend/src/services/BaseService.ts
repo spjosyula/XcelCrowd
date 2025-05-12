@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 import { ApiError } from '../utils/api.error';
 import { logger } from '../utils/logger';
-import { HTTP_STATUS } from '../models/interfaces';
+import { HTTP_STATUS } from '../constants';
 
 export class BaseService {
   /**

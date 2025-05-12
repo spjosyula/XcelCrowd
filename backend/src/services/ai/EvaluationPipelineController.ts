@@ -14,7 +14,6 @@ import { logger } from '../../utils/logger';
 import { v4 as uuidv4 } from 'uuid';
 import { Challenge } from '../../models';
 import { LLMService } from '../llm/LLMService';
-import { ILLMTextRequest } from '../llm/interfaces/ILLMRequest';
 import { Types } from 'mongoose';
 
 /**
@@ -78,7 +77,6 @@ export interface IPipelineResult {
 export class EvaluationPipelineController {
   private static instance: EvaluationPipelineController;
   private readonly agentFactory: AIAgentFactory;
-  private readonly llmService: LLMService;
   
   // Define the evaluation pipeline stages and their execution order
   private readonly PIPELINE_STAGES = [
@@ -93,7 +91,6 @@ export class EvaluationPipelineController {
    */
   private constructor() {
     this.agentFactory = AIAgentFactory.getInstance();
-    this.llmService = LLMService.getInstance();
   }
   
   /**
@@ -362,12 +359,12 @@ export class EvaluationPipelineController {
    * @returns Object with aggregated metrics
    */
   public getMetricsFromResults(results: IPipelineResult['results']): {
-    averageScore: number;
-    scores: Record<string, number>;
-    stagesCompleted: number;
-    totalStages: number;
-    highestScore: number;
-    lowestScore: number;
+    averageScore: number; // Average score across all stages
+    scores: Record<string, number>; // Individual scores from each stage
+    stagesCompleted: number; // Number of stages completed
+    totalStages: number; // Total number of stages in the pipeline
+    highestScore: number; // Highest score from any stage
+    lowestScore: number; // Lowest score from any stage
   } {
     const scores: Record<string, number> = {};
     let totalScore = 0;

@@ -102,7 +102,7 @@ export type ReviewSolutionInput = z.infer<typeof reviewSolutionSchema>;
  * These functions are kept for backward compatibility
  */
 import { Request, Response, NextFunction } from 'express';
-import { HTTP_STATUS } from '../models/interfaces';
+import { HTTP_STATUS } from '../constants';
 
 export const validateSubmitSolution = (req: Request, res: Response, next: NextFunction): void => {
   const result = submitSolutionSchema.safeParse(req.body);

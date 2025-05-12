@@ -16,7 +16,7 @@ import { LLMProviderFactory } from './providers/LLMProviderFactory';
 import { LLMCache } from './LLMCache';
 import { LLMMetricsCollector } from './monitoring/LLMMetricsCollector';
 import { ApiError } from '../../utils/api.error';
-import { HTTP_STATUS } from '../../models/interfaces';
+import { HTTP_STATUS } from '../../constants';
 import { setTimeout } from 'timers/promises';
 
 /**
