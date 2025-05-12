@@ -137,3 +137,6 @@ dist
 
 # Cursor AI rules
 .cursor/
+
+# Backend data directory
+backend/data/

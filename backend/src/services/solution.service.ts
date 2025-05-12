@@ -52,10 +52,10 @@ export class SolutionService extends BaseService {
     scheduler.on(Scheduler.EVENTS.CHALLENGE_DEADLINE_REACHED, async (challengeId: string) => {
       try {
         logger.info(`Solution service received challenge deadline event for ${challengeId}`);
-        
+
         // Process the solutions for architect review
         await this.processChallengeForArchitectReview(challengeId);
-        
+
         logger.info(`Completed processing solutions for architect review for challenge ${challengeId} via event handler`);
       } catch (error) {
         logger.error(`Error processing solutions for architect review for challenge ${challengeId} from event`, {
@@ -340,11 +340,11 @@ export class SolutionService extends BaseService {
       }
 
       // Check if submission URL is GitHub
-      if (!submissionUrl.includes('github.com')) {
+      const sanitizedUrl = MongoSanitizer.sanitizeGitHubUrl(submissionUrl);
+      if (!sanitizedUrl) {
         result.flags.maliciousUrls = true;
-        reasons.push('Submission URL must be a GitHub repository');
+        reasons.push('Submission URL must be a valid GitHub repository');
       }
-
       // Check for other URLs that aren't from trusted domains
       const trustedDomains = ['github.com', 'gitlab.com', 'bitbucket.org', 'npmjs.com',
         'stackoverflow.com', 'mozilla.org', 'microsoft.com', 'google.com',
@@ -361,16 +361,17 @@ export class SolutionService extends BaseService {
 
       // Check for suspicious patterns in description (code injection attempts, etc.)
       const suspiciousPatterns = [
-        /<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, // Script tags
-        /eval\s*\(/gi,                                        // eval()
-        /document\.cookie/gi,                                 // Cookie access
-        /document\.location\s*=/gi,                           // Location redirect
-        /exec\s*\(/gi,                                        // exec()
-        /__proto__/gi,                                        // Prototype pollution
-        /constructor\.constructor/gi,                         // Constructor hacks
-        /fetch\s*\(\s*["']https?:\/\//gi,                     // Fetch to external URL
-        /localStorage\./gi,                                   // localStorage access
-        /sessionStorage\./gi,                                 // sessionStorage access
+        // Improved regex that catches script tags even with malformed end tags or attributes
+        /<script[\s\S]*?(<\/script[\s\S]*?>|$)/gi,  // Script tags with any variation of closing tag
+        /eval\s*\(/gi,                             // eval()
+        /document\.cookie/gi,                      // Cookie access
+        /document\.location\s*=/gi,                // Location redirect
+        /exec\s*\(/gi,                             // exec()
+        /__proto__/gi,                             // Prototype pollution
+        /constructor\.constructor/gi,              // Constructor hacks
+        /fetch\s*\(\s*["']https?:\/\//gi,          // Fetch to external URL
+        /localStorage\./gi,                        // localStorage access
+        /sessionStorage\./gi,                      // sessionStorage access
       ];
 
       for (const pattern of suspiciousPatterns) {

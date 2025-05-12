@@ -140,23 +140,24 @@ export class LLMTokenManager {
    * Initialize encryption using app secret
    */
   private initializeEncryption(): void {
-    try {
-      // Generate a stable key from the JWT secret
-      const hash = crypto.createHash('sha256');
-      hash.update(config.jwtSecret);
-      this.encryptionKey = hash.digest().subarray(0, 32); // 256 bits (32 bytes)
-      
-      // Generate a stable IV (not secure for true encryption, but sufficient for obfuscation)
-      const ivHash = crypto.createHash('md5');
-      ivHash.update(config.jwtSecret);
-      this.encryptionIV = ivHash.digest(); // 128 bits (16 bytes)
-    } catch (error) {
-      logger.error('Failed to initialize encryption', {
-        error: error instanceof Error ? error.message : String(error)
-      });
-      throw new Error('Failed to initialize API key encryption');
-    }
+  try {
+    // Generate a stable key from the JWT secret
+    const hash = crypto.createHash('sha256');
+    hash.update(config.jwtSecret);
+    this.encryptionKey = hash.digest().subarray(0, 32); // 256 bits (32 bytes)
+    
+    // Generate a stable IV using a stronger algorithm (SHA-256 instead of MD5)
+    // Still maintains deterministic generation for decryption compatibility
+    const ivHash = crypto.createHash('sha256');
+    ivHash.update(config.jwtSecret + 'iv-salt');  // Add salt for additional security
+    this.encryptionIV = ivHash.digest().subarray(0, 16); // 128 bits (16 bytes) required for AES
+  } catch (error) {
+    logger.error('Failed to initialize encryption', {
+      error: error instanceof Error ? error.message : String(error)
+    });
+    throw new Error('Failed to initialize API key encryption');
   }
+}
 
   /**
    * Encrypt an API key
