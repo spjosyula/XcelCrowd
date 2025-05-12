@@ -3,125 +3,137 @@
 @tailwind utilities;
 
 @layer base {
-  * {
-    @apply border-border outline-ring/50;
+  :root {
+    /* Base radius */
+    --radius: 0.625rem;
+    
+    /* Base colors */
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    
+    /* Card colors */
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    
+    /* Popover colors */
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    
+    /* Primary color: Teal */
+    --primary: 180 54% 31%; /* Teal */
+    --primary-foreground: 0 0% 98.5%;
+    
+    /* Secondary color: Lavender Grey */
+    --secondary: 255 3% 80%;
+    --secondary-foreground: 222.2 84% 20.5%;
+    
+    /* Muted colors */
+    --muted: 0 0% 97%;
+    --muted-foreground: 215.4 16.3% 55.6%;
+    
+    /* Accent color: Royal Purple */
+    --accent: 290 66% 47%; /* Royal Purple */
+    --accent-foreground: 0 0% 98.5%;
+    
+    /* Destructive color */
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98.5%;
+    
+    /* Border and input colors */
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 180 54% 31%; /* Teal for ring */
+    
+    /* Chart colors */
+    --chart-1: 180 54% 31%; /* Teal */
+    --chart-2: 255 3% 80%; /* Lavender Grey */
+    --chart-3: 290 66% 47%; /* Royal Purple */
+    --chart-4: 220 18% 70%;
+    --chart-5: 70.08 18.8% 76.9%;
+    
+    /* Sidebar colors */
+    --sidebar: 0 0% 100%;
+    --sidebar-foreground: 222.2 84% 4.9%;
+    --sidebar-primary: 180 54% 31%; /* Teal */
+    --sidebar-primary-foreground: 0 0% 98.5%;
+    --sidebar-accent: 290 66% 47%; /* Royal Purple */
+    --sidebar-accent-foreground: 0 0% 98.5%;
+    --sidebar-border: 214.3 31.8% 91.4%;
+    --sidebar-ring: 180 54% 31%; /* Teal */
   }
+
+  .dark {
+    /* Base colors */
+    --background: 222.2 84% 4.9%;
+    --foreground: 0 0% 98.5%;
+    
+    /* Card colors */
+    --card: 222.2 84% 20.5%;
+    --card-foreground: 0 0% 98.5%;
+    
+    /* Popover colors */
+    --popover: 222.2 84% 20.5%;
+    --popover-foreground: 0 0% 98.5%;
+    
+    /* Primary color: Teal (lighter for dark mode) */
+    --primary: 180 54% 41%; /* Lighter Teal */
+    --primary-foreground: 222.2 84% 14.5%;
+    
+    /* Secondary color: Lavender Grey for dark mode */
+    --secondary: 255 3% 35%;
+    --secondary-foreground: 0 0% 98.5%;
+    
+    /* Muted colors */
+    --muted: 0 0% 26.9%;
+    --muted-foreground: 0 0% 70.8%;
+    
+    /* Accent color: Royal Purple for dark mode */
+    --accent: 290 66% 57%; /* Brighter Royal Purple */
+    --accent-foreground: 222.2 84% 14.5%;
+    
+    /* Destructive color */
+    --destructive: 0 84.2% 70.4%;
+    --destructive-foreground: 0 0% 98.5%;
+    
+    /* Border and input colors */
+    --border: 0 0% 100% / 10%;
+    --input: 0 0% 100% / 15%;
+    --ring: 180 54% 41%; /* Lighter Teal for dark mode */
+    
+    /* Chart colors */
+    --chart-1: 180 54% 41%; /* Lighter Teal */
+    --chart-2: 290 66% 57%; /* Brighter Royal Purple */
+    --chart-3: 255 3% 60%; /* Brighter Lavender Grey */
+    --chart-4: 303.9 26.5% 62.7%;
+    --chart-5: 16.439 24.6% 64.5%;
+    
+    /* Sidebar colors */
+    --sidebar: 222.2 84% 20.5%;
+    --sidebar-foreground: 0 0% 98.5%;
+    --sidebar-primary: 180 54% 41%; /* Lighter Teal */
+    --sidebar-primary-foreground: 0 0% 98.5%;
+    --sidebar-accent: 290 66% 57%; /* Brighter Royal Purple */
+    --sidebar-accent-foreground: 0 0% 98.5%;
+    --sidebar-border: 0 0% 100% / 10%;
+    --sidebar-ring: 180 54% 41%; /* Lighter Teal */
+  }
+
+  * {
+    @apply border-border;
+  }
+  
   body {
     @apply bg-background text-foreground;
   }
 }
 
-:root {
-  /* Base radius */
-  --radius: 0.625rem;
+/* Custom component styles */
+@layer components {
+  .btn-primary {
+    @apply bg-primary text-primary-foreground hover:bg-primary/90 inline-flex h-10 items-center justify-center rounded-md px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50;
+  }
   
-  /* Base colors */
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  
-  /* Card colors */
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  
-  /* Popover colors */
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  
-  /* Primary color: Teal */
-  --primary: oklch(0.6 0.15 180); /* Teal */
-  --primary-foreground: oklch(0.985 0 0);
-  
-  /* Secondary color: Lavender Grey */
-  --secondary: oklch(0.8 0.03 255);
-  --secondary-foreground: oklch(0.205 0 0);
-  
-  /* Muted colors */
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  
-  /* Accent color: Royal Purple */
-  --accent: oklch(0.55 0.2 290); /* Royal Purple */
-  --accent-foreground: oklch(0.985 0 0);
-  
-  /* Destructive color */
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.985 0 0);
-  
-  /* Border and input colors */
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.6 0.15 180); /* Teal for ring */
-  
-  /* Chart colors */
-  --chart-1: oklch(0.6 0.15 180); /* Teal */
-  --chart-2: oklch(0.8 0.03 255); /* Lavender Grey */
-  --chart-3: oklch(0.55 0.2 290); /* Royal Purple */
-  --chart-4: oklch(0.7 0.18 220);
-  --chart-5: oklch(0.769 0.188 70.08);
-  
-  /* Sidebar colors */
-  --sidebar: oklch(1 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.6 0.15 180); /* Teal */
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.55 0.2 290); /* Royal Purple */
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.6 0.15 180); /* Teal */
-}
-
-.dark {
-  /* Base colors */
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  
-  /* Card colors */
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  
-  /* Popover colors */
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  
-  /* Primary color: Teal (lighter for dark mode) */
-  --primary: oklch(0.7 0.15 180); /* Lighter Teal */
-  --primary-foreground: oklch(0.145 0 0);
-  
-  /* Secondary color: Lavender Grey for dark mode */
-  --secondary: oklch(0.35 0.03 255);
-  --secondary-foreground: oklch(0.985 0 0);
-  
-  /* Muted colors */
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  
-  /* Accent color: Royal Purple for dark mode */
-  --accent: oklch(0.65 0.2 290); /* Brighter Royal Purple */
-  --accent-foreground: oklch(0.145 0 0);
-  
-  /* Destructive color */
-  --destructive: oklch(0.704 0.191 22.216);
-  --destructive-foreground: oklch(0.985 0 0);
-  
-  /* Border and input colors */
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.7 0.15 180); /* Lighter Teal for dark mode */
-  
-  /* Chart colors */
-  --chart-1: oklch(0.7 0.15 180); /* Lighter Teal */
-  --chart-2: oklch(0.65 0.2 290); /* Brighter Royal Purple */
-  --chart-3: oklch(0.6 0.03 255); /* Brighter Lavender Grey */
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  
-  /* Sidebar colors */
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.7 0.15 180); /* Lighter Teal */
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.65 0.2 290); /* Brighter Royal Purple */
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.7 0.15 180); /* Lighter Teal */
+  .btn-royal {
+    @apply bg-royal text-white hover:bg-royal/90 inline-flex h-10 items-center justify-center rounded-md px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50;
+  }
 }
