@@ -294,6 +294,38 @@ export class AIEvaluationController extends BaseController {
       );
     }
   );
+
+  /**
+   * Process all solutions for a challenge
+   * @route POST /api/ai-evaluation/challenges/:challengeId/process
+   * @access Private - Admin or Architect only
+   */
+  public processChallengeEvaluations = catchAsync(
+    async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      // Verify authorization
+      this.verifyAuthorization(req, [UserRole.ADMIN, UserRole.ARCHITECT], 'processing challenge evaluations');
+
+      const { challengeId } = req.params;
+
+      // Validate ObjectId format
+      MongoSanitizer.validateObjectId(challengeId, 'challenge');
+
+      // Log the evaluation request
+      this.logAction('process-challenge-evaluations', req.user!.userId, {
+        challengeId,
+        requestedAt: new Date().toISOString()
+      });
+
+      // Process all challenge solutions
+      const result = await this.aiEvaluationService.processEvaluationsForChallenge(challengeId);
+
+      this.sendSuccess(
+        res,
+        result,
+        `Successfully processed ${result.processed} out of ${result.totalSolutions} solutions`
+      );
+    }
+  );
 }
 
 // Export singleton instance for use in routes

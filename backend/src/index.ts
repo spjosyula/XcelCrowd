@@ -8,6 +8,7 @@ import cookieParser from 'cookie-parser';
 import rateLimit from 'express-rate-limit';
 import mongoSanitize from 'express-mongo-sanitize';
 import hpp from 'hpp';
+import mongoose from 'mongoose';
 import { connectDB } from './utils/database';
 import routes from './routes';
 import { errorHandler, notFoundHandler } from './middlewares/errorhandler.middleware';
@@ -17,6 +18,7 @@ import { xssProtection, configureCSP, enhancedCsrfProtection } from './middlewar
 import { authenticate, conditionalAuthenticate } from './middlewares/auth.middleware';
 import swaggerUi from 'swagger-ui-express';
 import { setupSwagger } from './config/swagger.config';
+import { scheduler } from './utils/scheduler';
 
 
 // Validate environment variables before starting
@@ -131,6 +133,12 @@ const startServer = async () => {
         logger.error('Database connection failed initially, retry mechanism activated:', { error: errorMessage });
         // Don't crash the server - let the retry mechanism handle it
       });
+      
+      // Start scheduled jobs after server has started
+      if (config.env !== 'test') { // Don't run scheduler in test environment
+        scheduler.startJobs();
+        logger.info('Scheduled jobs started');
+      }
     });
 
     // Improved error handling for the server
@@ -171,13 +179,28 @@ const startServer = async () => {
       }
     });
 
-    // Graceful shutdown for SIGTERM
-    process.on('SIGTERM', () => {
-      logger.info('SIGTERM received. Shutting down gracefully');
-      server.close(() => {
-        logger.info('Process terminated');
+    // Add shutdown handler for scheduler
+    const originalShutdown = (signal: string): Promise<void> => {
+      logger.info(`${signal} received, gracefully shutting down...`);
+      
+      // Stop scheduled jobs
+      scheduler.stopJobs();
+      logger.info('Scheduled jobs stopped');
+      
+      // Allow pending operations to complete (within timeout)
+      return mongoose.connection.close(false).then(() => {
+        logger.info('MongoDB connections closed successfully');
+        process.exit(0);
+      }).catch((error) => {
+        logger.error('Error during graceful shutdown:', error);
+        process.exit(1);
       });
-    });
+    };
+
+    // Handle termination signals
+    process.on('SIGTERM', () => originalShutdown('SIGTERM'));
+    process.on('SIGINT', () => originalShutdown('SIGINT'));
+    process.on('SIGUSR2', () => originalShutdown('SIGUSR2')); // For Nodemon restarts
 
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : String(error);

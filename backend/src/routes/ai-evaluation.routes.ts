@@ -70,4 +70,16 @@ router.post(
   aiEvaluationController.retryEvaluation
 );
 
+/**
+ * @route   POST /api/ai-evaluation/challenges/:challengeId/process
+ * @desc    Process all solutions for a challenge
+ * @access  Private - Admin or Architect only
+ */
+router.post(
+  '/challenges/:challengeId/process',
+  authenticate,
+  authorizePattern(AuthPattern.ARCHITECT_OR_ADMIN),
+  aiEvaluationController.processChallengeEvaluations
+);
+
 export default router;

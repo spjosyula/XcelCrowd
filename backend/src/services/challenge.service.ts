@@ -2054,4 +2054,5 @@ export class ChallengeService extends BaseService {
   }
 }
 
+// Export singleton instance for use in scheduler
 export const challengeService = new ChallengeService();

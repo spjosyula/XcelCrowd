@@ -1843,76 +1843,42 @@ export class SolutionService extends BaseService {
         solutionCount: solutions.length
       });
 
-      // Process solutions in parallel using Promise.all
-      // Limit concurrency to avoid overwhelming the AI services
-      const batchSize = 5; // Process 5 solutions at a time
-      const results = {
-        totalSolutions: solutions.length,
-        processedSolutions: 0,
-        failedSolutions: 0,
-        processingTimeMs: 0
-      };
-
-      // Process in batches
-      for (let i = 0; i < solutions.length; i += batchSize) {
-        const batch = solutions.slice(i, i + batchSize);
-
-        // Process batch in parallel
-        const batchResults = await Promise.allSettled(
-          batch.map((solution: ISolution) =>
-            this.submitSolutionForAIEvaluationAndArchitectReview(
-              (solution._id as mongoose.Types.ObjectId | string).toString()
-            )
-          )
-        );
-
-        // Count successes and failures
-        batchResults.forEach(result => {
-          if (result.status === 'fulfilled') {
-            results.processedSolutions++;
-          } else {
-            results.failedSolutions++;
-            logger.error(`Failed to process solution in batch`, {
-              challengeId,
-              error: result.reason instanceof Error ? result.reason.message : String(result.reason)
-            });
-          }
-        });
-
-        // Log batch progress
-        logger.info(`Processed batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(solutions.length / batchSize)}`, {
-          challengeId,
-          batchSize: batch.length,
-          successCount: batchResults.filter(r => r.status === 'fulfilled').length,
-          failureCount: batchResults.filter(r => r.status === 'rejected').length
-        });
+      // If no solutions found, return early
+      if (solutions.length === 0) {
+        return {
+          totalSolutions: 0,
+          processedSolutions: 0,
+          failedSolutions: 0,
+          processingTimeMs: 0
+        };
       }
 
-      // Update processing time
-      results.processingTimeMs = Date.now() - startTime;
+      // Import the AI evaluation service
+      const { aiEvaluationService } = await import('./ai/ai-evaluation.service');
 
+      // Use the AI evaluation service to process all solutions more efficiently
+      const evaluationResult = await aiEvaluationService.processEvaluationsForChallenge(sanitizedChallengeId);
+      
       // Update challenge status to CLOSED if all solutions are processed
-      if (results.processedSolutions > 0) {
-        const challenge = await Challenge.findById(sanitizedChallengeId);
-        if (challenge && challenge.status !== ChallengeStatus.CLOSED) {
-          challenge.status = ChallengeStatus.CLOSED;
-          await challenge.save();
+      const challenge = await Challenge.findById(sanitizedChallengeId);
+      if (challenge && challenge.status !== ChallengeStatus.CLOSED) {
+        challenge.status = ChallengeStatus.CLOSED;
+        await challenge.save();
 
-          logger.info(`Challenge status updated to CLOSED`, { challengeId });
-        }
+        logger.info(`Challenge status updated to CLOSED`, { challengeId });
       }
 
-      logger.info(`Challenge processing completed`, {
-        challengeId,
-        ...results
-      });
-
-      return results;
+      // Format and return the results
+      return {
+        totalSolutions: evaluationResult.totalSolutions,
+        processedSolutions: evaluationResult.processed,
+        failedSolutions: evaluationResult.failed,
+        processingTimeMs: Date.now() - startTime
+      };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      logger.error(`Error processing challenge solutions`, {
+      logger.error(`Error in processing challenge solutions for architect review`, {
         challengeId,
-        error: errorMessage,
+        error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined
       });
 
@@ -1920,7 +1886,7 @@ export class SolutionService extends BaseService {
 
       throw new ApiError(
         HTTP_STATUS.INTERNAL_SERVER_ERROR,
-        `Error processing challenge solutions: ${errorMessage}`,
+        `Error processing challenge solutions: ${error instanceof Error ? error.message : String(error)}`,
         true,
         'CHALLENGE_PROCESSING_ERROR'
       );

@@ -1076,6 +1076,122 @@ export class AIEvaluationService extends BaseService {
       );
     }
   }
+
+  /**
+   * Process AI evaluations for all solutions of a specific challenge
+   * Used when a challenge deadline is reached
+   * @param challengeId - The ID of the challenge
+   * @returns Processing results
+   */
+  public async processEvaluationsForChallenge(
+    challengeId: string
+  ): Promise<{
+    totalSolutions: number;
+    processed: number;
+    failed: number;
+    processingTimeMs: number;
+  }> {
+    const startTime = Date.now();
+    const traceId = uuidv4();
+    
+    try {
+      logger.info(`Processing AI evaluations for all solutions of challenge ${challengeId}`, {
+        challengeId,
+        traceId
+      });
+      
+      // Validate challengeId
+      const sanitizedChallengeId = MongoSanitizer.validateObjectId(challengeId, 'challenge');
+      
+      // Find all submitted solutions for this challenge
+      const solutions = await Solution.find({
+        challenge: sanitizedChallengeId,
+        status: SolutionStatus.SUBMITTED
+      }).lean();
+      
+      logger.info(`Found ${solutions.length} solutions for challenge ${challengeId}`, {
+        challengeId,
+        count: solutions.length,
+        traceId
+      });
+      
+      // Extract solution IDs directly from MongoDB query results
+      // Cast solutions to any to avoid TypeScript errors with _id access
+      const solutionIds = solutions.map((solution: any) => solution._id.toString());
+      
+      // Process solutions in parallel with batch control
+      const batchSize = 5; // Process 5 solutions at a time to avoid overwhelming the system
+      const results = {
+        totalSolutions: solutions.length,
+        processed: 0,
+        failed: 0,
+        processingTimeMs: 0
+      };
+      
+      // Process in batches
+      for (let i = 0; i < solutionIds.length; i += batchSize) {
+        const batchIds = solutionIds.slice(i, i + batchSize);
+        
+        // Process batch in parallel
+        const batchResults = await Promise.allSettled(
+          batchIds.map(solutionId => this.startEvaluation(solutionId))
+        );
+        
+        // Count successes and failures
+        batchResults.forEach(result => {
+          if (result.status === 'fulfilled') {
+            results.processed++;
+          } else {
+            results.failed++;
+            logger.error(`Failed to start evaluation for solution in batch`, {
+              challengeId,
+              error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+              traceId
+            });
+          }
+        });
+        
+        // Log batch progress
+        logger.info(`Processed batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(solutionIds.length / batchSize)}`, {
+          challengeId,
+          batchSize: batchIds.length,
+          successCount: batchResults.filter(r => r.status === 'fulfilled').length,
+          failureCount: batchResults.filter(r => r.status === 'rejected').length,
+          traceId
+        });
+      }
+      
+      // Calculate total processing time
+      results.processingTimeMs = Date.now() - startTime;
+      
+      logger.info(`Completed processing AI evaluations for challenge ${challengeId}`, {
+        ...results,
+        traceId
+      });
+      
+      return results;
+    } catch (error) {
+      const processingTime = Date.now() - startTime;
+      
+      logger.error(`Error processing AI evaluations for challenge ${challengeId}`, {
+        challengeId,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        processingTimeMs: processingTime,
+        traceId
+      });
+      
+      if (error instanceof ApiError) throw error;
+      
+      throw new ApiError(
+        HTTP_STATUS.INTERNAL_SERVER_ERROR,
+        `Failed to process evaluations for challenge: ${error instanceof Error ? error.message : String(error)}`,
+        true,
+        'CHALLENGE_EVALUATION_ERROR'
+      );
+    }
+  }
 }
 
+// Export singleton instance for use
 export const aiEvaluationService = new AIEvaluationService();
