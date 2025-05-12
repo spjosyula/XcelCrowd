@@ -24,7 +24,7 @@ export const xssProtection = (req: Request, res: Response, next: NextFunction) =
       }
       
       // Recursively sanitize nested objects
-      req.body = MongoSanitizer.sanitizeObjectId(req.body);
+      req.body = MongoSanitizer.sanitizeObjectIdRecursive(req.body);
     }
     
     next();

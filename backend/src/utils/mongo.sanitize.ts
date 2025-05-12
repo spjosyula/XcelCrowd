@@ -1697,4 +1697,54 @@ export class MongoSanitizer {
     // Deep clone objects to prevent reference manipulation
     return JSON.parse(JSON.stringify(value));
   }
+
+  /**
+   * Recursively sanitizes MongoDB ObjectIds in nested objects and arrays
+   * @param data - The data to sanitize (can be an object or array)
+   * @returns The sanitized data with valid ObjectIds
+   */
+  static sanitizeObjectIdRecursive(data: any): any {
+    // Base case: null or undefined
+    if (data === null || data === undefined) {
+      return data;
+    }
+
+    // Handle ObjectId strings
+    if (typeof data === 'string' && Types.ObjectId.isValid(data) && data.length === 24) {
+      try {
+        return new Types.ObjectId(data);
+      } catch (error) {
+        // If conversion fails, return the original string
+        return data;
+      }
+    }
+
+    // Handle primitive types (not objects)
+    if (typeof data !== 'object') {
+      return data;
+    }
+
+    // Already an ObjectId instance
+    if (data instanceof Types.ObjectId) {
+      return data;
+    }
+
+    // Handle arrays - recursively sanitize each element
+    if (Array.isArray(data)) {
+      return data.map(item => this.sanitizeObjectIdRecursive(item));
+    }
+
+    // Handle Date objects
+    if (data instanceof Date) {
+      return data;
+    }
+
+    // Handle regular objects - recursively sanitize all properties
+    const sanitized: Record<string, any> = {};
+    for (const [key, value] of Object.entries(data)) {
+      sanitized[key] = this.sanitizeObjectIdRecursive(value);
+    }
+    
+    return sanitized;
+  }
 }

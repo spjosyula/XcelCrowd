@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
 import { Toaster } from "react-hot-toast";
 import "./globals.css";
+import { AuthProvider } from "@/context/AuthContext";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -15,8 +16,8 @@ export const viewport: Viewport = {
 };
 
 export const metadata: Metadata = {
-  title: "XcelCrowd",
-  description: "A professional student-only networking and crowdsourcing platform",
+  title: "XcelCrowd | Connecting Students with Industry Challenges",
+  description: "A platform for university students to solve real-world industry challenges",
   applicationName: "XcelCrowd",
   authors: [{ name: "XcelCrowd Team" }],
   keywords: ["students", "networking", "crowdsourcing", "professional", "collaboration"],
@@ -31,7 +32,9 @@ export default function RootLayout({
   return (
     <html lang="en" className={`${inter.variable} font-sans`}>
       <body className="min-h-screen bg-background font-sans antialiased text-foreground">
-        {children}
+        <AuthProvider>
+          {children}
+        </AuthProvider>
         <Toaster position="top-right" />
       </body>
     </html>

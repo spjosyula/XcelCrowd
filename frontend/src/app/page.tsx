@@ -21,10 +21,10 @@ export default function Home() {
           </p>
           <div className="flex flex-col sm:flex-row gap-4">
             <Button asChild size="lg" className="text-base">
-              <Link href="/auth/student">Join as Student</Link>
+              <Link href="/student/register">Join as Student</Link>
             </Button>
             <Button asChild variant="royal" size="lg" className="text-base">
-              <Link href="/auth/company">Join as Company</Link>
+              <Link href="/company/register">Join as Company</Link>
             </Button>
           </div>
         </Container>
