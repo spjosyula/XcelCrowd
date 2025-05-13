@@ -5,7 +5,8 @@ import { useRouter } from 'next/navigation';
 import authService, { 
   AuthResponse, 
   LoginCredentials, 
-  StudentRegistrationData 
+  StudentRegistrationData,
+  CompanyRegistrationData
 } from '@/services/auth.service';
 
 interface User {
@@ -17,10 +18,12 @@ interface User {
 
 interface UserProfile {
   _id: string;
-  firstName: string;
-  lastName: string;
+  firstName?: string;
+  lastName?: string;
   university?: string;
-  [key: string]: any;
+  companyName?: string;
+  numberOfEmployees?: number;
+  [key: string]: unknown;
 }
 
 interface AuthContextType {
@@ -29,7 +32,9 @@ interface AuthContextType {
   isLoading: boolean;
   isAuthenticated: boolean;
   loginStudent: (credentials: LoginCredentials) => Promise<void>;
+  loginCompany: (credentials: LoginCredentials) => Promise<void>;
   registerStudent: (data: StudentRegistrationData) => Promise<void>;
+  registerCompany: (data: CompanyRegistrationData) => Promise<void>;
   logout: () => Promise<void>;
   error: string | null;
   clearError: () => void;
@@ -93,6 +98,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const loginCompany = async (credentials: LoginCredentials) => {
+    setIsLoading(true);
+    setError(null);
+    
+    try {
+      const response = await authService.loginCompany(credentials);
+      handleAuthSuccess(response);
+      router.push('/dashboard/company'); // Redirect to company dashboard after login
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Login failed');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const registerStudent = async (data: StudentRegistrationData) => {
     setIsLoading(true);
     setError(null);
@@ -100,7 +120,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       const response = await authService.registerStudent(data);
       handleAuthSuccess(response);
-      router.push('/student/verify-email'); // Keep redirecting to email verification
+      router.push('/dashboard/student'); // Keep redirecting to email verification
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Registration failed');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const registerCompany = async (data: CompanyRegistrationData) => {
+    setIsLoading(true);
+    setError(null);
+    
+    try {
+      const response = await authService.registerCompany(data);
+      handleAuthSuccess(response);
+      router.push('/dashboard/company'); // Redirect to company dashboard
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Registration failed');
     } finally {
@@ -151,7 +186,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     isLoading,
     isAuthenticated: !!user,
     loginStudent,
+    loginCompany,
     registerStudent,
+    registerCompany,
     logout,
     error,
     clearError,

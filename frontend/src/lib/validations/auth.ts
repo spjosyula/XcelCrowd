@@ -47,6 +47,41 @@ export const studentRegistrationSchema = z.object({
   path: ["confirmPassword"],
 });
 
+// Company registration form schema
+export const companyRegistrationSchema = z.object({
+  // User data
+  email: z
+    .string()
+    .email('Please enter a valid business email')
+    .min(1, 'Email is required'),
+  password: z
+    .string()
+    .min(8, 'Password must be at least 8 characters')
+    .regex(
+      /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/,
+      'Password must contain at least one uppercase letter, one lowercase letter, one number, and one special character'
+    ),
+  // Profile data
+  companyName: z
+    .string()
+    .min(1, 'Company name is required')
+    .max(100, 'Company name must be less than 100 characters'),
+  numberOfEmployees: z
+    .number()
+    .min(1, 'Number of employees must be at least 1')
+    .or(z.string().regex(/^\d+$/).transform(Number))
+    .refine((val) => !isNaN(val) && val > 0, {
+      message: "Number of employees must be a positive number",
+    }),
+  // Confirmation field (not sent to backend)
+  confirmPassword: z
+    .string()
+    .min(1, 'Please confirm your password'),
+}).refine((data) => data.password === data.confirmPassword, {
+  message: "Passwords don't match",
+  path: ["confirmPassword"],
+});
+
 // Email verification schema
 export const verifyEmailSchema = z.object({
   email: z

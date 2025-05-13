@@ -139,4 +139,4 @@ dist
 .cursor/
 
 # Backend data directory
-backend/data/*
+backend/data/

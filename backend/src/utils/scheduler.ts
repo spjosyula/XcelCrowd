@@ -403,7 +403,7 @@ export class Scheduler extends EventEmitter {
         });
       }
     }, {
-    
+      timezone: 'UTC'
     });
 
     this.jobs.set(name, job);
