@@ -9,6 +9,8 @@ import { AuthRequest } from '../types/request.types';
 import { HTTP_STATUS } from '../constants';
 import { MongoSanitizer } from '../utils/mongo.sanitize';
 import { logger } from '../utils/logger';
+import { Types } from 'mongoose';
+import Challenge from '../models/Challenge';
 
 /**
  * Controller for challenge-related operations
@@ -65,43 +67,122 @@ export class ChallengeController extends BaseController {
     async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
       const { id } = req.params;
 
-      // Verify user has appropriate role
-      this.verifyAuthorization(req, [UserRole.COMPANY, UserRole.ADMIN], `publish a challenge`);
+      try {
+        // Enhanced logging for debugging
+        logger.debug('[publishChallenge] Starting challenge publication process', {
+          challengeId: id,
+          userId: req.user?.userId,
+          userRole: req.user?.role,
+          user: req.user
+        });
 
-      // Get company profile ID for authorization
-      const profileId = req.user!.role === UserRole.COMPANY ?
-        await this.getUserProfileId(req, UserRole.COMPANY) : req.user!.userId;
+        // Verify user has appropriate role
+        this.verifyAuthorization(req, [UserRole.COMPANY, UserRole.ADMIN], `publish a challenge`);
 
-      // Authorize challenge owner using service
-      const challenge = await this.challengeService.authorizeChallengeOwner(
-        profileId,
-        req.user!.role as UserRole,
-        id,
-        'publish'
-      );
+        // Get company profile ID for authorization
+        let profileId: string;
+        
+        if (req.user!.role === UserRole.COMPANY) {
+          // For company users, get their company profile
+          try {
+            logger.debug('[publishChallenge] Fetching company profile for authorization', {
+              userId: req.user!.userId
+            });
+            
+            const companyProfile = await this.profileService.getCompanyProfileByUserId(req.user!.userId);
+            
+            logger.debug('[publishChallenge] Company profile retrieved', {
+              userId: req.user!.userId,
+              companyProfileId: companyProfile._id,
+              companyName: companyProfile.companyName
+            });
+            
+            profileId = (companyProfile._id as Types.ObjectId).toString();
+          } catch (profileError) {
+            logger.error('[publishChallenge] Failed to get company profile', {
+              userId: req.user!.userId,
+              error: profileError instanceof Error ? profileError.message : String(profileError),
+              stack: profileError instanceof Error ? profileError.stack : undefined
+            });
+            throw ApiError.forbidden(
+              'Unable to verify company profile',
+              'COMPANY_PROFILE_NOT_FOUND'
+            );
+          }
+        } else {
+          // For admin users
+          profileId = req.user!.userId;
+        }
 
-      // Verify business rules
-      if (challenge.status !== ChallengeStatus.DRAFT) {
-        throw ApiError.badRequest(
-          `Cannot publish a challenge that is ${challenge.status}. Only draft challenges can be published.`,
-          'INVALID_CHALLENGE_STATUS'
+        logger.debug('[publishChallenge] Profile ID resolved for authorization', {
+          profileId,
+          userRole: req.user!.role
+        });
+
+        // Authorize challenge owner using service
+        logger.debug('[publishChallenge] Authorizing challenge ownership', {
+          challengeId: id,
+          profileId,
+          userRole: req.user!.role
+        });
+        
+        const challenge = await this.challengeService.authorizeChallengeOwner(
+          profileId,
+          req.user!.role as UserRole,
+          id,
+          'publish'
         );
+        
+        logger.debug('[publishChallenge] Challenge ownership verified', {
+          challengeId: id,
+          challengeCompanyId: typeof challenge.company === 'object' ? challenge.company._id : challenge.company
+        });
+
+        // Verify business rules
+        if (challenge.status !== ChallengeStatus.DRAFT) {
+          throw ApiError.badRequest(
+            `Cannot publish a challenge that is ${challenge.status}. Only draft challenges can be published.`,
+            'INVALID_CHALLENGE_STATUS'
+          );
+        }
+
+        // Get company profile ID
+        const companyId = req.user!.role === UserRole.COMPANY ?
+          profileId : challenge.company.toString();
+
+        // Publish via service
+        logger.debug('[publishChallenge] Publishing challenge', {
+          challengeId: id,
+          companyId
+        });
+        
+        const updatedChallenge = await this.challengeService.publishChallenge(id, companyId);
+
+        logger.debug('[publishChallenge] Challenge successfully published', {
+          challengeId: id,
+          status: updatedChallenge.status
+        });
+
+        this.logAction('challenge-publish', req.user!.userId, {
+          challengeId: id,
+          previousStatus: challenge.status,
+          newStatus: ChallengeStatus.ACTIVE
+        });
+
+        this.sendSuccess(res, updatedChallenge, 'Challenge published successfully');
+      } catch (error) {
+        // Log the error with context
+        logger.error('[publishChallenge] Failed to publish challenge', {
+          challengeId: id,
+          userId: req.user?.userId,
+          userRole: req.user?.role,
+          error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined
+        });
+        
+        // Let the middleware handle the error
+        next(error);
       }
-
-      // Get company profile ID
-      const companyId = req.user!.role === UserRole.COMPANY ?
-        profileId : challenge.company.toString();
-
-      // Publish via service
-      const updatedChallenge = await this.challengeService.publishChallenge(id, companyId);
-
-      this.logAction('challenge-publish', req.user!.userId, {
-        challengeId: id,
-        previousStatus: challenge.status,
-        newStatus: ChallengeStatus.ACTIVE
-      });
-
-      this.sendSuccess(res, updatedChallenge, 'Challenge published successfully');
     }
   );
 
@@ -532,6 +613,138 @@ export class ChallengeController extends BaseController {
         `Successfully processed ${result.processedSolutions} out of ${result.totalSolutions} solutions for architect review`,
         HTTP_STATUS.OK
       );
+    }
+  );
+
+  /**
+   * Diagnostic endpoint to check challenge ownership
+   * NOT FOR PRODUCTION USE - Debugging only
+   */
+  checkChallengeOwnership = catchAsync(
+    async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      try {
+        const { id } = req.params;
+        
+        logger.info('[checkChallengeOwnership] Diagnostic check started', {
+          challengeId: id,
+          userId: req.user?.userId,
+          userRole: req.user?.role
+        });
+        
+        // Verify user role
+        if (req.user?.role !== UserRole.COMPANY && req.user?.role !== UserRole.ADMIN) {
+          throw ApiError.forbidden('Only company and admin users can perform this check');
+        }
+        
+        // Get challenge to check
+        const challenge = await Challenge.findById(id);
+        if (!challenge) {
+          throw ApiError.notFound('Challenge not found');
+        }
+        
+        // Get company profile information
+        let profileId = null;
+        let companyProfile = null;
+        
+        if (req.user?.role === UserRole.COMPANY) {
+          try {
+            companyProfile = await this.profileService.getCompanyProfileByUserId(req.user.userId);
+            profileId = (companyProfile._id as Types.ObjectId).toString();
+          } catch (error) {
+            logger.error('[checkChallengeOwnership] Error fetching company profile', {
+              userId: req.user.userId,
+              error: error instanceof Error ? error.message : String(error)
+            });
+          }
+        }
+        
+        const results = {
+          challenge: {
+            id: (challenge._id as Types.ObjectId).toString(),
+            companyId: (challenge.company as Types.ObjectId).toString(),
+            status: challenge.status
+          },
+          user: {
+            id: req.user?.userId,
+            role: req.user?.role,
+            profileId: profileId
+          },
+          ownership: {
+            isAdmin: req.user?.role === UserRole.ADMIN,
+            isOwner: profileId && challenge.company.toString() === profileId,
+            directQueryMatch: false
+          }
+        };
+        
+        // Double-check with direct query
+        if (profileId) {
+          const directMatch = await Challenge.countDocuments({
+            _id: id,
+            company: profileId
+          });
+          
+          results.ownership.directQueryMatch = directMatch > 0;
+        }
+        
+        logger.info('[checkChallengeOwnership] Diagnostic results', results);
+        
+        this.sendSuccess(res, results, 'Challenge ownership diagnostic results');
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+
+  /**
+   * Diagnostic endpoint to list all challenges owned by a company
+   * NOT FOR PRODUCTION USE - Debugging only
+   */
+  listOwnedChallenges = catchAsync(
+    async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+      try {
+        // Verify user has company role
+        this.verifyAuthorization(req, [UserRole.COMPANY], 'view owned challenges');
+        
+        logger.info('[listOwnedChallenges] Diagnostic request', {
+          userId: req.user!.userId
+        });
+        
+        // Get company profile
+        const companyProfile = await this.profileService.getCompanyProfileByUserId(req.user!.userId);
+        const companyId = (companyProfile._id as Types.ObjectId).toString();
+        
+        // Find all challenges owned by this company
+        const challenges = await Challenge.find({ company: companyId }).lean();
+        
+        // Format response
+        const result = {
+          diagnostic: true,
+          companyId,
+          userId: req.user!.userId,
+          totalChallenges: challenges.length,
+          challenges: challenges.map(c => ({
+            id: (c._id as Types.ObjectId).toString(),
+            title: c.title,
+            status: c.status,
+            companyId: typeof c.company === 'object' ? 
+              ((c.company as any)._id?.toString() || 'n/a') : 
+              (c.company as Types.ObjectId)?.toString() || 'n/a'
+          }))
+        };
+        
+        logger.info('[listOwnedChallenges] Found challenges', {
+          userId: req.user!.userId,
+          count: challenges.length
+        });
+        
+        this.sendSuccess(res, result, 'Retrieved owned challenges for diagnostic purposes');
+      } catch (error) {
+        logger.error('[listOwnedChallenges] Error', {
+          userId: req.user?.userId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        next(error);
+      }
     }
   );
 }

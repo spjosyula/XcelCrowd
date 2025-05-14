@@ -50,7 +50,7 @@ export default function ForgotPasswordPage() {
             <CheckCircle2 className="h-16 w-16 text-green-500 mb-4" />
             <h3 className="text-xl font-medium text-center mb-2">Reset Link Sent</h3>
             <p className="text-center text-muted-foreground mb-6">
-              We've sent a password reset link to your email address. Please check your inbox and follow the instructions.
+              We&#39;ve sent a password reset link to your email address. Please check your inbox and follow the instructions.
             </p>
             <Button className="w-full" asChild>
               <Link href="/student/login">

@@ -1,11 +1,45 @@
-import { Router } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import { challengeController } from '../controllers/challenge.controller';
 import { authenticate, authorizePattern } from '../middlewares/auth.middleware';
 import { validateRequest } from '../middlewares/validation.middleware';
 import { createChallengeSchemaWithRefinements, updateChallengeSchema } from '../validations/challenge.validation';
 import { AuthPattern } from '../types/authorization.types';
+import { catchAsync } from '../utils/catch.async';
+import { profileService } from '../services/profile.service';
+import Challenge from '../models/Challenge';
+import { Types } from 'mongoose';
+import { AuthRequest } from '../types/request.types';
+import { ApiError } from '../utils/api.error';
+import { HTTP_STATUS } from '../constants';
+import { UserRole } from '../models/interfaces';
 
 const router = Router();
+
+/**
+ * @route   GET /api/challenges/diagnostic/list-owned
+ * @desc    For debugging only - List all challenges owned by the authenticated company user
+ * @access  Private - Companies only
+ */
+router.get(
+  '/diagnostic/list-owned',
+  authenticate,
+  authorizePattern(AuthPattern.COMPANY_ONLY),
+  challengeController.listOwnedChallenges
+);
+
+/**
+ * @route   GET /api/challenges/:id
+ * @desc    Get a challenge by ID
+ * @access  Private - Authentication required with dynamic permission checks
+ * @swagger
+ * /challenges/{id}:
+ */
+router.get(
+  '/:id',
+  authenticate,
+  authorizePattern(AuthPattern.AUTHENTICATED),
+  challengeController.getChallengeById
+);
 
 /**
  * @route   POST /api/challenges
@@ -48,20 +82,6 @@ router.get(
   authenticate,
   authorizePattern(AuthPattern.COMPANY_ONLY),
   challengeController.getCompanyChallenges
-);
-
-/**
- * @route   GET /api/challenges/:id
- * @desc    Get a challenge by ID
- * @access  Private - Authentication required with dynamic permission checks
- * @swagger
- * /challenges/{id}:
- */
-router.get(
-  '/:id',
-  authenticate,
-  authorizePattern(AuthPattern.AUTHENTICATED),
-  challengeController.getChallengeById
 );
 
 /**
@@ -159,6 +179,17 @@ router.post(
   authenticate,
   authorizePattern(AuthPattern.COMPANY_OR_ADMIN),
   challengeController.processChallengeForReview
+);
+
+/**
+ * @route   GET /api/challenges/:id/ownership-check
+ * @desc    Diagnostic route for checking challenge ownership - FOR DEBUGGING ONLY
+ * @access  Private - Company/Admin
+ */
+router.get(
+  '/:id/ownership-check',
+  authenticate,
+  challengeController.checkChallengeOwnership
 );
 
 export default router;

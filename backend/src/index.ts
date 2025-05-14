@@ -41,7 +41,7 @@ const corsOptions = {
   origin: config.isProduction ? config.frontendUrl : 'http://localhost:3000',
   credentials: true,
   optionsSuccessStatus: 200,
-  methods: ['GET', 'PUT', 'POST', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'PUT', 'POST', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token']
 };
 app.use(cors(corsOptions));

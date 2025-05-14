@@ -96,16 +96,40 @@ export class AuthorizationService {
 
       if (role === UserRole.COMPANY) {
         const { default: CompanyProfile } = await import('../models/CompanyProfile');
-        const profile = await CompanyProfile.findOne({ user: req.user!.userId });
-        profileId = profile?._id?.toString() || null;
+        const profile = await CompanyProfile.findOne({ user: req.user!.userId }).lean();
+        if (profile && profile._id) {
+          profileId = profile._id.toString();
+          logger.debug('[getUserProfileId] Found company profile', { 
+            userId: req.user!.userId, 
+            profileId 
+          });
+        }
       }
       else if (role === UserRole.STUDENT) {
         const { default: StudentProfile } = await import('../models/StudentProfile');
-        const profile = await StudentProfile.findOne({ user: req.user!.userId });
-        profileId = profile?._id?.toString() || null;
+        const profile = await StudentProfile.findOne({ user: req.user!.userId }).lean();
+        if (profile && profile._id) {
+          profileId = profile._id.toString();
+          logger.debug('[getUserProfileId] Found student profile', { 
+            userId: req.user!.userId, 
+            profileId 
+          });
+        }
+      }
+      else if (role === UserRole.ARCHITECT) {
+        const { default: ArchitectProfile } = await import('../models/ArchitectProfile');
+        const profile = await ArchitectProfile.findOne({ user: req.user!.userId }).lean();
+        if (profile && profile._id) {
+          profileId = profile._id.toString();
+          logger.debug('[getUserProfileId] Found architect profile', { 
+            userId: req.user!.userId, 
+            profileId 
+          });
+        }
       }
 
       if (!profileId) {
+        logger.warn(`[getUserProfileId] Profile not found for user ${req.user!.userId} with role ${role}`);
         throw new ApiError(HTTP_STATUS.FORBIDDEN, 'Profile not found', true, 'PROFILE_NOT_FOUND');
       }
 
@@ -114,7 +138,7 @@ export class AuthorizationService {
 
       return profileId;
     } catch (error) {
-      logger.error(`Error retrieving profile: ${error instanceof Error ? error.message : String(error)}`);
+      logger.error(`[getUserProfileId] Error retrieving profile for user ${req.user!.userId} with role ${role}: ${error instanceof Error ? error.message : String(error)}`);
       if (error instanceof ApiError) throw error;
       throw new ApiError(HTTP_STATUS.FORBIDDEN, 'Profile not found', true, 'PROFILE_NOT_FOUND');
     }

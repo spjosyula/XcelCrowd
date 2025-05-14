@@ -1,4 +1,4 @@
-import axios from 'axios';
+import axios, { AxiosError } from 'axios';
 
 // Create axios instance with default configuration
 const api = axios.create({
@@ -39,16 +39,79 @@ api.interceptors.response.use(
   (response) => {
     return response;
   },
-  async (error) => {
-    const originalRequest = error.config;
+  async (error: AxiosError) => {
+    // Safe access to request configuration
+    const url = error.config?.url || 'Unknown URL';
+    const method = error.config?.method?.toUpperCase() || 'Unknown Method';
+    
+    try {
+      // Create a safe error log object with proper null checks
+      const errorLog: Record<string, any> = {
+        url,
+        method,
+        message: error.message || 'Unknown error'
+      };
 
-    // Handle 401 Unauthorized - can be extended for token refresh
-    if (error.response?.status === 401 && !originalRequest._retry) {
-      // You can implement token refresh here if needed
-      // For now, just redirect to login
+      // Only add response data if it exists and is accessible
+      if (error.response) {
+        errorLog.status = error.response.status;
+        errorLog.statusText = error.response.statusText || 'No status text';
+        
+        // Safely add response data
+        if (error.response.data) {
+          // Check if data is an empty object
+          const isEmptyObject = typeof error.response.data === 'object' && 
+                               Object.keys(error.response.data).length === 0;
+          
+          if (isEmptyObject) {
+            errorLog.data = { 
+              note: 'Empty response object received from server',
+              raw: JSON.stringify(error.response.data)
+            };
+          } else {
+            errorLog.data = typeof error.response.data === 'object' 
+              ? error.response.data 
+              : { rawData: String(error.response.data) };
+          }
+        } else {
+          errorLog.data = { note: 'No response data received' };
+        }
+        
+        // Add request details to help with debugging
+        if (error.config) {
+          errorLog.requestDetails = {
+            headers: error.config.headers,
+            params: error.config.params,
+            timeout: error.config.timeout,
+            withCredentials: error.config.withCredentials
+          };
+        }
+      } else if (error.request) {
+        // The request was made but no response was received
+        errorLog.requestSent = true;
+        errorLog.responseReceived = false;
+        errorLog.networkError = true;
+        errorLog.timeoutError = error.code === 'ECONNABORTED';
+      }
+
+      console.error(`API Error (${method} ${url}):`, errorLog);
+    } catch (loggingError) {
+      // Fallback if error logging itself fails
+      console.error('Failed to log API error details:', loggingError);
+      console.error('Original error:', error.message);
+    }
+
+    // Handle authentication errors
+    if (error.response?.status === 401 || error.response?.status === 403) {
       if (typeof window !== 'undefined') {
         localStorage.removeItem('csrfToken');
-        window.location.href = '/student/login';
+        
+        // Determine appropriate redirect based on URL
+        if (url.includes('/challenges')) {
+          window.location.href = '/login';
+        } else {
+          window.location.href = '/login';
+        }
       }
     }
 

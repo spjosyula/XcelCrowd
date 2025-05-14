@@ -1,10 +1,11 @@
 import { ReactNode, useEffect } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
+import { UserRole } from '@/types/user';
 
 interface RouteGuardProps {
   children: ReactNode;
-  roles?: string[];
+  roles?: UserRole[];
 }
 
 /**
@@ -27,18 +28,20 @@ export function RouteGuard({ children, roles }: RouteGuardProps) {
       if (typeof window !== 'undefined') {
         sessionStorage.setItem('redirectAfterLogin', pathname);
       }
-      router.replace('/student/login');
+      router.replace('/login');
       return;
     }
 
     // If roles are specified, check if user has required role
     if (roles && roles.length > 0 && user) {
-      if (!roles.includes(user.role)) {
+      if (!roles.includes(user.role as UserRole)) {
         // User doesn't have required role, redirect to appropriate page
-        if (user.role === 'student') {
+        if (user.role === UserRole.STUDENT) {
           router.replace('/dashboard/student');
-        } else if (user.role === 'company') {
-          router.replace('/company/dashboard');
+        } else if (user.role === UserRole.COMPANY) {
+          router.replace('/dashboard/company');
+        } else if (user.role === UserRole.ARCHITECT) {
+          router.replace('/dashboard/architect');
         } else {
           router.replace('/');
         }
@@ -61,7 +64,7 @@ export function RouteGuard({ children, roles }: RouteGuardProps) {
   }
 
   // If roles are specified and user doesn't have any required role, show nothing
-  if (roles && roles.length > 0 && user && !roles.includes(user.role)) {
+  if (roles && roles.length > 0 && user && !roles.includes(user.role as UserRole)) {
     return null;
   }
 

@@ -535,7 +535,8 @@ export class ChallengeService extends BaseService {
           });
         } else {
           // Otherwise, use deadline check
-          baseQuery.deadline = { $lt: new Date() };
+          // Fix: Only include challenges with a deadline that has passed
+          baseQuery.deadline = { $ne: null, $lt: new Date() };
         }
 
         // Find challenges to update
@@ -548,14 +549,27 @@ export class ChallengeService extends BaseService {
         // Update submission deadline expired challenges
         for (const challenge of expiredSubmissionChallenges) {
           try {
-            challenge.status = ChallengeStatus.CLOSED;
-            await challenge.save({ session });
-
-            results.updated++;
-            results.details.push({
-              id: (challenge as IChallenge & { _id: Types.ObjectId })._id.toString(),
-              status: ChallengeStatus.CLOSED
-            });
+            // Only update if autoCloseOnDeadline is not explicitly set to false
+            if (challenge.autoCloseOnDeadline !== false) {
+              // Extra safety check to confirm deadline has actually passed
+              if (!challenge.deadline || challenge.deadline > new Date()) {
+                logger.warn(`[updateChallengeStatuses] Challenge ${challenge._id} has no deadline or future deadline, skipping status update`);
+                continue;
+              }
+              
+              challenge.status = ChallengeStatus.CLOSED;
+              await challenge.save({ session });
+  
+              results.updated++;
+              results.details.push({
+                id: (challenge as IChallenge & { _id: Types.ObjectId })._id.toString(),
+                status: ChallengeStatus.CLOSED
+              });
+              
+              logger.info(`[updateChallengeStatuses] Challenge ${challenge._id} automatically closed due to deadline passed`);
+            } else {
+              logger.info(`[updateChallengeStatuses] Challenge ${challenge._id} deadline passed but auto-close is disabled`);
+            }
           } catch (err) {
             results.errors++;
             logger.error('[updateChallengeStatuses] Failed to update challenge status', {
@@ -635,6 +649,10 @@ export class ChallengeService extends BaseService {
         }).session(session);
 
         if (!challenge) {
+          logger.warn('[publishChallenge] Challenge not found or company not authorized', {
+            challengeId: sanitizedChallengeId,
+            companyId: sanitizedCompanyId
+          });
           throw ApiError.notFound(
             'Challenge not found or you do not have permission to publish it',
             'CHALLENGE_NOT_FOUND_OR_FORBIDDEN'
@@ -642,18 +660,54 @@ export class ChallengeService extends BaseService {
         }
 
         if (challenge.status !== ChallengeStatus.DRAFT) {
+          logger.warn('[publishChallenge] Attempt to publish non-draft challenge', {
+            challengeId: sanitizedChallengeId,
+            currentStatus: challenge.status
+          });
           throw ApiError.badRequest(
-            'Only draft challenges can be published',
+            `Only draft challenges can be published. Current status: ${challenge.status}`,
             'CHALLENGE_NOT_DRAFT'
           );
         }
 
-        // Validate required fields before publishing
-        this.validateChallengeForPublication(challenge);
+        try {
+          // Validate required fields before publishing
+          this.validateChallengeForPublication(challenge);
+        } catch (validationError) {
+          logger.error('[publishChallenge] Validation failed for challenge publication', {
+            challengeId: sanitizedChallengeId,
+            error: validationError instanceof Error ? validationError.message : String(validationError)
+          });
+          
+          // Re-throw as BadRequest with the validation error message
+          if (validationError instanceof ApiError) {
+            throw validationError;
+          } else {
+            throw ApiError.badRequest(
+              `Challenge validation failed: ${validationError instanceof Error ? validationError.message : 'Unknown validation error'}`, 
+              'CHALLENGE_VALIDATION_FAILED'
+            );
+          }
+        }
 
+        // Update status and timestamps
         challenge.status = ChallengeStatus.ACTIVE;
         challenge.publishedAt = new Date();
-        await challenge.save({ session });
+        
+        // Save with robust error handling
+        try {
+          await challenge.save({ session });
+        } catch (saveError) {
+          logger.error('[publishChallenge] Failed to save challenge after status update', {
+            challengeId: sanitizedChallengeId,
+            error: saveError instanceof Error ? saveError.message : String(saveError),
+            stack: saveError instanceof Error ? saveError.stack : undefined
+          });
+          throw ApiError.internal(
+            'Failed to update challenge status due to database error',
+            'CHALLENGE_UPDATE_ERROR'
+          );
+        }
 
         logger.info('[publishChallenge] Challenge published successfully', {
           challengeId: sanitizedChallengeId,
@@ -662,17 +716,25 @@ export class ChallengeService extends BaseService {
 
         return challenge;
       });
-    } catch (error) {
-      logger.error('[publishChallenge] Failed to publish challenge', {
-        error: error instanceof Error ? error.message : String(error),
-        stack: error instanceof Error ? error.stack : undefined,
+    } catch (error: unknown) {
+      // Log with enhanced error context
+      const errorContext = {
         challengeId,
-        companyId
-      });
+        companyId,
+        errorType: error instanceof Error ? error.constructor.name : typeof error,
+        errorCode: error instanceof ApiError ? error.errorCode : undefined,
+        message: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      };
+      
+      logger.error('[publishChallenge] Failed to publish challenge', errorContext);
 
+      // Rethrow ApiErrors as-is
       if (error instanceof ApiError) throw error;
+      
+      // Wrap other errors in ApiError with appropriate status
       throw ApiError.internal(
-        'Failed to publish challenge',
+        'Failed to publish challenge due to an unexpected error',
         'CHALLENGE_PUBLISH_ERROR'
       );
     }
@@ -1504,7 +1566,10 @@ export class ChallengeService extends BaseService {
 
       // Use $eq operator to prevent NoSQL injection
       const challenge = await Challenge.findOne({ _id: { $eq: sanitizedChallengeId } })
-        .populate('company', '-user -__v');
+        .populate('company')
+        .lean() as unknown as IChallenge & { 
+          company: Types.ObjectId | { _id: Types.ObjectId, [key: string]: any } 
+        };
 
       if (!challenge) {
         throw ApiError.notFound('Challenge not found', 'CHALLENGE_NOT_FOUND');
@@ -1544,7 +1609,9 @@ export class ChallengeService extends BaseService {
       }
 
       // Create a mutable copy of the challenge
-      const challengeObj = challenge.toObject();
+      const challengeObj = typeof challenge.toObject === 'function' 
+        ? challenge.toObject() 
+        : { ...challenge };
 
       // For anonymous challenges, hide company data for non-owners and non-admins
       if (challenge.visibility === 'anonymous' &&
@@ -1888,14 +1955,18 @@ export class ChallengeService extends BaseService {
         }
       } else {
         // Apply default filter if status not specified
-        queryFilters.status = { $eq: ChallengeStatus.ACTIVE };
+        queryFilters.status = { $in: [ChallengeStatus.ACTIVE, ChallengeStatus.CLOSED, ChallengeStatus.COMPLETED] };
       }
 
       // Apply visibility filters based on user role with proper sanitization
       if (userRole === UserRole.STUDENT || !userRole) {
         // Initial visibility filter
-        const visibilityFilter: Record<string, any> = { visibility: { $eq: 'public' } };
-
+        const visibilityConditions = [];
+        
+        // For anonymous users or basic students, only show public and anonymous challenges
+        visibilityConditions.push({ visibility: { $eq: 'public' } });
+        visibilityConditions.push({ visibility: { $eq: 'anonymous' } });
+        
         // For authenticated students, also include private challenges they can access
         if (userRole === UserRole.STUDENT && sanitizedUserId && studentProfile?.university) {
           // Sanitize university name
@@ -1904,19 +1975,15 @@ export class ChallengeService extends BaseService {
             maxLength: 200,
             required: false
           });
-
-          visibilityFilter.$or = [
-            { visibility: { $eq: 'public' } },
-            { visibility: { $eq: 'anonymous' } },
-            {
-              visibility: { $eq: 'private' },
-              allowedInstitutions: { $in: [university] }
-            }
-          ];
+          
+          visibilityConditions.push({
+            visibility: { $eq: 'private' },
+            allowedInstitutions: { $in: [university] }
+          });
         }
-
-        queryFilters.$and = queryFilters.$and || [];
-        queryFilters.$and.push(visibilityFilter);
+        
+        // Use $or for visibility conditions
+        queryFilters.$or = visibilityConditions;
       }
 
       // Sanitize pagination parameters
@@ -2074,19 +2141,44 @@ export class ChallengeService extends BaseService {
         { errorStatus: 400, additionalContext: `During ${action} authorization` }
       );
 
-      // Get the challenge
-      const challenge = await this.getChallengeById(sanitizedChallengeId);
+      logger.debug('[authorizeChallengeOwner] Validated IDs for authorization', {
+        challengeId: sanitizedChallengeId,
+        userIdOrProfileId: sanitizedUserIdOrProfileId,
+        userRole,
+        action
+      });
+
+      // Get the challenge with fully populated company field
+      const challenge = await Challenge.findById(sanitizedChallengeId)
+        .populate('company')
+        .lean() as unknown as IChallenge & { 
+          company: Types.ObjectId | { _id: Types.ObjectId, [key: string]: any } 
+        };
 
       if (!challenge) {
+        logger.warn('[authorizeChallengeOwner] Challenge not found', {
+          challengeId: sanitizedChallengeId
+        });
         throw ApiError.notFound(
           `Challenge not found with id: ${sanitizedChallengeId}`,
           'CHALLENGE_NOT_FOUND'
         );
       }
 
+      logger.debug('[authorizeChallengeOwner] Challenge found', {
+        challengeId: sanitizedChallengeId,
+        status: challenge.status,
+        companyId: typeof challenge.company === 'object' ? challenge.company._id : challenge.company
+      });
+
       // Verify ownership (except for admin)
       if (userRole !== UserRole.ADMIN) {
         if (userRole !== UserRole.COMPANY) {
+          logger.warn('[authorizeChallengeOwner] User role not allowed', {
+            userRole,
+            requiresRoles: 'COMPANY or ADMIN',
+            action
+          });
           throw ApiError.forbidden(
             `Only companies and admins can ${action} challenges`,
             'INSUFFICIENT_ROLE'
@@ -2094,12 +2186,52 @@ export class ChallengeService extends BaseService {
         }
 
         // For company users, verify they own the challenge
-        // Use strict comparison after sanitization
-        if (challenge.company.toString() !== sanitizedUserIdOrProfileId) {
-          throw ApiError.forbidden(
-            `You do not have permission to ${action} this challenge`,
-            'NOT_CHALLENGE_OWNER'
-          );
+        let challengeCompanyId: string;
+        
+        // Handle both populated and non-populated company fields
+        if (typeof challenge.company === 'object' && challenge.company !== null && '_id' in challenge.company) {
+          challengeCompanyId = challenge.company._id.toString();
+        } else {
+          challengeCompanyId = (challenge.company as Types.ObjectId).toString();
+        }
+        
+        const sanitizedProfileId = sanitizedUserIdOrProfileId;
+
+        // Debug log the comparison
+        logger.debug('[authorizeChallengeOwner] Comparing ownership IDs', {
+          challengeCompanyId,
+          requestingProfileId: sanitizedProfileId,
+          doIdsMatch: challengeCompanyId === sanitizedProfileId,
+          companyIdType: typeof challenge.company,
+          action
+        });
+
+        // Ensure we're comparing strings, not ObjectIDs
+        if (challengeCompanyId !== sanitizedProfileId) {
+          logger.warn('[authorizeChallengeOwner] Company profile does not match challenge owner', {
+            challengeCompanyId,
+            requestingProfileId: sanitizedProfileId,
+            action
+          });
+          
+          // Double-check with direct query to verify ownership
+          const ownershipCheck = await Challenge.countDocuments({
+            _id: sanitizedChallengeId,
+            company: sanitizedProfileId
+          });
+          
+          logger.debug('[authorizeChallengeOwner] Secondary ownership check result', {
+            ownershipCheckCount: ownershipCheck,
+            challengeId: sanitizedChallengeId,
+            profileId: sanitizedProfileId
+          });
+          
+          if (ownershipCheck === 0) {
+            throw ApiError.forbidden(
+              `You do not have permission to ${action} this challenge`,
+              'NOT_CHALLENGE_OWNER'
+            );
+          }
         }
       }
 

@@ -2,15 +2,7 @@ import * as React from "react";
 import { cn } from "@/lib/utils";
 
 const Input = React.forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTMLInputElement>>(
-  ({ className, type, value, defaultValue, ...props }, ref) => {
-    // Determine if this should be a controlled component based on if value is explicitly provided
-    const isControlled = value !== undefined;
-    
-    // Ensure we're consistently using either controlled or uncontrolled approach
-    const inputProps = isControlled 
-      ? { value } // Controlled input
-      : { defaultValue }; // Uncontrolled input
-    
+  ({ className, type, ...props }, ref) => {
     return (
       <input
         type={type}
@@ -19,7 +11,6 @@ const Input = React.forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTMLI
           className
         )}
         ref={ref}
-        {...inputProps}
         {...props}
       />
     );

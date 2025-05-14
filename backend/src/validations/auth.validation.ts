@@ -42,19 +42,7 @@ export const authValidation = {
     // Company email verification
     verifyCompanyEmail: z.object({
       email: z.string()
-        .email('Invalid email format')
-        .refine(
-          (email) => {
-            // Reject common personal email domains
-            const personalDomains = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'aol.com', 'icloud.com'];
-            const domain = email.split('@')[1].toLowerCase();
-            // This is a basic check - in production, consider using an email validation service
-            return !personalDomains.includes(domain);
-          },
-          {
-            message: 'Please use a business email address, not a personal email service'
-          }
-        ),
+        .email('Invalid email format'),
       otp: z.string()
         .length(6, 'Verification code must be 6 digits')
         .regex(/^\d+$/, 'Verification code must contain only digits')

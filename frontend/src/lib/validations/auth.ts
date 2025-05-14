@@ -4,7 +4,7 @@ import { z } from 'zod';
 export const loginSchema = z.object({
   email: z
     .string()
-    .email('Please enter a valid university email')
+    .email('Please enter a valid email')
     .min(1, 'Email is required'),
   password: z
     .string()
@@ -52,7 +52,7 @@ export const companyRegistrationSchema = z.object({
   // User data
   email: z
     .string()
-    .email('Please enter a valid business email')
+    .email('Please enter a valid email')
     .min(1, 'Email is required'),
   password: z
     .string()

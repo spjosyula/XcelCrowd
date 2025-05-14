@@ -16,12 +16,12 @@ export const viewport: Viewport = {
 };
 
 export const metadata: Metadata = {
-  title: "XcelCrowd | Connecting Students with Industry Challenges",
-  description: "A platform for university students to solve real-world industry challenges",
-  applicationName: "XcelCrowd",
-  authors: [{ name: "XcelCrowd Team" }],
-  keywords: ["students", "networking", "crowdsourcing", "professional", "collaboration"],
-  robots: "index, follow",
+  title: "XcelCrowd - Connecting Students with Real-World Challenges",
+  description:
+    "XcelCrowd is a platform that connects university students with real-world industry challenges to help bridge the gap between academia and industry",
+  icons: {
+    icon: "/favicon.ico",
+  },
 };
 
 export default function RootLayout({

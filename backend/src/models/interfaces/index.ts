@@ -166,6 +166,7 @@ export interface IChallenge extends Document, ITimestamps {
   visibility: ChallengeVisibility;  // Controls who can see the challenge
   allowedInstitutions?: string[];   // List of institutions that can see private challenges
   isCompanyVisible: boolean;        // Whether company identity is shown (false for anonymous)
+  autoCloseOnDeadline?: boolean;    // Controls whether the challenge should be automatically closed when deadline is reached
   
   // Methods
   isDeadlinePassed(): boolean;  // Checks if the challenge deadline has passed

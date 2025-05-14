@@ -51,11 +51,11 @@ export default function CompanyLoginPage() {
               name="email"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Business Email</FormLabel>
+                  <FormLabel>Email</FormLabel>
                   <FormControl>
                     <Input 
                       type="email" 
-                      placeholder="contact@company.com" 
+                      placeholder="contact@example.com" 
                       {...field} 
                       disabled={isLoading} 
                     />
@@ -108,7 +108,7 @@ export default function CompanyLoginPage() {
 
         <div className="mt-4 text-center">
           <p className="text-sm text-gray-500">
-            Don't have an account?{' '}
+            Don&#39;t have an account?{' '}
             <Link href="/company/register" className="text-primary font-medium hover:underline">
               Sign Up
             </Link>

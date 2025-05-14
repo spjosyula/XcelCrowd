@@ -4,20 +4,19 @@ import { useEffect } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import RouteGuard from '@/components/auth/RouteGuard';
 import { useRouter } from 'next/navigation';
+import { UserRole } from '@/types/user';
 
 export default function DashboardPage() {
   const { user, profile, logout } = useAuth();
   const router = useRouter();
 
-  // Handle email verification reminder if email is not verified
+  // Remove email verification redirect
   useEffect(() => {
-    if (user && !user.isEmailVerified) {
-      // Redirect to email verification page or show banner
-    }
-  }, [user, router]);
+    // No redirection needed, we'll show the verification status but won't redirect
+  }, [user]);
 
   return (
-    <RouteGuard roles={['student']}>
+    <RouteGuard roles={[UserRole.STUDENT]}>
       <div className="container py-8">
         <div className="flex flex-col gap-8">
           <div className="flex items-center justify-between">
@@ -40,12 +39,9 @@ export default function DashboardPage() {
                   <p><span className="font-medium">Email Verified:</span> {user.isEmailVerified ? 'Yes' : 'No'}</p>
                   {!user.isEmailVerified && (
                     <div className="mt-4">
-                      <a 
-                        href="/verify-email" 
-                        className="text-primary hover:underline"
-                      >
-                        Verify your email to access all features
-                      </a>
+                      <p className="text-amber-600">
+                        Your email is not verified. This may limit some features.
+                      </p>
                     </div>
                   )}
                 </div>

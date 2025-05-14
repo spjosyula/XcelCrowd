@@ -2084,10 +2084,15 @@ export class SolutionService extends BaseService {
       // Update challenge status to CLOSED if all solutions are processed
       const challenge = await Challenge.findById(sanitizedChallengeId);
       if (challenge && challenge.status !== ChallengeStatus.CLOSED) {
-        challenge.status = ChallengeStatus.CLOSED;
-        await challenge.save();
-
-        logger.info(`Challenge status updated to CLOSED`, { challengeId });
+        // Only auto-close if the setting allows it
+        if (challenge.autoCloseOnDeadline !== false) {
+          challenge.status = ChallengeStatus.CLOSED;
+          await challenge.save();
+          
+          logger.info(`Challenge status updated to CLOSED`, { challengeId });
+        } else {
+          logger.info(`Challenge has auto-close disabled, keeping status as ${challenge.status}`, { challengeId });
+        }
       }
 
       // Format and return the results

@@ -106,7 +106,11 @@ const challengeSchema = new Schema<IChallenge>({
       return this.visibility !== ChallengeVisibility.ANONYMOUS;
     }
   },
-  
+  autoCloseOnDeadline: {
+    type: Boolean,
+    default: true,
+    description: 'Flag to control whether challenge should be automatically closed when deadline is reached'
+  }
 }, {
   timestamps: true,
   versionKey: false,

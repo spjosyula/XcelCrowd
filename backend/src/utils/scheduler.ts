@@ -239,6 +239,27 @@ export class Scheduler extends EventEmitter {
         return;
       }
       
+      // Check if deadline is set and has actually passed
+      if (!challenge.deadline) {
+        logger.warn(`Challenge ${challengeId} has no deadline set, skipping status update`);
+        return;
+      }
+      
+      const now = new Date();
+      const deadline = new Date(challenge.deadline);
+      if (deadline > now) {
+        logger.warn(`Challenge ${challengeId} deadline (${deadline.toISOString()}) has not yet passed, current time: ${now.toISOString()}`);
+        return;
+      }
+      
+      // Check if auto-close is enabled for this challenge
+      if (challenge.autoCloseOnDeadline === false) {
+        logger.info(`Challenge ${challengeId} has auto-close disabled, skipping status update`);
+        // Emit a notification event that could be used to notify company or perform other actions
+        // but don't close the challenge
+        return;
+      }
+      
       // Update challenge status
       challenge.status = ChallengeStatus.CLOSED;
       await challenge.save();
@@ -427,6 +448,7 @@ export class Scheduler extends EventEmitter {
       const deadlineChallenges = await Challenge.find({
         status: ChallengeStatus.ACTIVE,
         deadline: {
+          $ne: null,      // Ensure deadline is set
           $gte: oneHourAgo,
           $lte: now
         }
@@ -441,6 +463,18 @@ export class Scheduler extends EventEmitter {
         // Skip if we already have a timer for this challenge (it will be processed by the timer)
         if (this.challengeDeadlineTimers.has(challengeId)) {
           logger.info(`Challenge ${challengeId} already has a deadline timer, skipping duplicate processing`);
+          continue;
+        }
+        
+        // Extra validation to ensure deadline has truly passed
+        if (!challenge.deadline || new Date(challenge.deadline) > now) {
+          logger.warn(`Challenge ${challengeId} has no deadline or future deadline, skipping in hourly check`);
+          continue;
+        }
+        
+        // Only emit if auto-close on deadline is not explicitly disabled
+        if (challenge.autoCloseOnDeadline === false) {
+          logger.info(`Challenge ${challengeId} has auto-close disabled, skipping status update in hourly check`);
           continue;
         }
         
